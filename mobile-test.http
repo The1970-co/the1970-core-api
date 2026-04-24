@@ -1,0 +1,122 @@
+@token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImNtbzI2cXh4bTAwMDA1dGw2MGF2cG5vaGEiLCJzdWIiOiJjbW8yNnF4eG0wMDAwNXRsNjBhdnBub2hhIiwiY29kZSI6IkFETUlOIiwicm9sZSI6ImFkbWluIiwiYnJhbmNoSWQiOm51bGwsImJyYW5jaE5hbWUiOiJBbGwiLCJuYW1lIjoiQWRtaW4iLCJ0eXBlIjoic3RhZmYiLCJpYXQiOjE3NzY5MjMwNTgsImV4cCI6MTc3NzUyNzg1OH0.FG5ITNuOiR17Nv4QoPVYa8OC9VwQEp6AVnCAQqiDK9Y
+
+###
+
+### LOGIN
+POST http://localhost:3001/auth/login
+Content-Type: application/json
+
+{
+  "username": "ADMIN",
+  "password": "123456"
+}
+
+###
+
+### DASHBOARD
+GET http://localhost:3001/mobile/dashboard/summary
+Authorization: Bearer {{token}}
+###
+
+### BRANCH BREAKDOWN
+GET http://localhost:3001/mobile/dashboard/branch-breakdown
+Authorization: Bearer {{token}}
+
+###
+
+### ALERTS
+GET http://localhost:3001/mobile/dashboard/alerts
+Authorization: Bearer {{token}}
+
+###
+
+### SALES 7 DAYS
+GET http://localhost:3001/mobile/reports/sales
+Authorization: Bearer {{token}}
+
+###
+
+### SALES 30 DAYS
+GET http://localhost:3001/mobile/reports/sales?days=30
+Authorization: Bearer {{token}}
+
+###
+
+### INVENTORY REPORT
+GET http://localhost:3001/mobile/reports/inventory
+Authorization: Bearer {{token}}
+
+###
+
+### ORDERS SUMMARY
+GET http://localhost:3001/mobile/operations/orders-summary
+Authorization: Bearer {{token}}
+
+###
+
+### MOBILE HOME
+GET http://localhost:3001/mobile/home
+Authorization: Bearer {{token}}
+
+###
+
+### PROFILE
+GET http://localhost:3001/mobile/profile
+Authorization: Bearer {{token}}
+
+###
+
+### TOP PRODUCTS
+GET http://localhost:3001/mobile/reports/top-products
+Authorization: Bearer {{token}}
+
+###
+
+### INVENTORY SEARCH
+GET http://localhost:3001/mobile/operations/inventory-search?q=oxford
+Authorization: Bearer {{token}}
+###
+GET http://localhost:3001/mobile/operations/inventory-grouped?q=oxford
+Authorization: Bearer {{token}}
+
+###
+
+### TRANSFER SUGGESTIONS
+GET http://localhost:3001/mobile/operations/transfer-suggestions
+Authorization: Bearer {{token}}
+
+###
+
+### LOW STOCK DETAIL
+GET http://localhost:3001/mobile/reports/low-stock-detail
+Authorization: Bearer {{token}}
+
+###
+
+### OUT OF STOCK DETAIL
+GET http://localhost:3001/mobile/reports/out-of-stock-detail
+Authorization: Bearer {{token}}
+
+###
+
+### MOBILE BRANCHES
+GET http://localhost:3001/mobile/branches
+Authorization: Bearer {{token}}
+
+###
+
+### MOBILE ORDERS
+GET http://localhost:3001/mobile/operations/orders
+Authorization: Bearer {{token}}
+
+###
+
+### MOBILE ORDERS NEW
+GET http://localhost:3001/mobile/operations/orders?status=NEW
+Authorization: Bearer {{token}}
+
+###
+
+### MOBILE ORDER DETAIL
+GET http://localhost:3001/mobile/operations/orders/cmo8fk9cv0008mvl6i066il9h
+Authorization: Bearer {{token}}

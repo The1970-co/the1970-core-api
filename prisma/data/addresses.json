@@ -1,0 +1,49 @@
+{
+  "provinces": [
+    { "code": "HN", "name": "Hà Nội", "sortOrder": 1 },
+    { "code": "HCM", "name": "Hồ Chí Minh", "sortOrder": 2 },
+    { "code": "HP", "name": "Hải Phòng", "sortOrder": 3 },
+    { "code": "DN", "name": "Đà Nẵng", "sortOrder": 4 },
+    { "code": "CT", "name": "Cần Thơ", "sortOrder": 5 },
+    { "code": "AG", "name": "An Giang", "sortOrder": 6 },
+    { "code": "BG", "name": "Bắc Giang", "sortOrder": 7 },
+    { "code": "BK", "name": "Bắc Kạn", "sortOrder": 8 },
+    { "code": "BL", "name": "Bạc Liêu", "sortOrder": 9 },
+    { "code": "BN", "name": "Bắc Ninh", "sortOrder": 10 },
+    { "code": "BT", "name": "Bến Tre", "sortOrder": 11 },
+    { "code": "BD", "name": "Bình Dương", "sortOrder": 12 },
+    { "code": "BP", "name": "Bình Phước", "sortOrder": 13 },
+    { "code": "BTH", "name": "Bình Thuận", "sortOrder": 14 },
+    { "code": "CM", "name": "Cà Mau", "sortOrder": 15 },
+    { "code": "CB", "name": "Cao Bằng", "sortOrder": 16 },
+    { "code": "DL", "name": "Đắk Lắk", "sortOrder": 17 },
+    { "code": "DNO", "name": "Đắk Nông", "sortOrder": 18 },
+    { "code": "DB", "name": "Điện Biên", "sortOrder": 19 },
+    { "code": "DNA", "name": "Đồng Nai", "sortOrder": 20 },
+    { "code": "DT", "name": "Đồng Tháp", "sortOrder": 21 },
+    { "code": "GL", "name": "Gia Lai", "sortOrder": 22 },
+    { "code": "HG", "name": "Hà Giang", "sortOrder": 23 },
+    { "code": "HNA", "name": "Hà Nam", "sortOrder": 24 },
+    { "code": "HT", "name": "Hà Tĩnh", "sortOrder": 25 },
+    { "code": "HD", "name": "Hải Dương", "sortOrder": 26 },
+    { "code": "HGI", "name": "Hậu Giang", "sortOrder": 27 },
+    { "code": "HB", "name": "Hòa Bình", "sortOrder": 28 },
+    { "code": "HY", "name": "Hưng Yên", "sortOrder": 29 },
+    { "code": "KH", "name": "Khánh Hòa", "sortOrder": 30 },
+    { "code": "KG", "name": "Kiên Giang", "sortOrder": 31 },
+    { "code": "KT", "name": "Kon Tum", "sortOrder": 32 },
+    { "code": "LC", "name": "Lai Châu", "sortOrder": 33 },
+    { "code": "LD", "name": "Lâm Đồng", "sortOrder": 34 }
+  ],
+  "wards": [
+    { "code": "HN-HK", "provinceCode": "HN", "name": "Hoàn Kiếm", "sortOrder": 1 },
+    { "code": "HN-CN", "provinceCode": "HN", "name": "Cửa Nam", "sortOrder": 2 },
+    { "code": "HN-BD", "provinceCode": "HN", "name": "Ba Đình", "sortOrder": 3 },
+
+    { "code": "DN-HKB", "provinceCode": "DN", "name": "Hòa Khánh Bắc", "sortOrder": 1 },
+    { "code": "DN-HKC", "provinceCode": "DN", "name": "Hòa Khánh", "sortOrder": 2 },
+
+    { "code": "HCM-BN", "provinceCode": "HCM", "name": "Bến Nghé", "sortOrder": 1 },
+    { "code": "HCM-DK", "provinceCode": "HCM", "name": "Đa Kao", "sortOrder": 2 }
+  ]
+}
