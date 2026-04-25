@@ -51,4 +51,11 @@ export class StaffController {
   ) {
     return this.staffService.updatePassword(id, dto.password);
   }
+  @Patch(":id/second-password")
+updateSecondPassword(
+  @Param("id") id: string,
+  @Body() body: { secondPassword: string }
+) {
+  return this.staffService.updateSecondPassword(id, body.secondPassword);
+}
 }

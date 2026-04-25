@@ -319,6 +319,8 @@ model StaffUser {
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   purchaseReceipts PurchaseReceipt[]
+secondPasswordHash    String?
+secondPasswordEnabled Boolean @default(false)
 }
 
 model Branch {
@@ -729,3 +731,4 @@ enum BranchNotificationType {
   TRANSFER_IN_CREATED
   TRANSFER_IN_CONFIRMED
 }
+

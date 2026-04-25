@@ -143,4 +143,21 @@ export class StaffService {
       },
     });
   }
+  async updateSecondPassword(id: string, secondPassword: string) {
+  if (!secondPassword || secondPassword.trim().length < 6) {
+    throw new BadRequestException("Mật khẩu lớp 2 tối thiểu 6 ký tự.");
+  }
+
+  const hash = await bcrypt.hash(secondPassword.trim(), 10);
+
+  await this.prisma.staffUser.update({
+    where: { id },
+    data: {
+      secondPasswordHash: hash,
+      secondPasswordEnabled: true,
+    },
+  });
+
+  return { message: "Đã cập nhật mật khẩu lớp 2." };
+}
 }
