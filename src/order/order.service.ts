@@ -38,7 +38,7 @@ export class OrderService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly shipmentService: ShipmentService
-  ) {}
+  ) { }
 
   private toNumber(value: unknown) {
     if (typeof value === "number") return value;
@@ -320,17 +320,17 @@ export class OrderService {
       customerPhone: order.customerPhone || order.customer?.phone || "—",
       items: Array.isArray(order.items)
         ? order.items.map((item: any) => ({
-            ...item,
-            unitPrice: this.toNumber(item.unitPrice),
-            lineTotal: this.toNumber(item.lineTotal),
-          }))
+          ...item,
+          unitPrice: this.toNumber(item.unitPrice),
+          lineTotal: this.toNumber(item.lineTotal),
+        }))
         : [],
       shipment: order.shipment
         ? {
-            ...order.shipment,
-            shippingFee: this.toNumber(order.shipment.shippingFee),
-            codAmount: this.toNumber(order.shipment.codAmount),
-          }
+          ...order.shipment,
+          shippingFee: this.toNumber(order.shipment.shippingFee),
+          codAmount: this.toNumber(order.shipment.codAmount),
+        }
         : null,
     };
   }
@@ -547,64 +547,64 @@ export class OrderService {
         if (modeConfig.deductStockNow) {
           await this.deductStockForItems(tx, normalizedItems, order.id, branchId);
         }
-// =========================
-// CREATE PAYMENT (NEW)
-// =========================
+        // =========================
+        // CREATE PAYMENT (NEW)
+        // =========================
 
-const paymentSourceId = body.paymentSourceId
-  ? String(body.paymentSourceId)
-  : null;
+        const paymentSourceId = body.paymentSourceId
+          ? String(body.paymentSourceId)
+          : null;
 
-const paidAmount = Number(body.paidAmount || 0);
-const finalAmountNumber = Number(totalAmount);
+        const paidAmount = Number(body.paidAmount || 0);
+        const finalAmountNumber = Number(totalAmount);
 
-let paymentStatus: PaymentStatus = PaymentStatus.UNPAID;
+        let paymentStatus: PaymentStatus = PaymentStatus.UNPAID;
 
-// PARTIAL
-if (paidAmount > 0 && paidAmount < finalAmountNumber) {
-  paymentStatus = PaymentStatus.PARTIAL;
-}
+        // PARTIAL
+        if (paidAmount > 0 && paidAmount < finalAmountNumber) {
+          paymentStatus = PaymentStatus.PARTIAL;
+        }
 
-// FULL PAID
-if (paidAmount >= finalAmountNumber && finalAmountNumber > 0) {
-  paymentStatus = PaymentStatus.PAID;
-}
+        // FULL PAID
+        if (paidAmount >= finalAmountNumber && finalAmountNumber > 0) {
+          paymentStatus = PaymentStatus.PAID;
+        }
 
-// check source
-const paymentSource = paymentSourceId
-  ? await tx.paymentSource.findUnique({
-      where: { id: paymentSourceId },
-    })
-  : null;
+        // check source
+        const paymentSource = paymentSourceId
+          ? await tx.paymentSource.findUnique({
+            where: { id: paymentSourceId },
+          })
+          : null;
 
-// COD override
-if (paymentSource?.type === "COD") {
-  paymentStatus = PaymentStatus.PENDING_COD;
-}
+        // COD override
+        if (paymentSource?.type === "COD") {
+          paymentStatus = PaymentStatus.PENDING_COD;
+        }
 
-// tạo payment
-if (paymentSourceId || paidAmount > 0) {
-  await tx.payment.create({
-    data: {
-      orderId: order.id,
-      amount: new Prisma.Decimal(paidAmount || finalAmountNumber),
-      status: paymentStatus,
-      method: paymentSource?.name || "Manual",
-      paymentSourceId,
-      note: body.paymentNote || null,
-      paidAt:
-        paymentStatus === PaymentStatus.PAID ? new Date() : null,
-    },
-  });
-}
+        // tạo payment
+        if (paymentSourceId || paidAmount > 0) {
+          await tx.payment.create({
+            data: {
+              orderId: order.id,
+              amount: new Prisma.Decimal(paidAmount || finalAmountNumber),
+              status: paymentStatus,
+              method: paymentSource?.name || "Manual",
+              paymentSourceId,
+              note: body.paymentNote || null,
+              paidAt:
+                paymentStatus === PaymentStatus.PAID ? new Date() : null,
+            },
+          });
+        }
 
-// update order paymentStatus
-await tx.order.update({
-  where: { id: order.id },
-  data: {
-    paymentStatus,
-  },
-});
+        // update order paymentStatus
+        await tx.order.update({
+          where: { id: order.id },
+          data: {
+            paymentStatus,
+          },
+        });
         if (customerId) {
           await tx.customer.update({
             where: { id: customerId },
@@ -715,9 +715,22 @@ await tx.order.update({
           note: true,
           createdAt: true,
           updatedAt: true,
+
           items: {
             select: {
               id: true,
+            },
+          },
+
+          // ✅ THÊM ĐOẠN NÀY
+          shipment: {
+            select: {
+              id: true,
+              carrier: true,
+              trackingCode: true,
+              shippingStatus: true,
+              codAmount: true,
+              shippingFee: true,
             },
           },
         },
@@ -725,16 +738,24 @@ await tx.order.update({
       this.prisma.order.count({ where }),
     ]);
 
-    const data = orders.map((order) => ({
-      ...order,
-      totalAmount: this.toNumber(order.totalAmount),
-      discountAmount: this.toNumber(order.discountAmount),
-      shippingFee: this.toNumber(order.shippingFee),
-      finalAmount: this.toNumber(order.finalAmount),
-      createdAt: new Date(order.createdAt).toLocaleString("vi-VN"),
-      updatedAt: new Date(order.updatedAt).toLocaleString("vi-VN"),
-      items: [],
-    }));
+const data = orders.map((order) => ({
+  ...order,
+  totalAmount: this.toNumber(order.totalAmount),
+  discountAmount: this.toNumber(order.discountAmount),
+  shippingFee: this.toNumber(order.shippingFee),
+  finalAmount: this.toNumber(order.finalAmount),
+  createdAt: new Date(order.createdAt).toLocaleString("vi-VN"),
+  updatedAt: new Date(order.updatedAt).toLocaleString("vi-VN"),
+  items: [],
+
+  shipment: order.shipment
+    ? {
+        ...order.shipment,
+        shippingFee: this.toNumber(order.shipment.shippingFee),
+        codAmount: this.toNumber(order.shipment.codAmount),
+      }
+    : null,
+}));
 
     return {
       data,
@@ -774,131 +795,9 @@ await tx.order.update({
     return this.mapOrderResponse(order);
   }
 
-async updateOrder(orderId: string, body: any, user?: any) {
-  const existing = await this.prisma.order.findFirst({
-    where: this.buildOrderWhereByUser(user, { id: orderId }),
-    include: {
-      items: true,
-      shipment: true,
-      customer: {
-        select: {
-          id: true,
-          fullName: true,
-          phone: true,
-        },
-      },
-    },
-  });
-
-  if (!existing) {
-    throw new BadRequestException("Không tìm thấy đơn hàng");
-  }
-
-  if (existing.status === OrderStatus.CANCELLED) {
-    throw new BadRequestException("Đơn đã hủy, không thể sửa.");
-  }
-
-  const items = Array.isArray(body.items) ? body.items : null;
-
-  const updated = await this.prisma.$transaction(async (tx) => {
-    if (items) {
-      await tx.orderItem.deleteMany({
-        where: { orderId },
-      });
-
-      if (items.length) {
-        await tx.orderItem.createMany({
-          data: items.map((item: any) => ({
-            orderId,
-            variantId: item.variantId ? String(item.variantId) : null,
-            productName: String(item.productName || ""),
-            sku: String(item.sku || ""),
-            color: item.color ? String(item.color) : null,
-            size: item.size ? String(item.size) : null,
-            qty: Number(item.qty || 0),
-            unitPrice: new Prisma.Decimal(this.toNumber(item.unitPrice)),
-            lineTotal: new Prisma.Decimal(this.toNumber(item.lineTotal)),
-          })),
-        });
-      }
-    }
-
-    await tx.order.update({
-      where: { id: orderId },
-      data: {
-        customerName:
-          typeof body.customerName === "string"
-            ? body.customerName.trim()
-            : undefined,
-        customerPhone:
-          typeof body.customerPhone === "string"
-            ? this.normalizePhone(body.customerPhone)
-            : undefined,
-
-        salesChannel:
-          typeof body.salesChannel === "string"
-            ? (body.salesChannel as SalesChannel)
-            : undefined,
-
-        note: typeof body.note === "string" ? body.note : undefined,
-
-        shippingRecipientName:
-          typeof body.shippingRecipientName === "string"
-            ? body.shippingRecipientName
-            : undefined,
-        shippingPhone:
-          typeof body.shippingPhone === "string"
-            ? body.shippingPhone
-            : undefined,
-        shippingEmail:
-          typeof body.shippingEmail === "string"
-            ? body.shippingEmail
-            : undefined,
-
-        shippingAddressLine1:
-          typeof body.shippingAddressLine1 === "string"
-            ? body.shippingAddressLine1
-            : undefined,
-        shippingAddressLine2:
-          typeof body.shippingAddressLine2 === "string"
-            ? body.shippingAddressLine2
-            : undefined,
-        shippingWard:
-          typeof body.shippingWard === "string" ? body.shippingWard : undefined,
-        shippingDistrict:
-          typeof body.shippingDistrict === "string"
-            ? body.shippingDistrict
-            : undefined,
-        shippingProvince:
-          typeof body.shippingProvince === "string"
-            ? body.shippingProvince
-            : undefined,
-        shippingPostalCode:
-          typeof body.shippingPostalCode === "string"
-            ? body.shippingPostalCode
-            : undefined,
-
-        discountAmount:
-          body.discountAmount !== undefined
-            ? new Prisma.Decimal(this.toNumber(body.discountAmount))
-            : undefined,
-        shippingFee:
-          body.shippingFee !== undefined
-            ? new Prisma.Decimal(this.toNumber(body.shippingFee))
-            : undefined,
-        totalAmount:
-          body.totalAmount !== undefined
-            ? new Prisma.Decimal(this.toNumber(body.totalAmount))
-            : undefined,
-        finalAmount:
-          body.finalAmount !== undefined
-            ? new Prisma.Decimal(this.toNumber(body.finalAmount))
-            : undefined,
-      },
-    });
-
-    return tx.order.findUnique({
-      where: { id: orderId },
+  async updateOrder(orderId: string, body: any, user?: any) {
+    const existing = await this.prisma.order.findFirst({
+      where: this.buildOrderWhereByUser(user, { id: orderId }),
       include: {
         items: true,
         shipment: true,
@@ -911,61 +810,116 @@ async updateOrder(orderId: string, body: any, user?: any) {
         },
       },
     });
-  });
 
-  if (!updated) {
-    throw new BadRequestException("Không cập nhật được đơn hàng");
-  }
+    if (!existing) {
+      throw new BadRequestException("Không tìm thấy đơn hàng");
+    }
 
-  return this.mapOrderResponse(updated);
-}
-async updateOrderStatus(orderId: string, status: OrderStatus, user?: any) {
-  return this.prisma.$transaction(
-    async (tx) => {
-      const order = await tx.order.findFirst({
-        where: this.buildOrderWhereByUser(user, { id: orderId }),
-        include: {
-          items: true,
-          shipment: true,
-          customer: {
-            select: {
-              id: true,
-              fullName: true,
-              phone: true,
-            },
-          },
-        },
-      });
+    if (existing.status === OrderStatus.CANCELLED) {
+      throw new BadRequestException("Đơn đã hủy, không thể sửa.");
+    }
 
-      if (!order) {
-        throw new BadRequestException("Không tìm thấy đơn hàng");
+    const items = Array.isArray(body.items) ? body.items : null;
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      if (items) {
+        await tx.orderItem.deleteMany({
+          where: { orderId },
+        });
+
+        if (items.length) {
+          await tx.orderItem.createMany({
+            data: items.map((item: any) => ({
+              orderId,
+              variantId: item.variantId ? String(item.variantId) : null,
+              productName: String(item.productName || ""),
+              sku: String(item.sku || ""),
+              color: item.color ? String(item.color) : null,
+              size: item.size ? String(item.size) : null,
+              qty: Number(item.qty || 0),
+              unitPrice: new Prisma.Decimal(this.toNumber(item.unitPrice)),
+              lineTotal: new Prisma.Decimal(this.toNumber(item.lineTotal)),
+            })),
+          });
+        }
       }
 
-      const currentStatus = order.status;
-      const nextStatus = status;
-
-      if (
-        currentStatus !== OrderStatus.CANCELLED &&
-        nextStatus === OrderStatus.CANCELLED
-      ) {
-        await this.restoreStockForOrder(tx, order.id, order.branchId || null);
-      }
-
-      const updated = await tx.order.update({
+      await tx.order.update({
         where: { id: orderId },
         data: {
-          status: nextStatus,
-          fulfillmentStatus:
-            nextStatus === OrderStatus.APPROVED
-              ? FulfillmentStatus.UNFULFILLED
-              : nextStatus === OrderStatus.PACKING
-                ? FulfillmentStatus.PROCESSING
-                : nextStatus === OrderStatus.SHIPPED
-                  ? FulfillmentStatus.FULFILLED
-                  : nextStatus === OrderStatus.COMPLETED
-                    ? FulfillmentStatus.FULFILLED
-                    : undefined,
+          customerName:
+            typeof body.customerName === "string"
+              ? body.customerName.trim()
+              : undefined,
+          customerPhone:
+            typeof body.customerPhone === "string"
+              ? this.normalizePhone(body.customerPhone)
+              : undefined,
+
+          salesChannel:
+            typeof body.salesChannel === "string"
+              ? (body.salesChannel as SalesChannel)
+              : undefined,
+
+          note: typeof body.note === "string" ? body.note : undefined,
+
+          shippingRecipientName:
+            typeof body.shippingRecipientName === "string"
+              ? body.shippingRecipientName
+              : undefined,
+          shippingPhone:
+            typeof body.shippingPhone === "string"
+              ? body.shippingPhone
+              : undefined,
+          shippingEmail:
+            typeof body.shippingEmail === "string"
+              ? body.shippingEmail
+              : undefined,
+
+          shippingAddressLine1:
+            typeof body.shippingAddressLine1 === "string"
+              ? body.shippingAddressLine1
+              : undefined,
+          shippingAddressLine2:
+            typeof body.shippingAddressLine2 === "string"
+              ? body.shippingAddressLine2
+              : undefined,
+          shippingWard:
+            typeof body.shippingWard === "string" ? body.shippingWard : undefined,
+          shippingDistrict:
+            typeof body.shippingDistrict === "string"
+              ? body.shippingDistrict
+              : undefined,
+          shippingProvince:
+            typeof body.shippingProvince === "string"
+              ? body.shippingProvince
+              : undefined,
+          shippingPostalCode:
+            typeof body.shippingPostalCode === "string"
+              ? body.shippingPostalCode
+              : undefined,
+
+          discountAmount:
+            body.discountAmount !== undefined
+              ? new Prisma.Decimal(this.toNumber(body.discountAmount))
+              : undefined,
+          shippingFee:
+            body.shippingFee !== undefined
+              ? new Prisma.Decimal(this.toNumber(body.shippingFee))
+              : undefined,
+          totalAmount:
+            body.totalAmount !== undefined
+              ? new Prisma.Decimal(this.toNumber(body.totalAmount))
+              : undefined,
+          finalAmount:
+            body.finalAmount !== undefined
+              ? new Prisma.Decimal(this.toNumber(body.finalAmount))
+              : undefined,
         },
+      });
+
+      return tx.order.findUnique({
+        where: { id: orderId },
         include: {
           items: true,
           shipment: true,
@@ -978,50 +932,117 @@ async updateOrderStatus(orderId: string, status: OrderStatus, user?: any) {
           },
         },
       });
+    });
 
-      return this.mapOrderResponse(updated);
-    },
-    {
-      maxWait: 10000,
-      timeout: 20000,
+    if (!updated) {
+      throw new BadRequestException("Không cập nhật được đơn hàng");
     }
-  );
-}
 
-async updatePaymentStatus(
-  orderId: string,
-  paymentStatus: PaymentStatus,
-  user?: any
-) {
-  const existing = await this.prisma.order.findFirst({
-    where: this.buildOrderWhereByUser(user, { id: orderId }),
-    select: { id: true },
-  });
+    return this.mapOrderResponse(updated);
+  }
+  async updateOrderStatus(orderId: string, status: OrderStatus, user?: any) {
+    return this.prisma.$transaction(
+      async (tx) => {
+        const order = await tx.order.findFirst({
+          where: this.buildOrderWhereByUser(user, { id: orderId }),
+          include: {
+            items: true,
+            shipment: true,
+            customer: {
+              select: {
+                id: true,
+                fullName: true,
+                phone: true,
+              },
+            },
+          },
+        });
 
-  if (!existing) {
-    throw new BadRequestException("Không tìm thấy đơn hàng");
+        if (!order) {
+          throw new BadRequestException("Không tìm thấy đơn hàng");
+        }
+
+        const currentStatus = order.status;
+        const nextStatus = status;
+
+        if (
+          currentStatus !== OrderStatus.CANCELLED &&
+          nextStatus === OrderStatus.CANCELLED
+        ) {
+          await this.restoreStockForOrder(tx, order.id, order.branchId || null);
+        }
+
+        const updated = await tx.order.update({
+          where: { id: orderId },
+          data: {
+            status: nextStatus,
+            fulfillmentStatus:
+              nextStatus === OrderStatus.APPROVED
+                ? FulfillmentStatus.UNFULFILLED
+                : nextStatus === OrderStatus.PACKING
+                  ? FulfillmentStatus.PROCESSING
+                  : nextStatus === OrderStatus.SHIPPED
+                    ? FulfillmentStatus.FULFILLED
+                    : nextStatus === OrderStatus.COMPLETED
+                      ? FulfillmentStatus.FULFILLED
+                      : undefined,
+          },
+          include: {
+            items: true,
+            shipment: true,
+            customer: {
+              select: {
+                id: true,
+                fullName: true,
+                phone: true,
+              },
+            },
+          },
+        });
+
+        return this.mapOrderResponse(updated);
+      },
+      {
+        maxWait: 10000,
+        timeout: 20000,
+      }
+    );
   }
 
-  const updated = await this.prisma.order.update({
-    where: { id: orderId },
-    data: {
-      paymentStatus,
-    },
-    include: {
-      items: true,
-      shipment: true,
-      customer: {
-        select: {
-          id: true,
-          fullName: true,
-          phone: true,
+  async updatePaymentStatus(
+    orderId: string,
+    paymentStatus: PaymentStatus,
+    user?: any
+  ) {
+    const existing = await this.prisma.order.findFirst({
+      where: this.buildOrderWhereByUser(user, { id: orderId }),
+      select: { id: true },
+    });
+
+    if (!existing) {
+      throw new BadRequestException("Không tìm thấy đơn hàng");
+    }
+
+    const updated = await this.prisma.order.update({
+      where: { id: orderId },
+      data: {
+        paymentStatus,
+      },
+      include: {
+        items: true,
+        shipment: true,
+        customer: {
+          select: {
+            id: true,
+            fullName: true,
+            phone: true,
+          },
         },
       },
-    },
-  });
+    });
 
-  return this.mapOrderResponse(updated);
-}
+    return this.mapOrderResponse(updated);
+  }
   async shipOrder(
     id: string,
     body: { weight: number; shippingFee?: number; note?: string },
@@ -1091,8 +1112,8 @@ async updatePaymentStatus(
     const where = this.isOwner(user)
       ? {}
       : {
-          branchId: this.resolveBranchIdFromUser(user) || "__NO_BRANCH__",
-        };
+        branchId: this.resolveBranchIdFromUser(user) || "__NO_BRANCH__",
+      };
 
     const rows = await this.prisma.inventoryMovement.findMany({
       where,

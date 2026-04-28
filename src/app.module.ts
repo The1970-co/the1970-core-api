@@ -23,6 +23,9 @@ import { BranchNotificationsModule } from "./notifications/branch-notifications.
 import { PaymentSourcesModule } from "./payment-sources/payment-sources.module";
 import { ScheduleModule } from "@nestjs/schedule";
 import { FinanceModule } from "./finance/finance.module";
+import { StocktakeSessionModule } from "./stocktake-session/stocktake-session.module";
+import { WarehouseMapModule } from "./warehouse-map/warehouse-map.module";
+import { StocktakeAreaModule } from "./stocktake-area/stocktake-area.module";
 @Module({
   imports: [
     PrismaModule,
@@ -49,6 +52,9 @@ import { FinanceModule } from "./finance/finance.module";
     PaymentSourcesModule,
     ScheduleModule.forRoot(),
     FinanceModule,
+    StocktakeSessionModule,
+    WarehouseMapModule,
+    StocktakeAreaModule,
   ],
 })
 export class AppModule {}

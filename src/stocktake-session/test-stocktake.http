@@ -1,0 +1,21 @@
+### Create session
+POST http://localhost:3001/stocktake-sessions
+Content-Type: application/json
+
+{
+  "branchId": "qo",
+  "name": "Test kiểm kho"
+}
+
+###
+
+
+### Scan
+POST http://localhost:3001/stocktake-sessions/scan
+Content-Type: application/json
+
+{
+  "sessionId": "cmognsg3s0002uql5uyl8ahw0",
+  "branchId": "qo",
+  "code": "QJ782-D-2"
+}

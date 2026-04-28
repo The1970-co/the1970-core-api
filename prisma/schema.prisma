@@ -288,6 +288,12 @@ model Shipment {
   @@index([shippingStatus])
   @@index([partnerStatus])
   @@index([lastSyncedAt])
+codReconciliationStatus  String?   @default("NOT_RECONCILED")
+codReconciledAt          DateTime?
+codReconciliationBatchId String?
+codReconciliationRowId   String?
+codReconciliationIssue   String?
+codReconciliationAmount  Int?
 }
 
 model AuditLog {
@@ -587,6 +593,11 @@ model PartialDeliveryRecord {
   @@index([orderId])
   @@index([orderCode])
   @@index([ghnTrackingCode])
+  returnStatus          String?   @default("PENDING_RETURN")
+  returnReceivedAt      DateTime?
+  returnReceivedBy      String?
+  returnStockReceiptId  String?
+  returnStockNote       String?
 }
 
 model PartialDeliveryItem {
@@ -732,3 +743,306 @@ enum BranchNotificationType {
   TRANSFER_IN_CONFIRMED
 }
 
+model GhnCodReconciliationBatch {
+  id              String   @id @default(cuid())
+  fileName        String
+  transferCode    String?
+  transferDate    String?
+  totalRows       Int      @default(0)
+  matchedRows     Int      @default(0)
+  mismatchRows    Int      @default(0)
+  totalAmount     Int      @default(0)
+  transferFee     Int      @default(0)
+  netAmount       Int      @default(0)
+  parserMode      String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  rows            GhnCodReconciliationRow[]
+}
+
+model GhnCodReconciliationRow {
+  id                          String   @id @default(cuid())
+  batchId                     String
+  orderId                     String?
+  orderCode                   String?
+  shipmentId                  String?
+  ghnCode                     String
+  customerOrderCode           String?
+  ghnStatus                   String?
+  codAmount                   Int      @default(0)
+  serviceFee                  Int      @default(0)
+  totalReconcileAmount        Int      @default(0)
+  reconciliationStatus        String
+  issues                      String[] @default([])
+  partialDeliveryRecordId     String?
+  partialDeliveryAdjustedCod  Int?
+  partialReturnReceived       Boolean?
+  createdAt                   DateTime @default(now())
+
+  batch GhnCodReconciliationBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@index([batchId])
+  @@index([orderId])
+  @@index([shipmentId])
+  @@index([ghnCode])
+}
+model StocktakeSession {
+  id          String   @id @default(cuid())
+  branchId    String
+  name        String
+  note        String?
+  status      String   @default("DRAFT")
+
+  createdById String?
+  startedAt   DateTime?
+  finishedAt  DateTime?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workers     StocktakeWorker[]
+  scanEvents  StocktakeScanEvent[]
+
+  @@index([branchId])
+  @@index([status])
+areas StocktakeArea[]
+}
+
+model StocktakeWorker {
+  id          String   @id @default(cuid())
+  sessionId   String
+  name        String
+  userId      String?
+  zone        String?
+  deviceName  String?
+  isActive    Boolean  @default(true)
+
+  status      String    @default("IN_PROGRESS")
+  startedAt   DateTime? @default(now())
+  finishedAt  DateTime?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  session     StocktakeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  scanEvents  StocktakeScanEvent[]
+
+  @@index([sessionId])
+}
+
+
+model StocktakeScanEvent {
+  id           String   @id @default(cuid())
+  sessionId    String
+  workerId     String?
+  branchId     String
+
+  variantId    String?
+  sku          String
+  barcode      String?
+  qtyDelta     Int      @default(1)
+  zone         String?
+  locationCode String?
+
+  status       String   @default("OK")
+  note         String?
+
+  createdAt    DateTime @default(now())
+
+  session      StocktakeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  worker       StocktakeWorker? @relation(fields: [workerId], references: [id], onDelete: SetNull)
+
+  @@index([sessionId])
+  @@index([workerId])
+  @@index([variantId])
+  @@index([sku])
+}
+model WarehouseMap {
+  id        String   @id @default(cuid())
+  branchId  String
+  name      String
+  code      String   @unique
+  note      String?
+  width     Int      @default(1200)
+  height    Int      @default(800)
+  isActive  Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  racks     WarehouseRack[]
+
+  @@index([branchId])
+  @@index([code])
+floors WarehouseFloor[]
+zones  WarehouseZone[]
+doors  WarehouseDoor[]
+}
+
+model WarehouseRack {
+  id        String   @id @default(cuid())
+  mapId     String
+  branchId  String
+
+  code      String   @unique
+  name      String
+
+  zone      String
+  aisle     String
+  rackNo    String
+
+  floors    Int      @default(5)
+
+  x         Int      @default(0)
+  y         Int      @default(0)
+  w         Int      @default(120)
+  h         Int      @default(260)
+  rotation  Int      @default(0)
+
+  status    String   @default("PENDING") // PENDING, IN_PROGRESS, FINISHED, MISMATCH
+  note      String?
+  isActive  Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  map       WarehouseMap @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  shelves   WarehouseShelf[]
+  variantLocations ProductVariantLocation[]
+
+  @@index([mapId])
+  @@index([branchId])
+  @@index([zone])
+  @@index([status])
+}
+
+model WarehouseShelf {
+  id        String   @id @default(cuid())
+  rackId    String
+
+  code      String   @unique
+  floorNo   Int
+
+  label     String?
+  capacity  Int      @default(0)
+  note      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  rack      WarehouseRack @relation(fields: [rackId], references: [id], onDelete: Cascade)
+  variantLocations ProductVariantLocation[]
+
+  @@index([rackId])
+}
+
+model ProductVariantLocation {
+  id          String   @id @default(cuid())
+
+  variantId   String
+  rackId      String?
+  shelfId     String?
+
+  isPrimary   Boolean  @default(false)
+  note        String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  rack        WarehouseRack?  @relation(fields: [rackId], references: [id], onDelete: Cascade)
+  shelf       WarehouseShelf? @relation(fields: [shelfId], references: [id], onDelete: Cascade)
+
+  @@index([variantId])
+  @@index([rackId])
+  @@index([shelfId])
+}
+
+model StocktakeArea {
+  id        String   @id @default(cuid())
+  sessionId String
+  branchId  String
+  mapId     String?
+
+  scopeType String   // MAP | AISLE | RACK
+  aisle     String?
+  rackId    String?
+  rackCode  String?
+  label     String
+
+  status    String   @default("PENDING")
+
+  startedAt  DateTime?
+  finishedAt DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  session StocktakeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([branchId])
+  @@index([mapId])
+  @@index([scopeType])
+  @@index([status])
+}
+model WarehouseFloor {
+  id        String   @id @default(cuid())
+  mapId     String
+  name      String
+  level     Int      @default(1)
+  note      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  map       WarehouseMap @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  zones     WarehouseZone[]
+  doors     WarehouseDoor[]
+
+  @@index([mapId])
+}
+
+model WarehouseZone {
+  id        String   @id @default(cuid())
+  mapId     String
+  floorId   String
+  name      String
+  type      String   @default("STORAGE")
+
+  x         Float    @default(0)
+  y         Float    @default(0)
+  width     Float    @default(500)
+  height    Float    @default(300)
+  color     String?
+  note      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  map       WarehouseMap   @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  floor     WarehouseFloor @relation(fields: [floorId], references: [id], onDelete: Cascade)
+
+  @@index([mapId])
+  @@index([floorId])
+  @@index([type])
+}
+
+model WarehouseDoor {
+  id        String   @id @default(cuid())
+  mapId     String
+  floorId   String
+  name      String   @default("Cửa kho")
+  side      String   @default("BOTTOM")
+  x         Float    @default(0)
+  y         Float    @default(0)
+  width     Float    @default(180)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  map       WarehouseMap   @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  floor     WarehouseFloor @relation(fields: [floorId], references: [id], onDelete: Cascade)
+
+  @@index([mapId])
+  @@index([floorId])
+}

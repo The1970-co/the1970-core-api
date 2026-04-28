@@ -7,6 +7,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UploadedFile,
   UploadedFiles,
   UseInterceptors,
@@ -21,11 +22,33 @@ import { ProductService } from "./product.service";
 
 @Controller("products")
 export class ProductController {
-  constructor(private readonly productService: ProductService) {}
+  constructor(private readonly productService: ProductService) { }
 
   @Get()
-  getProducts() {
-    return this.productService.getProducts();
+  getProducts(
+    @Query("page") page?: string,
+    @Query("limit") limit?: string,
+    @Query("q") q?: string,
+    @Query("category") category?: string,
+    @Query("status") status?: string
+  ) {
+    return this.productService.getProducts({
+      page: Number(page || 1),
+      limit: Number(limit || 20),
+      q,
+      category,
+      status,
+    });
+  }
+
+  @Post("sync-categories")
+  syncCategoriesFromProducts() {
+    return this.productService.syncCategoriesFromProducts();
+  }
+
+  @Get("category-options")
+  getProductCategoryOptions() {
+    return this.productService.getProductCategoryOptions();
   }
 
   @Get(":id")
@@ -88,6 +111,11 @@ export class ProductController {
       url: result.secure_url,
       public_id: result.public_id,
     };
+  }
+
+  @Post("rename-category")
+  renameCategory(@Body() body: { oldName: string; newName: string }) {
+    return this.productService.renameCategory(body.oldName, body.newName);
   }
 
   @Post(":id/variants")

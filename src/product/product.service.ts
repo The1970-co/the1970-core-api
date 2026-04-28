@@ -138,52 +138,169 @@ export class ProductService {
     return "";
   }
 
-  async getProducts() {
-    const products = await this.prisma.product.findMany({
-      where: {
-        status: {
-          not: ProductStatus.INACTIVE,
-        },
-      },
-      orderBy: { createdAt: "desc" },
-      include: {
-        categoryRel: true,
-        variants: {
-          include: {
-            inventoryItems: true,
-          },
-          orderBy: { createdAt: "asc" },
-        },
-      },
+  private getMainSkuCode(sku: string) {
+    return String(sku || "")
+      .trim()
+      .split("-")[0]
+      .trim()
+      .toUpperCase();
+  }
+
+  private chunkArray<T>(items: T[], size = 1000) {
+    const chunks: T[][] = [];
+    for (let index = 0; index < items.length; index += size) {
+      chunks.push(items.slice(index, index + size));
+    }
+    return chunks;
+  }
+
+  private detectHeaderRowIndex(sheetData: unknown[][]) {
+    return sheetData.findIndex((row) => {
+      if (!Array.isArray(row)) return false;
+
+      const joined = row.map((cell) => this.normalizeHeader(cell)).join(" | ");
+
+      return (
+        joined.includes("ten san pham") ||
+        joined.includes("ma sku") ||
+        joined.includes("gia tri thuoc tinh 1") ||
+        joined.includes("gia tri thuoc tinh 2") ||
+        joined.includes("pl gia ban le")
+      );
     });
+  }
 
-    return products.map((product) => ({
-      ...product,
-      category: product.categoryRel?.name || product.category,
-      variants: product.variants.map((variant) => {
-        const inventoryByBranch = this.buildInventoryByBranch(
-          variant.inventoryItems.map((item) => ({
-            branchId: item.branchId,
-            availableQty: Number(item.availableQty || 0),
-            reservedQty: Number(item.reservedQty || 0),
-            incomingQty: Number(item.incomingQty || 0),
-          }))
-        );
+  private buildRowsFromSheetData(sheetData: unknown[][], headerRowIndex: number) {
+    const headerRow = (sheetData[headerRowIndex] || []).map((cell) =>
+      String(cell ?? "").trim()
+    );
 
-        const stock = variant.inventoryItems.reduce(
-          (sum, item) => sum + Number(item.availableQty || 0),
-          0
-        );
+    const rows: Record<string, unknown>[] = [];
 
-        return {
-          ...variant,
-          price: Number(variant.price || 0),
-          costPrice: Number(variant.costPrice || 0),
-          stock,
-          inventoryByBranch,
-        };
+    for (let index = headerRowIndex + 1; index < sheetData.length; index++) {
+      const rowArray = sheetData[index];
+      if (!Array.isArray(rowArray)) continue;
+
+      const rowObject: Record<string, unknown> = {};
+
+      for (let col = 0; col < headerRow.length; col++) {
+        const header = headerRow[col];
+        if (!header) continue;
+        rowObject[header] = rowArray[col] ?? "";
+      }
+
+      rows.push(rowObject);
+    }
+
+    return rows;
+  }
+  async getProducts(params?: {
+    page?: number;
+    limit?: number;
+    q?: string;
+    category?: string;
+    status?: string;
+  }) {
+    const page = Math.max(1, Number(params?.page || 1));
+    const limit = Math.min(100, Math.max(20, Number(params?.limit || 20)));
+    const skip = (page - 1) * limit;
+
+    const q = String(params?.q || "").trim();
+    const category = String(params?.category || "ALL").trim();
+    const status = String(params?.status || "ALL").trim();
+
+    const where: Prisma.ProductWhereInput = {
+      ...(status === "ALL"
+        ? { status: { not: ProductStatus.INACTIVE } }
+        : { status: status as ProductStatus }),
+      ...(q
+        ? {
+            OR: [
+              { name: { contains: q, mode: "insensitive" } },
+              { slug: { contains: q, mode: "insensitive" } },
+              { category: { contains: q, mode: "insensitive" } },
+              { variants: { some: { sku: { contains: q, mode: "insensitive" } } } },
+            ],
+          }
+        : {}),
+    };
+
+    if (category !== "ALL") {
+      const wantedKey = this.normalizeHeader(category);
+      const rawCategories = await this.prisma.product.findMany({
+        where: {
+          category: { not: null },
+          ...(status === "ALL"
+            ? { status: { not: ProductStatus.INACTIVE } }
+            : { status: status as ProductStatus }),
+        },
+        select: { category: true },
+      });
+
+      const matchedCategories = Array.from(
+        new Set(
+          rawCategories
+            .map((item) => String(item.category || "").trim())
+            .filter((name) => name && this.normalizeHeader(name) === wantedKey)
+        )
+      );
+
+      if (!matchedCategories.length) {
+        return { data: [], total: 0, page, limit };
+      }
+
+      where.category = { in: matchedCategories };
+    }
+
+    const [products, total] = await Promise.all([
+      this.prisma.product.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: "desc" },
+        include: {
+          categoryRel: true,
+          variants: {
+            include: { inventoryItems: true },
+            orderBy: { createdAt: "asc" },
+          },
+        },
       }),
-    }));
+      this.prisma.product.count({ where }),
+    ]);
+
+    return {
+      data: products.map((product) => ({
+        ...product,
+        category: product.categoryRel?.name || product.category,
+        variants: product.variants.map((variant) => {
+          const inventoryByBranch = this.buildInventoryByBranch(
+            variant.inventoryItems.map((item) => ({
+              branchId: item.branchId,
+              availableQty: Number(item.availableQty || 0),
+              reservedQty: Number(item.reservedQty || 0),
+              incomingQty: Number(item.incomingQty || 0),
+            }))
+          );
+
+          const stock = variant.inventoryItems.reduce(
+            (sum, item) => sum + Number(item.availableQty || 0),
+            0
+          );
+
+          return {
+            ...variant,
+            price: Number(variant.price || 0),
+            costPrice: Number(variant.costPrice || 0),
+            stock,
+            inventoryByBranch,
+          };
+        }),
+      })),
+      total,
+      page,
+      limit,
+    };
   }
 
   async getProductById(id: string) {
@@ -582,56 +699,41 @@ export class ProductService {
       select: { id: true, name: true },
     });
 
-const findBranchId = (aliases: string[]) => {
-  for (const alias of aliases) {
-    const found = branches.find(
-      (branch) => this.normalizeHeader(branch.name) === this.normalizeHeader(alias)
-    );
+    const findBranchId = (aliases: string[]) => {
+      for (const alias of aliases) {
+        const found = branches.find(
+          (branch) => this.normalizeHeader(branch.name) === this.normalizeHeader(alias)
+        );
 
-    if (found) return found.id;
-  }
+        if (found) return found.id;
+      }
 
-  return undefined;
-};
+      return undefined;
+    };
 
-const chuaLangBranchId = findBranchId(["CHÙA LÁNG", "CHUA LANG"]);
-const xaDanBranchId = findBranchId(["XÃ ĐÀN", "XA DAN"]);
-const quocOaiBranchId = findBranchId(["QUỐC OAI", "QUOC OAI", "QO"]);
-const thaiHaBranchId = findBranchId(["THÁI HÀ", "THAI HA"]);
+    const chuaLangBranchId = findBranchId(["CHÙA LÁNG", "CHUA LANG", "CL"]);
+    const xaDanBranchId = findBranchId(["XÃ ĐÀN", "XA DAN", "XD"]);
+    const quocOaiBranchId = findBranchId(["QUỐC OAI", "QUOC OAI", "QO"]);
+    const thaiHaBranchId = findBranchId(["THÁI HÀ", "THAI HA", "TH"]);
 
-console.log("SAPO BRANCH MAP", {
-  chuaLangBranchId,
-  xaDanBranchId,
-  quocOaiBranchId,
-  thaiHaBranchId,
-});
-
-const sapoBranchMap: Record<string, string | undefined> = {
-  "LC_CN1_Tồn kho ban đầu*": chuaLangBranchId,
-  "LC_CN1_Tồn kho ban đầu": chuaLangBranchId,
-
-  "LC_CN2_Tồn kho ban đầu*": xaDanBranchId,
-  "LC_CN2_Tồn kho ban đầu": xaDanBranchId,
-
-  "LC_CN3_Tồn kho ban đầu*": quocOaiBranchId,
-  "LC_CN3_Tồn kho ban đầu": quocOaiBranchId,
-
-  "LC_CN4_Tồn kho ban đầu*": thaiHaBranchId,
-  "LC_CN4_Tồn kho ban đầu": thaiHaBranchId,
-};
-
-    const branchMap = new Map<string, string>();
-    for (const branch of branches) {
-      const rawName = this.normalizeText(branch.name).toLowerCase();
-      const normalizedName = this.normalizeHeader(branch.name);
-      if (rawName) branchMap.set(rawName, branch.id);
-      if (normalizedName) branchMap.set(normalizedName, branch.id);
-    }
-
-    const qoBranchId =
-      branchMap.get("quoc oai") ||
-      branchMap.get("qo") ||
-      branchMap.get("quốc oai");
+    const sapoBranchColumns: Array<{ keys: string[]; branchId?: string }> = [
+      {
+        branchId: chuaLangBranchId,
+        keys: ["LC_CN1_Tồn kho ban đầu*", "LC_CN1_Tồn kho ban đầu", "lc cn1 ton kho ban dau"],
+      },
+      {
+        branchId: xaDanBranchId,
+        keys: ["LC_CN2_Tồn kho ban đầu*", "LC_CN2_Tồn kho ban đầu", "lc cn2 ton kho ban dau"],
+      },
+      {
+        branchId: quocOaiBranchId,
+        keys: ["LC_CN3_Tồn kho ban đầu*", "LC_CN3_Tồn kho ban đầu", "lc cn3 ton kho ban dau"],
+      },
+      {
+        branchId: thaiHaBranchId,
+        keys: ["LC_CN4_Tồn kho ban đầu*", "LC_CN4_Tồn kho ban đầu", "lc cn4 ton kho ban dau"],
+      },
+    ];
 
     let successRows = 0;
     let failedRows = 0;
@@ -666,9 +768,23 @@ const sapoBranchMap: Record<string, string | undefined> = {
         const workbook = XLSX.read(file.buffer, { type: "buffer" });
         const firstSheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[firstSheetName];
-        rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, {
+
+        const sheetData = XLSX.utils.sheet_to_json<unknown[]>(worksheet, {
+          header: 1,
           defval: "",
         });
+
+        const headerRowIndex = this.detectHeaderRowIndex(sheetData);
+
+        if (headerRowIndex >= 0) {
+          rows = this.buildRowsFromSheetData(sheetData, headerRowIndex).filter((row) =>
+            Object.values(row).some((value) => String(value ?? "").trim() !== "")
+          );
+        } else {
+          rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, {
+            defval: "",
+          });
+        }
       } catch {
         failedRows += 1;
         errors.push(`${file.originalname}: không đọc được file Excel`);
@@ -681,34 +797,44 @@ const sapoBranchMap: Record<string, string | undefined> = {
       let currentBrand = "";
       let currentWeight = 0;
 
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
+      for (let index = 0; index < rows.length; index++) {
+        const row = rows[index];
 
         const productName = this.findValue(row, [
           "Tên sản phẩm*",
           "Tên sản phẩm",
           "ten san pham",
+          "product name",
         ]);
         const category = this.findValue(row, [
           "Loại sản phẩm",
+          "Danh mục sản phẩm",
           "loai san pham",
+          "danh muc san pham",
           "category",
         ]);
         const description = this.findValue(row, [
           "Mô tả sản phẩm",
           "Mô tả",
           "mo ta san pham",
+          "description",
         ]);
         const brand = this.findValue(row, ["Nhãn hiệu", "nhan hieu", "brand"]);
         const weight = this.toNumber(
           this.findValue(row, ["Khối lượng", "khoi luong", "weight"])
         );
 
-        if (productName) currentProductName = productName;
-        if (category) currentCategory = category;
-        if (description) currentDescription = description;
-        if (brand) currentBrand = brand;
-        if (weight) currentWeight = weight;
+        if (productName) {
+          currentProductName = productName;
+          currentCategory = category || "";
+          currentDescription = description || "";
+          currentBrand = brand || "";
+          currentWeight = weight || 0;
+        } else {
+          if (category) currentCategory = category;
+          if (brand) currentBrand = brand;
+          if (weight) currentWeight = weight;
+        }
 
         const color = this.findValue(row, [
           "Giá trị thuộc tính 1",
@@ -716,13 +842,23 @@ const sapoBranchMap: Record<string, string | undefined> = {
           "mau",
           "màu",
           "color",
+          "Thuộc tính 1",
         ]);
         const size = this.findValue(row, [
           "Giá trị thuộc tính 2",
           "gia tri thuoc tinh 2",
           "size",
+          "Thuộc tính 2",
         ]);
-        const sku = this.findValue(row, ["Mã SKU*", "Mã SKU", "ma sku", "sku"]);
+        const sku = this.findValue(row, [
+          "Mã SKU*",
+          "Mã SKU",
+          "ma sku",
+          "sku",
+          "Mã hàng",
+          "SKU sản phẩm",
+          "Mã biến thể",
+        ]);
         const imageUrl = this.findValue(row, [
           "Ảnh đại diện",
           "anh dai dien",
@@ -738,19 +874,14 @@ const sapoBranchMap: Record<string, string | undefined> = {
             "pl gia nhap",
             "gia nhap",
             "PL_Giá vốn",
+            "pl gia von",
           ])
         );
+
         const branchStocks: Record<string, number> = {};
-
-        for (const [columnName, branchId] of Object.entries(sapoBranchMap)) {
-          if (!branchId) continue;
-
-          branchStocks[branchId] = this.toNumber(
-            this.findValue(row, [
-              columnName,
-              this.normalizeHeader(columnName),
-            ])
-          );
+        for (const item of sapoBranchColumns) {
+          if (!item.branchId) continue;
+          branchStocks[item.branchId] = this.toNumber(this.findValue(row, item.keys));
         }
 
         const hasAnyUsefulValue =
@@ -761,7 +892,7 @@ const sapoBranchMap: Record<string, string | undefined> = {
         if (!currentProductName) {
           failedRows += 1;
           errors.push(
-            `${file.originalname} - dòng ${i + 2}: không xác định được sản phẩm gốc`
+            `${file.originalname} - dòng ${index + 2}: không xác định được sản phẩm gốc`
           );
           continue;
         }
@@ -769,12 +900,13 @@ const sapoBranchMap: Record<string, string | undefined> = {
         if (!sku || !color || !size) {
           failedRows += 1;
           errors.push(
-            `${file.originalname} - dòng ${i + 2}: thiếu SKU hoặc màu hoặc size`
+            `${file.originalname} - dòng ${index + 2}: thiếu SKU hoặc màu hoặc size`
           );
           continue;
         }
 
-        const productSlug = this.normalizeSlug(currentProductName);
+        const mainSkuCode = this.getMainSkuCode(sku);
+        const productSlug = this.normalizeSlug(mainSkuCode || currentProductName);
 
         if (!grouped.has(productSlug)) {
           grouped.set(productSlug, {
@@ -791,7 +923,7 @@ const sapoBranchMap: Record<string, string | undefined> = {
         grouped.get(productSlug)!.variants.push({
           color,
           size,
-          sku,
+          sku: sku.trim(),
           imageUrl,
           retailPrice,
           importPrice,
@@ -816,15 +948,15 @@ const sapoBranchMap: Record<string, string | undefined> = {
 
     const existingVariants = await this.prisma.productVariant.findMany({
       where: { sku: { in: allSkus } },
-      select: {
-        id: true,
-        sku: true,
-        productId: true,
-      },
+      select: { id: true, sku: true, productId: true },
     });
 
-    const productBySlug = new Map(existingProducts.map((p) => [p.slug, p]));
-    const variantBySku = new Map(existingVariants.map((v) => [v.sku, v]));
+    const productBySlug = new Map(existingProducts.map((product) => [product.slug, product]));
+    const variantBySku = new Map(existingVariants.map((variant) => [variant.sku, variant]));
+
+    const variantsToCreate: Prisma.ProductVariantCreateManyInput[] = [];
+    const variantsToUpdate: Array<{ id: string; data: Prisma.ProductVariantUpdateInput }> = [];
+    const productIdsNeedingInventory = new Set<string>();
 
     for (const [, productSeed] of grouped.entries()) {
       try {
@@ -869,93 +1001,207 @@ const sapoBranchMap: Record<string, string | undefined> = {
           const existingVariant = variantBySku.get(variantSeed.sku.trim());
 
           if (!existingVariant) {
-            const createdVariant = await this.prisma.productVariant.create({
-              data: {
-                productId: product.id,
-                sku: variantSeed.sku.trim(),
-                color: variantSeed.color.trim(),
-                size: variantSeed.size.trim(),
-                price: new Prisma.Decimal(this.toNumber(variantSeed.retailPrice)),
-                costPrice: new Prisma.Decimal(this.toNumber(variantSeed.importPrice)),
-                status: VariantStatus.ACTIVE,
-              },
-              select: { id: true, sku: true, productId: true },
+            variantsToCreate.push({
+              productId: product.id,
+              sku: variantSeed.sku.trim(),
+              color: variantSeed.color.trim(),
+              size: variantSeed.size.trim(),
+              price: new Prisma.Decimal(this.toNumber(variantSeed.retailPrice)),
+              costPrice: new Prisma.Decimal(this.toNumber(variantSeed.importPrice)),
+              status: VariantStatus.ACTIVE,
             });
-
-            variantBySku.set(createdVariant.sku, createdVariant);
-
-            for (const [branchId, qty] of Object.entries(variantSeed.branchStocks || {})) {
-              await this.prisma.inventoryItem.upsert({
-                where: {
-                  variantId_branchId: {
-                    variantId: createdVariant.id,
-                    branchId,
-                  },
-                },
-                update: {
-                  availableQty: this.toNumber(qty),
-                },
-                create: {
-                  variantId: createdVariant.id,
-                  branchId,
-                  availableQty: this.toNumber(qty),
-                  reservedQty: 0,
-                  incomingQty: 0,
-                },
-              });
-            }
-          } else {
-            await this.prisma.productVariant.update({
-              where: { id: existingVariant.id },
+          } else if (overwrite) {
+            variantsToUpdate.push({
+              id: existingVariant.id,
               data: {
-                productId: product.id,
+                product: { connect: { id: product.id } },
                 color: variantSeed.color.trim(),
                 size: variantSeed.size.trim(),
                 price: new Prisma.Decimal(this.toNumber(variantSeed.retailPrice)),
                 costPrice: new Prisma.Decimal(this.toNumber(variantSeed.importPrice)),
               },
             });
-
-            for (const [branchId, qty] of Object.entries(variantSeed.branchStocks || {})) {
-              await this.prisma.inventoryItem.upsert({
-                where: {
-                  variantId_branchId: {
-                    variantId: existingVariant.id,
-                    branchId,
-                  },
-                },
-                update: {
-                  availableQty: this.toNumber(qty),
-                },
-                create: {
-                  variantId: existingVariant.id,
-                  branchId,
-                  availableQty: this.toNumber(qty),
-                  reservedQty: 0,
-                  incomingQty: 0,
-                },
-              });
-            }
           }
 
-          successRows += 1;
+          productIdsNeedingInventory.add(product.id);
         }
       } catch (error) {
         failedRows += productSeed.variants.length;
         errors.push(
-          `${productSeed.name}: ${error instanceof Error ? error.message : "Import lỗi"
-          }`
+          `${productSeed.name}: ${error instanceof Error ? error.message : "Import lỗi"}`
         );
       }
     }
+
+    for (const chunk of this.chunkArray(variantsToCreate, 1000)) {
+      if (!chunk.length) continue;
+      await this.prisma.productVariant.createMany({
+        data: chunk,
+        skipDuplicates: true,
+      });
+    }
+
+    for (const chunk of this.chunkArray(variantsToUpdate, 200)) {
+      await Promise.all(
+        chunk.map((item) =>
+          this.prisma.productVariant.update({
+            where: { id: item.id },
+            data: item.data,
+          })
+        )
+      );
+    }
+
+    const finalVariants = await this.prisma.productVariant.findMany({
+      where: { sku: { in: allSkus } },
+      select: { id: true, sku: true },
+    });
+
+    const finalVariantBySku = new Map(finalVariants.map((variant) => [variant.sku, variant]));
+    const finalVariantIds = finalVariants.map((variant) => variant.id);
+
+    if (finalVariantIds.length > 0) {
+      for (const chunk of this.chunkArray(finalVariantIds, 1000)) {
+        await this.prisma.inventoryItem.deleteMany({
+          where: { variantId: { in: chunk } },
+        });
+      }
+    }
+
+    const inventoryRows: Prisma.InventoryItemCreateManyInput[] = [];
+
+    for (const productSeed of grouped.values()) {
+      for (const variantSeed of productSeed.variants) {
+        const variant = finalVariantBySku.get(variantSeed.sku.trim());
+        if (!variant) continue;
+
+        for (const [branchId, qty] of Object.entries(variantSeed.branchStocks || {})) {
+          inventoryRows.push({
+            variantId: variant.id,
+            branchId,
+            availableQty: this.toNumber(qty),
+            reservedQty: 0,
+            incomingQty: 0,
+          });
+        }
+      }
+    }
+
+    for (const chunk of this.chunkArray(inventoryRows, 1000)) {
+      if (!chunk.length) continue;
+      await this.prisma.inventoryItem.createMany({
+        data: chunk,
+        skipDuplicates: true,
+      });
+    }
+
+    successRows = finalVariants.length;
 
     return {
       successRows,
       failedRows,
       errors,
+      importedProducts: grouped.size,
+      importedVariants: allSkus.length,
+      createdVariants: variantsToCreate.length,
+      updatedVariants: variantsToUpdate.length,
+      inventoryRows: inventoryRows.length,
     };
   }
 
+  async getProductCategoryOptions() {
+    const products = await this.prisma.product.findMany({
+      where: {
+        status: { not: ProductStatus.INACTIVE },
+        category: { not: null },
+      },
+      select: { category: true },
+    });
+
+    const categoryByKey = new Map<string, string>();
+
+    for (const product of products) {
+      const raw = String(product.category || "").trim();
+      if (!raw) continue;
+
+      const key = this.normalizeHeader(raw);
+      if (!categoryByKey.has(key)) {
+        categoryByKey.set(key, raw);
+      }
+    }
+
+    return Array.from(categoryByKey.values()).sort((a, b) =>
+      a.localeCompare(b, "vi")
+    );
+  }
+
+  async renameCategory(oldName: string, newName: string) {
+    const cleanOldName = String(oldName || "").trim();
+    const cleanNewName = String(newName || "").trim();
+
+    if (!cleanOldName) {
+      throw new BadRequestException("Thiếu danh mục cần đổi");
+    }
+
+    if (!cleanNewName) {
+      throw new BadRequestException("Thiếu tên danh mục chuẩn");
+    }
+
+    const normalizedOld = this.normalizeHeader(cleanOldName);
+
+    const products = await this.prisma.product.findMany({
+      where: { category: { not: null } },
+      select: { id: true, category: true },
+    });
+
+    const matchedIds = products
+      .filter((product) => this.normalizeHeader(product.category) === normalizedOld)
+      .map((product) => product.id);
+
+    if (!matchedIds.length) {
+      return { updated: 0, category: cleanNewName };
+    }
+
+    let updated = 0;
+    for (const chunk of this.chunkArray(matchedIds, 1000)) {
+      const result = await this.prisma.product.updateMany({
+        where: { id: { in: chunk } },
+        data: { category: cleanNewName },
+      });
+      updated += result.count;
+    }
+
+    try {
+      const slug = this.normalizeSlug(cleanNewName);
+      const code = slug.replace(/-/g, "_").toUpperCase();
+
+      const existing = await this.prisma.category.findFirst({
+        where: { OR: [{ slug }, { name: cleanNewName }] },
+        select: { id: true },
+      });
+
+      if (existing) {
+        await this.prisma.category.update({
+          where: { id: existing.id },
+          data: { name: cleanNewName, slug, code, isActive: true },
+        });
+      } else {
+        await this.prisma.category.create({
+          data: {
+            name: cleanNewName,
+            slug,
+            code,
+            description: null,
+            isActive: true,
+          },
+        });
+      }
+    } catch {
+      // Product.category is still updated even if the config category sync fails.
+    }
+
+    return { updated, category: cleanNewName };
+  }
   async addVariant(productId: string, data: AddVariantInput) {
     const product = await this.prisma.product.findUnique({
       where: { id: productId },
@@ -1078,4 +1324,76 @@ const sapoBranchMap: Record<string, string | undefined> = {
 
     return { success: true };
   }
+  async syncCategoriesFromProducts() {
+  const products = await this.prisma.product.findMany({
+    where: { category: { not: null } },
+    select: { id: true, category: true },
+  });
+
+  const groups = new Map<string, { name: string; productIds: string[] }>();
+
+  for (const product of products) {
+    const name = String(product.category || "").trim();
+    if (!name) continue;
+
+    const key = this.normalizeHeader(name);
+
+    if (!groups.has(key)) {
+      groups.set(key, { name, productIds: [] });
+    }
+
+    groups.get(key)!.productIds.push(product.id);
+  }
+
+  const existingCategories = await this.prisma.category.findMany({
+    select: { id: true, name: true },
+  });
+
+  const categoryByKey = new Map(
+    existingCategories.map((category) => [
+      this.normalizeHeader(category.name),
+      category,
+    ])
+  );
+
+  let created = 0;
+  let updatedProducts = 0;
+
+  for (const [key, group] of groups.entries()) {
+    let category = categoryByKey.get(key);
+
+    if (!category) {
+      category = await this.prisma.category.create({
+        data: {
+          name: group.name,
+          code: this.normalizeSlug(group.name).replace(/-/g, "_").toUpperCase(),
+          slug: this.normalizeSlug(group.name),
+          description: null,
+          isActive: true,
+        },
+        select: { id: true, name: true },
+      });
+
+      categoryByKey.set(key, category);
+      created += 1;
+    }
+
+    const result = await this.prisma.product.updateMany({
+      where: { id: { in: group.productIds } },
+      data: {
+        categoryId: category.id,
+        category: category.name,
+      },
+    });
+
+    updatedProducts += result.count;
+  }
+
+  return {
+    success: true,
+    categories: groups.size,
+    created,
+    updatedProducts,
+  };
+}
 }
