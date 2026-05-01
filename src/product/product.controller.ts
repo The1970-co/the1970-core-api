@@ -12,17 +12,14 @@ import {
   UploadedFiles,
   UseInterceptors,
 } from "@nestjs/common";
-import {
-  FileInterceptor,
-  FilesInterceptor,
-} from "@nestjs/platform-express";
+import { FileInterceptor, FilesInterceptor } from "@nestjs/platform-express";
 import { Readable } from "stream";
 import cloudinary from "../utils/cloudinary";
 import { ProductService } from "./product.service";
 
 @Controller("products")
 export class ProductController {
-  constructor(private readonly productService: ProductService) { }
+  constructor(private readonly productService: ProductService) {}
 
   @Get()
   getProducts(
@@ -30,7 +27,7 @@ export class ProductController {
     @Query("limit") limit?: string,
     @Query("q") q?: string,
     @Query("category") category?: string,
-    @Query("status") status?: string
+    @Query("status") status?: string,
   ) {
     return this.productService.getProducts({
       page: Number(page || 1),
@@ -39,6 +36,28 @@ export class ProductController {
       category,
       status,
     });
+  }
+
+  @Get("missing-cost")
+  getMissingCostProducts() {
+    return this.productService.getMissingCostProducts();
+  }
+
+  @Patch("missing-cost/bulk-update")
+  updateMissingCostBulk(
+    @Body()
+    body: {
+      items: Array<{ variantId: string; sku?: string; costPrice: number }>;
+    },
+  ) {
+    return this.productService.updateMissingCostBulk(body.items || []);
+  }
+
+  // 🔥 THÊM API MỚI (KHÔNG ẢNH HƯỞNG CÁI CŨ)
+  @Post("missing-cost-from-excel")
+  @UseInterceptors(FileInterceptor("file"))
+  checkMissingCostFromExcel(@UploadedFile() file: Express.Multer.File) {
+    return this.productService.checkMissingCostFromExcel(file);
   }
 
   @Post("sync-categories")
@@ -51,31 +70,11 @@ export class ProductController {
     return this.productService.getProductCategoryOptions();
   }
 
-  @Get(":id")
-  getProductById(@Param("id") id: string) {
-    return this.productService.getProductById(id);
-  }
-
-  @Post()
-  createProduct(@Body() body: any) {
-    return this.productService.createProduct(body);
-  }
-
-  @Patch(":id")
-  updateProduct(@Param("id") id: string, @Body() body: any) {
-    return this.productService.updateProduct(id, body);
-  }
-
-  @Delete(":id")
-  deleteProduct(@Param("id") id: string) {
-    return this.productService.deleteProduct(id);
-  }
-
   @Post("import")
   @UseInterceptors(FilesInterceptor("files"))
   importProducts(
     @UploadedFiles() files: Express.Multer.File[],
-    @Body("overwrite") overwrite?: string
+    @Body("overwrite") overwrite?: string,
   ) {
     return this.productService.importProducts(files, overwrite === "true");
   }
@@ -97,7 +96,7 @@ export class ProductController {
           (error, result) => {
             if (result) resolve(result);
             else reject(error);
-          }
+          },
         );
 
         Readable.from(fileBuffer).pipe(stream);
@@ -116,6 +115,31 @@ export class ProductController {
   @Post("rename-category")
   renameCategory(@Body() body: { oldName: string; newName: string }) {
     return this.productService.renameCategory(body.oldName, body.newName);
+  }
+
+  @Post("merge-duplicates")
+  mergeDuplicateProducts() {
+    return this.productService.mergeDuplicateProducts();
+  }
+
+  @Post()
+  createProduct(@Body() body: any) {
+    return this.productService.createProduct(body);
+  }
+
+  @Get(":id")
+  getProductById(@Param("id") id: string) {
+    return this.productService.getProductById(id);
+  }
+
+  @Patch(":id")
+  updateProduct(@Param("id") id: string, @Body() body: any) {
+    return this.productService.updateProduct(id, body);
+  }
+
+  @Delete(":id")
+  deleteProduct(@Param("id") id: string) {
+    return this.productService.deleteProduct(id);
   }
 
   @Post(":id/variants")

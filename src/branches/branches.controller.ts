@@ -1,7 +1,7 @@
 import {
   Body,
   Controller,
-  Get,
+ Get,
   Post,
   Patch,
   Param,
@@ -28,6 +28,8 @@ export class BranchesController {
         id: true,
         name: true,
         address: true,
+        phone: true,
+        email: true,
         isActive: true,
       },
     });
@@ -43,6 +45,8 @@ export class BranchesController {
       id: string;
       name: string;
       address?: string;
+      phone?: string;
+      email?: string;
     }
   ) {
     const id = String(body.id || "").trim();
@@ -64,6 +68,8 @@ export class BranchesController {
         id,
         name,
         address: body.address || null,
+        phone: body.phone || null,
+        email: body.email || null,
         isActive: true,
       },
     });
@@ -80,13 +86,28 @@ export class BranchesController {
       newId?: string;
       name?: string;
       address?: string;
+      phone?: string;
+      email?: string;
     }
   ) {
     const oldBranchId = String(oldId || "").trim();
     const newBranchId = String(body.newId || oldId || "").trim();
     const name = String(body.name || "").trim();
+
     const address =
-      body.address === undefined ? undefined : String(body.address || "").trim();
+      body.address === undefined
+        ? undefined
+        : String(body.address || "").trim();
+
+    const phone =
+      body.phone === undefined
+        ? undefined
+        : String(body.phone || "").trim();
+
+    const email =
+      body.email === undefined
+        ? undefined
+        : String(body.email || "").trim();
 
     if (!oldBranchId) {
       throw new BadRequestException("Thiếu mã kho hiện tại");
@@ -119,6 +140,7 @@ export class BranchesController {
     }
 
     return this.prisma.$transaction(async (tx) => {
+      // cascade khi đổi mã kho
       if (newBranchId !== oldBranchId) {
         await tx.staffUser.updateMany({
           where: { branchId: oldBranchId },
@@ -156,7 +178,18 @@ export class BranchesController {
         data: {
           id: newBranchId,
           name,
-          address: address === undefined ? existingBranch.address : address || null,
+          address:
+            address === undefined
+              ? existingBranch.address
+              : address || null,
+          phone:
+            phone === undefined
+              ? existingBranch.phone
+              : phone || null,
+          email:
+            email === undefined
+              ? existingBranch.email
+              : email || null,
         },
       });
 

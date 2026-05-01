@@ -1,3 +1,4 @@
+// create-warehouse-map.dto.ts
 export class CreateWarehouseMapDto {
   branchId: string;
   name: string;

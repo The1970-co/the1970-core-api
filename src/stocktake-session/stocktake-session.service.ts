@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "src/prisma/prisma.service";
 import { CreateStocktakeSessionDto } from "./dto/create-stocktake-session.dto";
 import { JoinStocktakeSessionDto } from "./dto/join-stocktake-session.dto";
@@ -7,6 +7,114 @@ import { ScanStocktakeDto } from "./dto/scan-stocktake.dto";
 @Injectable()
 export class StocktakeSessionService {
   constructor(private prisma: PrismaService) {}
+
+  private normalizeStatus(status?: string | null) {
+    return String(status || "").trim().toUpperCase();
+  }
+
+  private isPaused(status?: string | null) {
+    return this.normalizeStatus(status) === "PAUSED";
+  }
+
+  private isClosed(status?: string | null) {
+    return ["FINISHED", "APPLIED", "CANCELLED"].includes(this.normalizeStatus(status));
+  }
+
+  private async createSnapshotForSession(sessionId: string, branchId: string) {
+    const existing = await this.prisma.stocktakeSnapshot.count({
+      where: { sessionId },
+    });
+
+    if (existing > 0) {
+      return { created: 0, skipped: existing };
+    }
+
+    const inventoryItems = await this.prisma.inventoryItem.findMany({
+      where: { branchId },
+      select: {
+        variantId: true,
+        branchId: true,
+        availableQty: true,
+      },
+    });
+
+    if (!inventoryItems.length) {
+      return { created: 0, skipped: 0 };
+    }
+
+    await this.prisma.stocktakeSnapshot.createMany({
+      data: inventoryItems.map((item) => ({
+        sessionId,
+        branchId: item.branchId,
+        variantId: item.variantId,
+        snapshotQty: Number(item.availableQty || 0),
+      })),
+      skipDuplicates: true,
+    });
+
+    return { created: inventoryItems.length, skipped: 0 };
+  }
+
+  private async updateRealtimeCount(input: {
+    sessionId: string;
+    workerId?: string | null;
+    branchId: string;
+    variantId?: string | null;
+    sku: string;
+    qtyDelta: number;
+    zone?: string | null;
+    areaId?: string | null;
+    rackId?: string | null;
+    rackCode?: string | null;
+    locationCode?: string | null;
+    status: string;
+  }) {
+    const existing = await this.prisma.stocktakeCount.findFirst({
+      where: {
+        sessionId: input.sessionId,
+        branchId: input.branchId,
+        sku: input.sku,
+        workerId: input.workerId || null,
+      },
+    });
+
+    if (existing) {
+      return this.prisma.stocktakeCount.update({
+        where: { id: existing.id },
+        data: {
+          countedQty: { increment: input.qtyDelta },
+          eventCount: { increment: 1 },
+          variantId: input.variantId || existing.variantId,
+          zone: input.zone || existing.zone,
+          areaId: input.areaId || existing.areaId,
+          rackId: input.rackId || existing.rackId,
+          rackCode: input.rackCode || existing.rackCode,
+          locationCode: input.locationCode || existing.locationCode,
+          status: input.status,
+          lastScannedAt: new Date(),
+        },
+      });
+    }
+
+    return this.prisma.stocktakeCount.create({
+      data: {
+        sessionId: input.sessionId,
+        workerId: input.workerId || null,
+        branchId: input.branchId,
+        variantId: input.variantId || null,
+        sku: input.sku,
+        countedQty: input.qtyDelta,
+        eventCount: 1,
+        zone: input.zone || null,
+        areaId: input.areaId || null,
+        rackId: input.rackId || null,
+        rackCode: input.rackCode || null,
+        locationCode: input.locationCode || null,
+        status: input.status,
+        lastScannedAt: new Date(),
+      },
+    });
+  }
 
   createSession(dto: CreateStocktakeSessionDto) {
     return this.prisma.stocktakeSession.create({
@@ -56,12 +164,103 @@ export class StocktakeSessionService {
     });
   }
 
-  startSession(id: string) {
+  async startSession(id: string) {
+    const session = await this.prisma.stocktakeSession.findUnique({
+      where: { id },
+    });
+
+    if (!session) {
+      throw new NotFoundException("Không tìm thấy phiên kiểm kho.");
+    }
+
+    await this.createSnapshotForSession(id, session.branchId);
+
     return this.prisma.stocktakeSession.update({
       where: { id },
       data: {
         status: "IN_PROGRESS",
-        startedAt: new Date(),
+        startedAt: session.startedAt || new Date(),
+      },
+      include: {
+        workers: true,
+        scanEvents: {
+          orderBy: { createdAt: "desc" },
+          take: 100,
+        },
+        _count: {
+          select: {
+            scanEvents: true,
+          },
+        },
+      },
+    });
+  }
+
+  async pauseSession(id: string) {
+    const session = await this.prisma.stocktakeSession.findUnique({
+      where: { id },
+    });
+
+    if (!session) {
+      throw new NotFoundException("Không tìm thấy phiên kiểm kho.");
+    }
+
+    if (this.isClosed(session.status)) {
+      throw new BadRequestException("Phiên kiểm kho đã kết thúc.");
+    }
+
+    return this.prisma.stocktakeSession.update({
+      where: { id },
+      data: {
+        status: "PAUSED",
+      },
+      include: {
+        workers: true,
+        scanEvents: {
+          orderBy: { createdAt: "desc" },
+          take: 100,
+        },
+        _count: {
+          select: {
+            scanEvents: true,
+          },
+        },
+      },
+    });
+  }
+
+  async resumeSession(id: string) {
+    const session = await this.prisma.stocktakeSession.findUnique({
+      where: { id },
+    });
+
+    if (!session) {
+      throw new NotFoundException("Không tìm thấy phiên kiểm kho.");
+    }
+
+    if (this.isClosed(session.status)) {
+      throw new BadRequestException("Phiên kiểm kho đã kết thúc.");
+    }
+
+    await this.createSnapshotForSession(id, session.branchId);
+
+    return this.prisma.stocktakeSession.update({
+      where: { id },
+      data: {
+        status: "IN_PROGRESS",
+        startedAt: session.startedAt || new Date(),
+      },
+      include: {
+        workers: true,
+        scanEvents: {
+          orderBy: { createdAt: "desc" },
+          take: 100,
+        },
+        _count: {
+          select: {
+            scanEvents: true,
+          },
+        },
       },
     });
   }
@@ -230,6 +429,16 @@ export class StocktakeSessionService {
       throw new NotFoundException("Không tìm thấy phiên kiểm kho.");
     }
 
+    if (this.isPaused(session.status)) {
+      throw new BadRequestException("Phiên kiểm kho đang tạm dừng. Bấm tiếp tục để scan.");
+    }
+
+    if (this.isClosed(session.status)) {
+      throw new BadRequestException("Phiên kiểm kho đã kết thúc, không thể scan thêm.");
+    }
+
+    await this.createSnapshotForSession(dto.sessionId, session.branchId);
+
     const variant = await this.prisma.productVariant.findFirst({
       where: {
         sku: code,
@@ -254,6 +463,21 @@ export class StocktakeSessionService {
         status: variant ? "OK" : "NOT_FOUND",
         note: dto.note,
       },
+    });
+
+    await this.updateRealtimeCount({
+      sessionId: dto.sessionId,
+      workerId: dto.workerId || null,
+      branchId: dto.branchId,
+      variantId: variant?.id || null,
+      sku: variant?.sku || code,
+      qtyDelta: dto.qtyDelta ?? 1,
+      zone: dto.zone || dto.aisle || targetRack?.aisle || null,
+      areaId: dto.areaId || null,
+      rackId: dto.rackId || targetRack?.id || null,
+      rackCode: dto.rackCode || targetRack?.code || null,
+      locationCode: finalLocationCode || null,
+      status: variant ? "OK" : "NOT_FOUND",
     });
 
     await this.prisma.stocktakeSession.update({
@@ -326,35 +550,138 @@ export class StocktakeSessionService {
   }
 
   async getSessionSummary(sessionId: string) {
-    const events = await this.prisma.stocktakeScanEvent.findMany({
-      where: { sessionId },
-      orderBy: { createdAt: "asc" },
+    const session = await this.prisma.stocktakeSession.findUnique({
+      where: { id: sessionId },
     });
 
-    const grouped = new Map<string, any>();
-
-    for (const event of events) {
-      const key = event.variantId || event.sku;
-
-      const current = grouped.get(key) || {
-        variantId: event.variantId,
-        sku: event.sku,
-        counted: 0,
-        status: event.status,
-        events: 0,
-      };
-
-      current.counted += event.qtyDelta;
-      current.events += 1;
-
-      if (event.status !== "OK") {
-        current.status = event.status;
-      }
-
-      grouped.set(key, current);
+    if (!session) {
+      throw new NotFoundException("Không tìm thấy phiên kiểm kho.");
     }
 
-    return Array.from(grouped.values()).filter((row) => row.counted > 0);
+    await this.createSnapshotForSession(sessionId, session.branchId);
+
+    let counts = await this.prisma.stocktakeCount.findMany({
+      where: { sessionId },
+      orderBy: { lastScannedAt: "asc" },
+    });
+
+    // Backfill aggregate cho phiên cũ đã có scanEvents nhưng chưa có StocktakeCount.
+    if (!counts.length) {
+      const events = await this.prisma.stocktakeScanEvent.findMany({
+        where: { sessionId },
+        orderBy: { createdAt: "asc" },
+      });
+
+      for (const event of events) {
+        await this.updateRealtimeCount({
+          sessionId: event.sessionId,
+          workerId: event.workerId || null,
+          branchId: event.branchId,
+          variantId: event.variantId || null,
+          sku: event.sku,
+          qtyDelta: event.qtyDelta,
+          zone: event.zone || null,
+          areaId: null,
+          rackId: null,
+          rackCode: null,
+          locationCode: event.locationCode || null,
+          status: event.status,
+        });
+      }
+
+      counts = await this.prisma.stocktakeCount.findMany({
+        where: { sessionId },
+        orderBy: { lastScannedAt: "asc" },
+      });
+    }
+
+    const variantIds = counts
+      .map((row) => row.variantId)
+      .filter(Boolean) as string[];
+
+    const [snapshots, movements] = await Promise.all([
+      variantIds.length
+        ? this.prisma.stocktakeSnapshot.findMany({
+            where: {
+              sessionId,
+              variantId: { in: variantIds },
+            },
+          })
+        : Promise.resolve([]),
+      variantIds.length
+        ? this.prisma.inventoryMovement.groupBy({
+            by: ["variantId"],
+            where: {
+              branchId: session.branchId,
+              variantId: { in: variantIds },
+              createdAt: {
+                gte: session.startedAt || session.createdAt,
+              },
+              refType: {
+                not: "STOCKTAKE",
+              },
+            },
+            _sum: {
+              qty: true,
+            },
+          })
+        : Promise.resolve([]),
+    ]);
+
+const snapshotMap = new Map<string, number>(
+  snapshots.map((item) => [
+    item.variantId,
+    Number(item.snapshotQty || 0),
+  ] as [string, number])
+);
+
+const movementMap = new Map<string, number>(
+  movements.map((item) => [
+    item.variantId,
+    Number(item._sum.qty || 0),
+  ] as [string, number])
+);
+
+    return counts
+      .filter((row) => Number(row.countedQty || 0) > 0)
+      .map((row) => {
+        const snapshotQty = row.variantId
+          ? Number(snapshotMap.get(row.variantId) || 0)
+          : 0;
+        const movementDuringStocktake = row.variantId
+          ? Number(movementMap.get(row.variantId) || 0)
+          : 0;
+        const counted = Number(row.countedQty || 0);
+        const diff = counted - snapshotQty;
+        const finalQty = snapshotQty + diff + movementDuringStocktake;
+
+        return {
+          variantId: row.variantId,
+          workerId: row.workerId,
+          sku: row.sku,
+          counted,
+          countedQty: counted,
+          status: row.status,
+          events: row.eventCount,
+          eventCount: row.eventCount,
+          zone: row.zone,
+          areaId: row.areaId,
+          rackId: row.rackId,
+          rackCode: row.rackCode,
+          locationCode: row.locationCode,
+          lastScannedAt: row.lastScannedAt,
+          snapshotQty,
+          system: snapshotQty,
+          diff,
+          movementDuringStocktake,
+          finalQty,
+        };
+      });
+  }
+
+    async getWorkerSummary(sessionId: string, workerId: string) {
+    const rows = await this.getSessionSummary(sessionId);
+    return rows.filter((row: any) => row.workerId === workerId);
   }
 
   async getZoneSummary(sessionId: string) {
@@ -384,4 +711,36 @@ export class StocktakeSessionService {
       };
     });
   }
+  // OPTIONAL BACKEND PATCH: active session endpoint
+// Dán vào StocktakeSessionService nếu muốn frontend load phiên active theo chi nhánh.
+// Frontend trong gói này đã có localStorage resume, nên endpoint này là nâng cấp thêm.
+
+async getActiveSession(branchId?: string) {
+  const session = await this.prisma.stocktakeSession.findFirst({
+    where: {
+      ...(branchId ? { branchId } : {}),
+      status: {
+        in: ["IN_PROGRESS", "PAUSED", "DRAFT"],
+      },
+    },
+    orderBy: {
+      updatedAt: "desc",
+    },
+    include: {
+      workers: true,
+      scanEvents: {
+        orderBy: { createdAt: "desc" },
+        take: 100,
+      },
+      _count: {
+        select: {
+          scanEvents: true,
+        },
+      },
+    },
+  });
+
+  return session;
+}
+
 }

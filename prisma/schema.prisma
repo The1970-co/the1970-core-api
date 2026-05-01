@@ -62,6 +62,7 @@ model ProductVariant {
   product              Product               @relation(fields: [productId], references: [id], onDelete: Cascade)
   purchaseReceiptItems PurchaseReceiptItem[]
   stockTransferItems   StockTransferItem[]
+  locations ProductVariantLocation[]
 }
 
 model InventoryItem {
@@ -294,6 +295,11 @@ codReconciliationBatchId String?
 codReconciliationRowId   String?
 codReconciliationIssue   String?
 codReconciliationAmount  Int?
+  ahamoveOrderId      String?
+  ahamoveTrackingUrl  String?
+  ahamoveStatus       String?
+  ahamoveSubStatus    String?
+  ahamoveRaw          Json?
 }
 
 model AuditLog {
@@ -330,16 +336,20 @@ secondPasswordEnabled Boolean @default(false)
 }
 
 model Branch {
-  id                 String            @id
-  name               String
-  address            String?
-  isActive           Boolean           @default(true)
-  createdAt          DateTime          @default(now())
-  updatedAt          DateTime          @updatedAt
+  id        String   @id
+  name      String
+  address   String?
+  phone     String?
+  email     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   importJobs         ImportJob[]
   purchaseReceipts   PurchaseReceipt[]
-  stockTransfersFrom StockTransfer[]   @relation("FromBranch")
-  stockTransfersTo   StockTransfer[]   @relation("ToBranch")
+  stockTransfersFrom StockTransfer[] @relation("FromBranch")
+  stockTransfersTo   StockTransfer[] @relation("ToBranch")
+  variantLocations ProductVariantLocation[]
 }
 
 model ImportJob {
@@ -680,6 +690,7 @@ enum SalesChannel {
   INTL_WEB
   FACEBOOK_MANUAL
   SHOWROOM
+  POS
   OTHER
 }
 
@@ -938,24 +949,34 @@ model WarehouseShelf {
 }
 
 model ProductVariantLocation {
-  id          String   @id @default(cuid())
+  id        String   @id @default(cuid())
 
-  variantId   String
-  rackId      String?
-  shelfId     String?
+  variantId String
+  branchId  String?
+  areaId    String?
+  rackId    String?
+  shelfId   String?
 
-  isPrimary   Boolean  @default(false)
-  note        String?
+  minQty    Int?
+  maxQty    Int?
+  note      String?
+  isActive  Boolean  @default(true)
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  rack        WarehouseRack?  @relation(fields: [rackId], references: [id], onDelete: Cascade)
-  shelf       WarehouseShelf? @relation(fields: [shelfId], references: [id], onDelete: Cascade)
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  branch  Branch?        @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  area    StocktakeArea? @relation(fields: [areaId], references: [id], onDelete: SetNull)
+  rack    WarehouseRack? @relation(fields: [rackId], references: [id], onDelete: SetNull)
+  shelf   WarehouseShelf? @relation(fields: [shelfId], references: [id], onDelete: SetNull)
 
   @@index([variantId])
+  @@index([branchId])
+  @@index([areaId])
   @@index([rackId])
   @@index([shelfId])
+  isPrimary Boolean @default(false)
 }
 
 model StocktakeArea {
@@ -984,7 +1005,9 @@ model StocktakeArea {
   @@index([mapId])
   @@index([scopeType])
   @@index([status])
+  variantLocations ProductVariantLocation[]
 }
+
 model WarehouseFloor {
   id        String   @id @default(cuid())
   mapId     String
@@ -1046,3 +1069,53 @@ model WarehouseDoor {
   @@index([mapId])
   @@index([floorId])
 }
+
+// ===== STOCKTAKE SNAPSHOT + REALTIME COUNT PATCH =====
+model StocktakeSnapshot {
+  id          String   @id @default(cuid())
+  sessionId   String
+  branchId    String
+  variantId   String
+  snapshotQty Int      @default(0)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([sessionId, variantId, branchId])
+  @@index([sessionId])
+  @@index([branchId])
+  @@index([variantId])
+}
+
+model StocktakeCount {
+  id             String    @id @default(cuid())
+  sessionId      String
+  workerId       String?
+  branchId       String
+  variantId      String?
+  sku            String
+
+  countedQty     Int       @default(0)
+  eventCount     Int       @default(0)
+
+  zone           String?
+  areaId         String?
+  rackId         String?
+  rackCode       String?
+  locationCode   String?
+  status         String    @default("OK")
+
+  lastScannedAt  DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([sessionId, branchId, sku, workerId])
+  @@index([sessionId])
+  @@index([workerId])
+  @@index([branchId])
+  @@index([variantId])
+  @@index([areaId])
+  @@index([rackId])
+}
+
+

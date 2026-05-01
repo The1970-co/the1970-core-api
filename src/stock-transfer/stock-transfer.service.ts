@@ -426,6 +426,56 @@ async handleAutoRebalanceCron() {
     };
   }
 
+  private normalizeCategoryText(value: any) {
+    return String(value || "")
+      .trim()
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\s+/g, " ");
+  }
+
+  private getProductCategoryNames(product: any): string[] {
+    const values = new Set<string>();
+
+    const pushValue = (value: any) => {
+      if (value === null || value === undefined) return;
+
+      if (typeof value === "string" || typeof value === "number") {
+        const text = String(value).trim();
+        if (text) values.add(text);
+        return;
+      }
+
+      if (typeof value === "object") {
+        pushValue(value.name);
+        pushValue(value.title);
+        pushValue(value.label);
+        pushValue(value.code);
+        pushValue(value.id);
+      }
+    };
+
+    pushValue(product?.categoryName);
+    pushValue(product?.category);
+    pushValue(product?.categoryId);
+    pushValue(product?.categoryCode);
+    pushValue(product?.productCategory);
+
+    if (Array.isArray(product?.categories)) {
+      for (const category of product.categories) pushValue(category);
+    }
+
+    if (Array.isArray(product?.productCategories)) {
+      for (const item of product.productCategories) {
+        pushValue(item);
+        pushValue(item?.category);
+      }
+    }
+
+    return Array.from(values);
+  }
+
 async generateOutboundSuggestions(dto: GenerateOutboundSuggestionsDto) {
   const defaultMinTarget = Number(dto.minTarget ?? 1);
   const maxPerVariant = Number(dto.maxPerVariant ?? 10);
@@ -465,7 +515,29 @@ async generateOutboundSuggestions(dto: GenerateOutboundSuggestionsDto) {
     },
   });
 
+  const selectedCategoryNames = (dto.categoryNames || [])
+    .map((name) => String(name || "").trim())
+    .filter(Boolean);
+
+  const selectedCategorySet = new Set(
+    selectedCategoryNames.map((name) => this.normalizeCategoryText(name))
+  );
+
   const filtered = lowInventories.filter((item) => {
+    // Nếu UI có chọn danh mục thì backend BẮT BUỘC phải filter theo danh mục.
+    // Không được quét tất cả như bản cũ.
+    if (selectedCategorySet.size > 0) {
+      const productCategoryNames = this.getProductCategoryNames(
+        (item as any).variant?.product
+      );
+
+      const matchedCategory = productCategoryNames.some((name) =>
+        selectedCategorySet.has(this.normalizeCategoryText(name))
+      );
+
+      if (!matchedCategory) return false;
+    }
+
     const target = Number(branchMinTargets[item.branchId] ?? defaultMinTarget);
     return item.availableQty < target;
   });
@@ -578,9 +650,37 @@ async generateOutboundSuggestions(dto: GenerateOutboundSuggestionsDto) {
       );
 
       const need = target - storeInv.availableQty;
-      const qty = Math.min(need, qoInv.availableQty, maxPerVariant);
+      const velocityBoost = soldQty > 0 ? Math.ceil(soldQty / Math.max(1, Math.ceil(salesVelocityDays / 7))) : 0;
+      const aiSuggestedQty = Math.min(
+        qoInv.availableQty,
+        maxPerVariant,
+        Math.max(need, need + Math.min(velocityBoost, Math.max(0, maxPerVariant - need)))
+      );
+      const qty = Math.max(0, aiSuggestedQty);
 
       if (qty <= 0) return null;
+
+      const shortageRatio = target > 0 ? need / target : 0;
+      const velocityRatio = target > 0 ? soldQty / Math.max(1, target) : soldQty;
+      const zeroStockBonus = storeInv.availableQty <= 0 ? 15 : 0;
+      const qoEnoughBonus = qoInv.availableQty >= need ? 5 : 0;
+      const aiScore = Math.min(
+        100,
+        Math.max(
+          1,
+          Math.round(35 + shortageRatio * 35 + Math.min(velocityRatio, 2) * 12 + zeroStockBonus + qoEnoughBonus)
+        )
+      );
+
+      const priority =
+        aiScore >= 85 ? "CRITICAL" : aiScore >= 70 ? "HIGH" : aiScore >= 50 ? "MEDIUM" : "LOW";
+
+      const aiReason =
+        priority === "CRITICAL"
+          ? `Ưu tiên rất cao: tồn ${storeInv.availableQty}/${target}, bán ${soldQty}/${salesVelocityDays} ngày, QO còn ${qoInv.availableQty}`
+          : priority === "HIGH"
+            ? `Ưu tiên cao: thiếu ${need}, bán ${soldQty}/${salesVelocityDays} ngày`
+            : `Đề xuất bù ngưỡng: thiếu ${need}, QO còn ${qoInv.availableQty}`;
 
       return {
         variantId: storeInv.variantId,
@@ -595,14 +695,31 @@ async generateOutboundSuggestions(dto: GenerateOutboundSuggestionsDto) {
         storeAvailableQty: storeInv.availableQty,
         branchMinTarget: target,
         soldQty,
+        salesVelocityDays,
         suggestedQty: qty,
-        reason: `Tồn ${storeInv.availableQty}/${target}, bán ${soldQty}/${salesVelocityDays} ngày`,
+        priority,
+        aiScore,
+        aiReason,
+        reason: aiReason,
       };
     })
-    .filter((item): item is NonNullable<typeof item> => item !== null);
+    .filter((item): item is NonNullable<typeof item> => item !== null)
+    .sort((a, b) => {
+      if (b.aiScore !== a.aiScore) return b.aiScore - a.aiScore;
+      if (a.toBranchId !== b.toBranchId) return a.toBranchId.localeCompare(b.toBranchId);
+      return a.sku.localeCompare(b.sku);
+    });
+
+  const summary = {
+    critical: suggestions.filter((item) => item.priority === "CRITICAL").length,
+    high: suggestions.filter((item) => item.priority === "HIGH").length,
+    medium: suggestions.filter((item) => item.priority === "MEDIUM").length,
+    low: suggestions.filter((item) => item.priority === "LOW").length,
+  };
 
   return {
     total: suggestions.length,
+    summary,
     suggestions,
   };
 }
@@ -627,29 +744,25 @@ const suggestions = result.suggestions.filter(
     }
 
     const createdTransfers: any[] = [];
-    const MAX_LINES = 6;
 
+    // Level 4 rule: mỗi chi nhánh nhận chỉ tạo 1 phiếu duy nhất.
+    // Không chia batch theo số dòng nữa để tránh TH/XD/CL bị sinh nhiều phiếu lẻ.
     for (const [toBranchId, items] of grouped.entries()) {
-      for (let i = 0; i < items.length; i += MAX_LINES) {
-        const chunk = items.slice(i, i + MAX_LINES);
-        const batchNumber = Math.floor(i / MAX_LINES) + 1;
+      const transfer = await this.create({
+        direction: StockTransferDirection.OUTBOUND_TO_BRANCH,
+        sourceType: StockTransferSourceType.AUTO,
+        fromBranchId: "QO",
+        toBranchId,
+        note: "Auto cấp hàng (1 phiếu / kho)",
+        createdById: dto.createdById,
+        createdByName: dto.createdByName || "Auto Rebalance",
+        items: items.map((item) => ({
+          variantId: item.variantId,
+          qty: item.suggestedQty,
+        })),
+      });
 
-        const transfer = await this.create({
-          direction: StockTransferDirection.OUTBOUND_TO_BRANCH,
-          sourceType: StockTransferSourceType.AUTO,
-          fromBranchId: "QO",
-          toBranchId,
-          note: `Auto cấp hàng - batch ${batchNumber}`,
-          createdById: dto.createdById,
-          createdByName: dto.createdByName || "Auto Rebalance",
-          items: chunk.map((item) => ({
-            variantId: item.variantId,
-            qty: item.suggestedQty,
-          })),
-        });
-
-        createdTransfers.push(transfer);
-      }
+      createdTransfers.push(transfer);
     }
 
     return {
@@ -904,4 +1017,30 @@ const suggestions = result.suggestions.filter(
       completedAt: updated.completedAt,
     };
   }
+
+  async delete(id: string) {
+    const transfer = await this.prisma.stockTransfer.findUnique({
+      where: { id },
+      include: { items: true },
+    });
+
+    if (!transfer) {
+      throw new NotFoundException("Không tìm thấy phiếu chuyển kho");
+    }
+
+    if (transfer.status !== TransferStatus.DRAFT && transfer.status !== TransferStatus.PENDING) {
+      throw new BadRequestException("Chỉ được xoá phiếu nháp hoặc phiếu chưa xác nhận");
+    }
+
+    await this.prisma.stockTransferItem.deleteMany({
+      where: { transferId: id },
+    });
+
+    await this.prisma.stockTransfer.delete({
+      where: { id },
+    });
+
+    return { success: true };
+  }
+
 }

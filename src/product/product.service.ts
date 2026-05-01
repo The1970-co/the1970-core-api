@@ -51,11 +51,35 @@ export class ProductService {
   constructor(private readonly prisma: PrismaService) { }
 
   private toNumber(value: unknown) {
-    if (typeof value === "number") return value;
     if (value === null || value === undefined || value === "") return 0;
-    const raw = String(value).replace(/[^\d.-]/g, "");
+    if (typeof value === "number") return Number.isFinite(value) ? Math.round(value) : 0;
+
+    let raw = String(value).trim().replace(/\s/g, "");
+    if (!raw) return 0;
+
+    // SAPO / Excel VN:
+    // 226.000 -> 226000
+    // 451.733,333 -> 451733
+    // 459,861 -> 459861
+    if (raw.includes(".") && raw.includes(",")) {
+      raw = raw.split(",")[0].replace(/\./g, "");
+    } else if (raw.includes(",")) {
+      const parts = raw.split(",");
+      const left = parts[0] || "";
+      const right = parts[1] || "";
+
+      if (right.length === 3 && left.length <= 3) {
+        raw = raw.replace(/,/g, "");
+      } else {
+        raw = left;
+      }
+    } else if (raw.includes(".")) {
+      raw = raw.replace(/\./g, "");
+    }
+
+    raw = raw.replace(/[^\d-]/g, "");
     const n = Number(raw);
-    return Number.isFinite(n) ? n : 0;
+    return Number.isFinite(n) ? Math.round(n) : 0;
   }
 
   private normalizeText(value: unknown) {
@@ -92,7 +116,9 @@ export class ProductService {
       .trim()
       .replace(/\s+/g, "")
       .toUpperCase();
-    const sizePart = String(size || "").trim().toUpperCase();
+    const sizePart = String(size || "")
+      .trim()
+      .toUpperCase();
     return `${base}-${colorPart}-${sizePart}`;
   }
 
@@ -102,14 +128,19 @@ export class ProductService {
       availableQty: number;
       reservedQty: number;
       incomingQty: number;
-    }>
+    }>,
   ) {
     return Object.fromEntries(
-      inventoryItems.map((item) => [item.branchId, Number(item.availableQty || 0)])
+      inventoryItems.map((item) => [
+        item.branchId,
+        Number(item.availableQty || 0),
+      ]),
     );
   }
 
-  private normalizeBranchStocks(input?: Record<string, unknown> | null): BranchStockMap {
+  private normalizeBranchStocks(
+    input?: Record<string, unknown> | null,
+  ): BranchStockMap {
     if (!input || typeof input !== "object" || Array.isArray(input)) {
       return {};
     }
@@ -117,7 +148,7 @@ export class ProductService {
     return Object.fromEntries(
       Object.entries(input)
         .filter(([key]) => String(key).trim().length > 0)
-        .map(([key, value]) => [key, this.toNumber(value)])
+        .map(([key, value]) => [key, this.toNumber(value)]),
     );
   }
 
@@ -126,16 +157,101 @@ export class ProductService {
     for (const key of keys) {
       const normalizedKey = this.normalizeHeader(key);
       const matched = rowKeys.find(
-        (rowKey) => this.normalizeHeader(rowKey) === normalizedKey
+        (rowKey) => this.normalizeHeader(rowKey) === normalizedKey,
       );
       if (matched) {
         const value = row[matched];
-        if (value !== undefined && value !== null && String(value).trim() !== "") {
+        if (
+          value !== undefined &&
+          value !== null &&
+          String(value).trim() !== ""
+        ) {
           return String(value).trim();
         }
       }
     }
     return "";
+  }
+
+
+  private findRawValue(row: Record<string, unknown>, keys: string[]) {
+    const rowKeys = Object.keys(row);
+    for (const key of keys) {
+      const normalizedKey = this.normalizeHeader(key);
+      const matched = rowKeys.find(
+        (rowKey) => this.normalizeHeader(rowKey) === normalizedKey,
+      );
+      if (matched) {
+        const value = row[matched];
+        if (value !== undefined && value !== null && String(value).trim() !== "") {
+          return value;
+        }
+      }
+    }
+    return "";
+  }
+
+  private excelColumnToIndex(column: string) {
+    let result = 0;
+    const clean = String(column || "").trim().toUpperCase();
+    for (const char of clean) {
+      const code = char.charCodeAt(0);
+      if (code < 65 || code > 90) continue;
+      result = result * 26 + (code - 64);
+    }
+    return result > 0 ? result - 1 : -1;
+  }
+
+  private findValueByColumn(row: Record<string, unknown>, column: string) {
+    const index = this.excelColumnToIndex(column);
+    if (index < 0) return "";
+    const value = row[`__COL_${index}`];
+    return value === undefined || value === null ? "" : value;
+  }
+
+  private getImportPrice(row: Record<string, unknown>) {
+    return this.toNumber(
+      this.findRawValue(row, [
+        "Giá nhập",
+        "Gia nhap",
+        "Giá vốn",
+        "Gia von",
+        "costPrice",
+        "cost price",
+      ]) ||
+      this.findValueByColumn(row, "BB") ||
+      this.findValueByColumn(row, "BD"),
+    );
+  }
+
+  private getRetailPrice(row: Record<string, unknown>) {
+    return this.toNumber(
+      this.findRawValue(row, [
+        "PL_Giá bán lẻ",
+        "PL Gia ban le",
+        "Giá bán lẻ",
+        "Gia ban le",
+        "Giá bán",
+        "Gia ban",
+        "price",
+      ]) || this.findValueByColumn(row, "BA"),
+    );
+  }
+
+  private getBranchStocksFromImportRow(row: Record<string, unknown>) {
+    // Mapping theo file DS sản phẩm SAPO:
+    // LC_CN1 = Chùa Láng, LC_CN2 = Xã Đàn, LC_CN3 = Kho Quốc Oai, LC_CN4 = Thái Hà.
+    // LC_CN5 tạm bỏ qua nếu hệ thống chưa có branch tương ứng.
+    const stocks: BranchStockMap = {
+      CL: this.toNumber(this.findValueByColumn(row, "AB")),
+      XD: this.toNumber(this.findValueByColumn(row, "AV")),
+      QO: this.toNumber(this.findValueByColumn(row, "AQ")),
+      TH: this.toNumber(this.findValueByColumn(row, "AL")),
+    };
+
+    return Object.fromEntries(
+      Object.entries(stocks).filter(([, qty]) => Number.isFinite(qty)),
+    );
   }
 
   private getMainSkuCode(sku: string) {
@@ -170,9 +286,12 @@ export class ProductService {
     });
   }
 
-  private buildRowsFromSheetData(sheetData: unknown[][], headerRowIndex: number) {
+  private buildRowsFromSheetData(
+    sheetData: unknown[][],
+    headerRowIndex: number,
+  ) {
     const headerRow = (sheetData[headerRowIndex] || []).map((cell) =>
-      String(cell ?? "").trim()
+      String(cell ?? "").trim(),
     );
 
     const rows: Record<string, unknown>[] = [];
@@ -185,6 +304,7 @@ export class ProductService {
 
       for (let col = 0; col < headerRow.length; col++) {
         const header = headerRow[col];
+        rowObject[`__COL_${col}`] = rowArray[col] ?? "";
         if (!header) continue;
         rowObject[header] = rowArray[col] ?? "";
       }
@@ -194,6 +314,37 @@ export class ProductService {
 
     return rows;
   }
+
+  private getLastTokenFromName(value: string) {
+    const parts = String(value || "")
+      .split("-")
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+    return parts.length ? parts[parts.length - 1] : "";
+  }
+
+  private parseVariantNameFallback(row: Record<string, unknown>) {
+    const variantName = this.findValue(row, [
+      "Tên phiên bản sản phẩm",
+      "ten phien ban san pham",
+      "variant name",
+      "Tên biến thể",
+    ]);
+
+    const lastToken = this.getLastTokenFromName(variantName);
+
+    return {
+      color: lastToken || "DEFAULT",
+      size: lastToken || "DEFAULT",
+    };
+  }
+
+  private normalizeVariantOption(value: string, fallback = "DEFAULT") {
+    const clean = String(value || "").trim();
+    return clean || fallback;
+  }
+
   async getProducts(params?: {
     page?: number;
     limit?: number;
@@ -202,7 +353,7 @@ export class ProductService {
     status?: string;
   }) {
     const page = Math.max(1, Number(params?.page || 1));
-    const limit = Math.min(100, Math.max(20, Number(params?.limit || 20)));
+    const limit = Math.min(1000, Math.max(20, Number(params?.limit || 20)));
     const skip = (page - 1) * limit;
 
     const q = String(params?.q || "").trim();
@@ -215,13 +366,17 @@ export class ProductService {
         : { status: status as ProductStatus }),
       ...(q
         ? {
-            OR: [
-              { name: { contains: q, mode: "insensitive" } },
-              { slug: { contains: q, mode: "insensitive" } },
-              { category: { contains: q, mode: "insensitive" } },
-              { variants: { some: { sku: { contains: q, mode: "insensitive" } } } },
-            ],
-          }
+          OR: [
+            { name: { contains: q, mode: "insensitive" } },
+            { slug: { contains: q, mode: "insensitive" } },
+            { category: { contains: q, mode: "insensitive" } },
+            {
+              variants: {
+                some: { sku: { contains: q, mode: "insensitive" } },
+              },
+            },
+          ],
+        }
         : {}),
     };
 
@@ -241,8 +396,8 @@ export class ProductService {
         new Set(
           rawCategories
             .map((item) => String(item.category || "").trim())
-            .filter((name) => name && this.normalizeHeader(name) === wantedKey)
-        )
+            .filter((name) => name && this.normalizeHeader(name) === wantedKey),
+        ),
       );
 
       if (!matchedCategories.length) {
@@ -280,20 +435,25 @@ export class ProductService {
               availableQty: Number(item.availableQty || 0),
               reservedQty: Number(item.reservedQty || 0),
               incomingQty: Number(item.incomingQty || 0),
-            }))
+            })),
           );
 
           const stock = variant.inventoryItems.reduce(
             (sum, item) => sum + Number(item.availableQty || 0),
-            0
+            0,
           );
+
+          const price = Number(variant.price || 0);
+          const costPrice = Number(variant.costPrice || 0);
 
           return {
             ...variant,
-            price: Number(variant.price || 0),
-            costPrice: Number(variant.costPrice || 0),
+            price,
+            costPrice,
             stock,
             inventoryByBranch,
+            inventorySaleValue: price * stock,
+            inventoryCostValue: costPrice * stock,
           };
         }),
       })),
@@ -317,6 +477,50 @@ export class ProductService {
       },
     });
   }
+async getMissingCostProducts() {
+  const variants = await this.prisma.productVariant.findMany({
+    where: {
+      OR: [
+        { costPrice: null },
+        { costPrice: 0 },
+      ],
+    },
+    include: {
+      product: true,
+    },
+    take: 1000,
+  });
+
+  return {
+    success: true,
+    total: variants.length,
+    data: variants,
+  };
+}
+
+async updateMissingCostBulk(
+  items: Array<{ variantId: string; sku?: string; costPrice: number }>,
+) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return { success: true, updated: 0 };
+  }
+
+  let updated = 0;
+
+  for (const item of items) {
+    const costPrice = this.toNumber(item.costPrice);
+    if (!item.variantId || costPrice <= 0) continue;
+
+    await this.prisma.productVariant.update({
+      where: { id: item.variantId },
+      data: { costPrice: new Prisma.Decimal(costPrice) },
+    });
+
+    updated += 1;
+  }
+
+  return { success: true, updated };
+}
 
   async createProduct(data: CreateProductInput) {
     if (!data.name?.trim()) {
@@ -337,8 +541,12 @@ export class ProductService {
       throw new BadRequestException("Mã sản phẩm đã tồn tại");
     }
 
-    const colors = Array.isArray(data.colorOptions) ? data.colorOptions.filter(Boolean) : [];
-    const sizes = Array.isArray(data.sizeOptions) ? data.sizeOptions.filter(Boolean) : [];
+    const colors = Array.isArray(data.colorOptions)
+      ? data.colorOptions.filter(Boolean)
+      : [];
+    const sizes = Array.isArray(data.sizeOptions)
+      ? data.sizeOptions.filter(Boolean)
+      : [];
 
     if (!colors.length || !sizes.length) {
       throw new BadRequestException("Cần ít nhất 1 màu và 1 size");
@@ -357,10 +565,13 @@ export class ProductService {
       }
     }
 
-    const resolvedCategoryName = categoryRecord?.name || data.category?.trim() || null;
+    const resolvedCategoryName =
+      categoryRecord?.name || data.category?.trim() || null;
 
     const defaultPrice = new Prisma.Decimal(this.toNumber(data.defaultPrice));
-    const defaultCostPrice = new Prisma.Decimal(this.toNumber(data.defaultCostPrice));
+    const defaultCostPrice = new Prisma.Decimal(
+      this.toNumber(data.defaultCostPrice),
+    );
     const branchStocks = this.normalizeBranchStocks(data.defaultBranchStocks);
 
     return this.prisma.$transaction(
@@ -405,7 +616,7 @@ export class ProductService {
                 availableQty: this.toNumber(availableQty),
                 reservedQty: 0,
                 incomingQty: 0,
-              })
+              }),
             );
 
             if (inventoryRows.length > 0) {
@@ -432,7 +643,7 @@ export class ProductService {
       {
         maxWait: 10000,
         timeout: 20000,
-      }
+      },
     );
   }
 
@@ -487,8 +698,8 @@ export class ProductService {
           new Set(
             existing.variants
               .map((v) => String(v.color || "").trim())
-              .filter(Boolean)
-          )
+              .filter(Boolean),
+          ),
         );
 
     const sizes =
@@ -498,8 +709,8 @@ export class ProductService {
           new Set(
             existing.variants
               .map((v) => String(v.size || "").trim())
-              .filter(Boolean)
-          )
+              .filter(Boolean),
+          ),
         );
 
     if (!colors.length || !sizes.length) {
@@ -533,11 +744,11 @@ export class ProductService {
       existing.variants.map((variant) => [
         `${String(variant.color || "").trim()}__${String(variant.size || "").trim()}`,
         variant,
-      ])
+      ]),
     );
 
     const variantsToCreate = wantedCombos.filter(
-      (combo) => !existingByCombo.has(combo.key)
+      (combo) => !existingByCombo.has(combo.key),
     );
 
     const variantsToUpdate = wantedCombos
@@ -563,8 +774,8 @@ export class ProductService {
     const variantsToDelete = existing.variants.filter(
       (variant) =>
         !wantedKeys.has(
-          `${String(variant.color || "").trim()}__${String(variant.size || "").trim()}`
-        )
+          `${String(variant.color || "").trim()}__${String(variant.size || "").trim()}`,
+        ),
     );
 
     const result = await this.prisma.$transaction(
@@ -574,11 +785,14 @@ export class ProductService {
           data: {
             name: data.name?.trim() || undefined,
             slug: nextSlug,
-            category: categoryRecord?.name || data.category?.trim() || undefined,
+            category:
+              categoryRecord?.name || data.category?.trim() || undefined,
             categoryId: categoryRecord?.id || null,
             brand: data.brand?.trim() || undefined,
             weight:
-              data.weight !== undefined ? this.toNumber(data.weight) : undefined,
+              data.weight !== undefined
+                ? this.toNumber(data.weight)
+                : undefined,
             imageUrl: data.imageUrl?.trim() || undefined,
             description: data.description?.trim() || undefined,
           },
@@ -600,7 +814,7 @@ export class ProductService {
               ...(data.defaultCostPrice !== undefined
                 ? {
                   costPrice: new Prisma.Decimal(
-                    this.toNumber(data.defaultCostPrice)
+                    this.toNumber(data.defaultCostPrice),
                   ),
                 }
                 : {}),
@@ -619,7 +833,7 @@ export class ProductService {
               size: item.size,
               price: new Prisma.Decimal(this.toNumber(data.defaultPrice)),
               costPrice: new Prisma.Decimal(
-                this.toNumber(data.defaultCostPrice)
+                this.toNumber(data.defaultCostPrice),
               ),
               status: VariantStatus.ACTIVE,
             },
@@ -655,10 +869,13 @@ export class ProductService {
       {
         maxWait: 10000,
         timeout: 20000,
-      }
+      },
     );
 
-    if (Object.keys(branchStocks).length > 0 && result.inventoryVariantIds.length > 0) {
+    if (
+      Object.keys(branchStocks).length > 0 &&
+      result.inventoryVariantIds.length > 0
+    ) {
       await Promise.all(
         result.inventoryVariantIds.map((variantId) =>
           Promise.all(
@@ -680,60 +897,114 @@ export class ProductService {
                   reservedQty: 0,
                   incomingQty: 0,
                 },
-              })
-            )
-          )
-        )
+              }),
+            ),
+          ),
+        ),
       );
     }
 
     return result.updatedProduct;
   }
 
+
+  private looksLikePriceToken(value: string) {
+    const clean = String(value || "").trim().toLowerCase();
+    if (!clean) return false;
+    return /\d/.test(clean) && (clean.includes("đ") || clean.includes(".") || clean.includes(","));
+  }
+
+  private parseVariantOptionsFromImport(row: Record<string, unknown>, sku: string) {
+    const explicitColor = this.findValue(row, [
+      "Giá trị thuộc tính 1",
+      "gia tri thuoc tinh 1",
+      "mau",
+      "màu",
+      "color",
+      "Thuộc tính 1",
+    ]);
+
+    const explicitSize = this.findValue(row, [
+      "Giá trị thuộc tính 2",
+      "gia tri thuoc tinh 2",
+      "size",
+      "Thuộc tính 2",
+    ]);
+
+    const variantName = this.findValue(row, [
+      "Tên phiên bản sản phẩm",
+      "Tên phiên bản",
+      "ten phien ban san pham",
+      "ten phien ban",
+      "variant name",
+      "Tên biến thể",
+    ]);
+
+    const skuParts = String(sku || "")
+      .trim()
+      .split("-")
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+    let color = String(explicitColor || "").trim();
+    let size = String(explicitSize || "").trim();
+
+    const nameParts = String(variantName || "")
+      .split("-")
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+    if (!size && nameParts.length >= 2) {
+      size = nameParts[nameParts.length - 1];
+    }
+
+    if (!color && nameParts.length >= 3) {
+      const colorCandidate = nameParts[nameParts.length - 2];
+      if (!this.looksLikePriceToken(colorCandidate)) {
+        color = colorCandidate;
+      }
+    }
+
+    if (!size && skuParts.length >= 2) {
+      size = skuParts[skuParts.length - 1];
+    }
+
+    if (!color && skuParts.length >= 3) {
+      color = skuParts[skuParts.length - 2];
+    }
+
+    return {
+      color: this.normalizeVariantOption(color, "DEFAULT"),
+      size: this.normalizeVariantOption(size, "DEFAULT"),
+      variantName,
+    };
+  }
+
+  private buildProductNameFromSkuImport(
+    currentProductName: string,
+    productName: string,
+    variantName: string,
+    parentSku: string,
+  ) {
+    const baseName = String(productName || currentProductName || "").trim();
+    if (baseName) return baseName;
+
+    const cleanVariantName = String(variantName || "").trim();
+    if (!cleanVariantName) return parentSku;
+
+    const parentIndex = cleanVariantName.toUpperCase().indexOf(parentSku.toUpperCase());
+    if (parentIndex >= 0) {
+      const end = parentIndex + parentSku.length;
+      return cleanVariantName.slice(0, end).trim();
+    }
+
+    return cleanVariantName;
+  }
+
   async importProducts(files: Express.Multer.File[], overwrite = true) {
     if (!files?.length) {
       throw new BadRequestException("Thiếu file import");
     }
-
-    const branches = await this.prisma.branch.findMany({
-      select: { id: true, name: true },
-    });
-
-    const findBranchId = (aliases: string[]) => {
-      for (const alias of aliases) {
-        const found = branches.find(
-          (branch) => this.normalizeHeader(branch.name) === this.normalizeHeader(alias)
-        );
-
-        if (found) return found.id;
-      }
-
-      return undefined;
-    };
-
-    const chuaLangBranchId = findBranchId(["CHÙA LÁNG", "CHUA LANG", "CL"]);
-    const xaDanBranchId = findBranchId(["XÃ ĐÀN", "XA DAN", "XD"]);
-    const quocOaiBranchId = findBranchId(["QUỐC OAI", "QUOC OAI", "QO"]);
-    const thaiHaBranchId = findBranchId(["THÁI HÀ", "THAI HA", "TH"]);
-
-    const sapoBranchColumns: Array<{ keys: string[]; branchId?: string }> = [
-      {
-        branchId: chuaLangBranchId,
-        keys: ["LC_CN1_Tồn kho ban đầu*", "LC_CN1_Tồn kho ban đầu", "lc cn1 ton kho ban dau"],
-      },
-      {
-        branchId: xaDanBranchId,
-        keys: ["LC_CN2_Tồn kho ban đầu*", "LC_CN2_Tồn kho ban đầu", "lc cn2 ton kho ban dau"],
-      },
-      {
-        branchId: quocOaiBranchId,
-        keys: ["LC_CN3_Tồn kho ban đầu*", "LC_CN3_Tồn kho ban đầu", "lc cn3 ton kho ban dau"],
-      },
-      {
-        branchId: thaiHaBranchId,
-        keys: ["LC_CN4_Tồn kho ban đầu*", "LC_CN4_Tồn kho ban đầu", "lc cn4 ton kho ban dau"],
-      },
-    ];
 
     let successRows = 0;
     let failedRows = 0;
@@ -746,7 +1017,7 @@ export class ProductService {
       imageUrl: string;
       retailPrice: number;
       importPrice: number;
-      branchStocks: Record<string, number>;
+      branchStocks: BranchStockMap;
     };
 
     type ProductSeed = {
@@ -759,6 +1030,8 @@ export class ProductService {
       variants: VariantSeed[];
     };
 
+    // Product = mã SKU chính, ví dụ SM936 / SP151 / AB797.
+    // Variant = full SKU, ví dụ SM936-N-M / SP151-L / AB797-XG-X.
     const grouped = new Map<string, ProductSeed>();
 
     for (const file of files) {
@@ -777,8 +1050,11 @@ export class ProductService {
         const headerRowIndex = this.detectHeaderRowIndex(sheetData);
 
         if (headerRowIndex >= 0) {
-          rows = this.buildRowsFromSheetData(sheetData, headerRowIndex).filter((row) =>
-            Object.values(row).some((value) => String(value ?? "").trim() !== "")
+          rows = this.buildRowsFromSheetData(sheetData, headerRowIndex).filter(
+            (row) =>
+              Object.values(row).some(
+                (value) => String(value ?? "").trim() !== "",
+              ),
           );
         } else {
           rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, {
@@ -806,6 +1082,7 @@ export class ProductService {
           "ten san pham",
           "product name",
         ]);
+
         const category = this.findValue(row, [
           "Loại sản phẩm",
           "Danh mục sản phẩm",
@@ -813,43 +1090,31 @@ export class ProductService {
           "danh muc san pham",
           "category",
         ]);
+
         const description = this.findValue(row, [
           "Mô tả sản phẩm",
           "Mô tả",
           "mo ta san pham",
           "description",
         ]);
+
         const brand = this.findValue(row, ["Nhãn hiệu", "nhan hieu", "brand"]);
         const weight = this.toNumber(
-          this.findValue(row, ["Khối lượng", "khoi luong", "weight"])
+          this.findValue(row, ["Khối lượng", "khoi luong", "weight"]),
         );
 
-        if (productName) {
-          currentProductName = productName;
-          currentCategory = category || "";
-          currentDescription = description || "";
-          currentBrand = brand || "";
-          currentWeight = weight || 0;
-        } else {
-          if (category) currentCategory = category;
-          if (brand) currentBrand = brand;
-          if (weight) currentWeight = weight;
-        }
+        if (productName) currentProductName = productName;
+        if (category) currentCategory = category;
+        if (description) currentDescription = description;
+        if (brand) currentBrand = brand;
+        if (weight) currentWeight = weight;
 
-        const color = this.findValue(row, [
-          "Giá trị thuộc tính 1",
-          "gia tri thuoc tinh 1",
-          "mau",
-          "màu",
-          "color",
-          "Thuộc tính 1",
-        ]);
-        const size = this.findValue(row, [
-          "Giá trị thuộc tính 2",
-          "gia tri thuoc tinh 2",
-          "size",
-          "Thuộc tính 2",
-        ]);
+        const hasAnyUsefulValue = Object.values(row).some(
+          (value) => String(value ?? "").trim() !== "",
+        );
+
+        if (!hasAnyUsefulValue) continue;
+
         const sku = this.findValue(row, [
           "Mã SKU*",
           "Mã SKU",
@@ -859,76 +1124,90 @@ export class ProductService {
           "SKU sản phẩm",
           "Mã biến thể",
         ]);
+
+        if (!sku) {
+          continue;
+        }
+
+        const cleanSku = sku.trim();
+        const parentSku = this.getMainSkuCode(cleanSku);
+
+        if (!parentSku) {
+          failedRows += 1;
+          errors.push(
+            `${file.originalname} - dòng ${index + 2}: SKU không hợp lệ`,
+          );
+          continue;
+        }
+
+        const productSlug = this.normalizeSlug(parentSku);
         const imageUrl = this.findValue(row, [
           "Ảnh đại diện",
           "anh dai dien",
           "image",
           "image url",
         ]);
-        const retailPrice = this.toNumber(
-          this.findValue(row, ["PL_Giá bán lẻ", "pl gia ban le", "gia ban le"])
+
+        const retailPrice = this.getRetailPrice(row);
+        const rawImportPrice = this.getImportPrice(row);
+        const importPrice = rawImportPrice > 0 ? rawImportPrice : 0;
+        const branchStocks = this.getBranchStocksFromImportRow(row);
+
+        const parsedVariant = this.parseVariantOptionsFromImport(row, cleanSku);
+        const productDisplayName = this.buildProductNameFromSkuImport(
+          currentProductName,
+          productName,
+          parsedVariant.variantName,
+          parentSku,
         );
-        const importPrice = this.toNumber(
-          this.findValue(row, [
-            "PL_Giá nhập",
-            "pl gia nhap",
-            "gia nhap",
-            "PL_Giá vốn",
-            "pl gia von",
-          ])
-        );
-
-        const branchStocks: Record<string, number> = {};
-        for (const item of sapoBranchColumns) {
-          if (!item.branchId) continue;
-          branchStocks[item.branchId] = this.toNumber(this.findValue(row, item.keys));
-        }
-
-        const hasAnyUsefulValue =
-          currentProductName || currentCategory || currentBrand || color || size || sku;
-
-        if (!hasAnyUsefulValue) continue;
-
-        if (!currentProductName) {
-          failedRows += 1;
-          errors.push(
-            `${file.originalname} - dòng ${index + 2}: không xác định được sản phẩm gốc`
-          );
-          continue;
-        }
-
-        if (!sku || !color || !size) {
-          failedRows += 1;
-          errors.push(
-            `${file.originalname} - dòng ${index + 2}: thiếu SKU hoặc màu hoặc size`
-          );
-          continue;
-        }
-
-        const mainSkuCode = this.getMainSkuCode(sku);
-        const productSlug = this.normalizeSlug(mainSkuCode || currentProductName);
 
         if (!grouped.has(productSlug)) {
           grouped.set(productSlug, {
-            name: currentProductName,
+            name: productDisplayName,
             slug: productSlug,
-            category: currentCategory,
-            description: currentDescription,
-            brand: currentBrand || "The 1970",
-            weight: currentWeight || 0,
+            category: category || currentCategory || "",
+            description: description || currentDescription || "",
+            brand: brand || currentBrand || "The 1970",
+            weight: weight || currentWeight || 0,
             variants: [],
           });
+        } else {
+          const seed = grouped.get(productSlug)!;
+          if (!seed.name && productDisplayName) seed.name = productDisplayName;
+          if (!seed.category && (category || currentCategory)) {
+            seed.category = category || currentCategory;
+          }
+          if (!seed.description && (description || currentDescription)) {
+            seed.description = description || currentDescription;
+          }
+          if (!seed.brand && (brand || currentBrand)) {
+            seed.brand = brand || currentBrand;
+          }
+          if (!seed.weight && (weight || currentWeight)) {
+            seed.weight = weight || currentWeight;
+          }
         }
 
-        grouped.get(productSlug)!.variants.push({
-          color,
-          size,
-          sku: sku.trim(),
+        const productSeed = grouped.get(productSlug)!;
+        const variantSeed: VariantSeed = {
+          color: parsedVariant.color,
+          size: parsedVariant.size,
+          sku: cleanSku,
           imageUrl,
           retailPrice,
           importPrice,
           branchStocks,
-        });
+        };
+
+        const existingVariantIndex = productSeed.variants.findIndex(
+          (item) => item.sku.trim() === cleanSku,
+        );
+
+        if (existingVariantIndex >= 0) {
+          productSeed.variants[existingVariantIndex] = variantSeed;
+        } else {
+          productSeed.variants.push(variantSeed);
+        }
       }
     }
 
@@ -936,9 +1215,9 @@ export class ProductService {
     const allSkus = Array.from(
       new Set(
         Array.from(grouped.values()).flatMap((product) =>
-          product.variants.map((variant) => variant.sku.trim())
-        )
-      )
+          product.variants.map((variant) => variant.sku.trim()),
+        ),
+      ),
     );
 
     const existingProducts = await this.prisma.product.findMany({
@@ -946,17 +1225,27 @@ export class ProductService {
       select: { id: true, slug: true, imageUrl: true },
     });
 
-    const existingVariants = await this.prisma.productVariant.findMany({
-      where: { sku: { in: allSkus } },
-      select: { id: true, sku: true, productId: true },
-    });
+    const existingVariants = allSkus.length
+      ? await this.prisma.productVariant.findMany({
+        where: { sku: { in: allSkus } },
+        select: { id: true, sku: true, productId: true },
+      })
+      : [];
 
-    const productBySlug = new Map(existingProducts.map((product) => [product.slug, product]));
-    const variantBySku = new Map(existingVariants.map((variant) => [variant.sku, variant]));
+    const productBySlug = new Map(
+      existingProducts.map((product) => [product.slug, product]),
+    );
+    const variantBySku = new Map(
+      existingVariants.map((variant) => [variant.sku, variant]),
+    );
 
     const variantsToCreate: Prisma.ProductVariantCreateManyInput[] = [];
-    const variantsToUpdate: Array<{ id: string; data: Prisma.ProductVariantUpdateInput }> = [];
-    const productIdsNeedingInventory = new Set<string>();
+    const variantsToUpdate: Array<{
+      id: string;
+      data: Prisma.ProductVariantUpdateInput;
+    }> = [];
+
+    const inventoryBySku = new Map<string, BranchStockMap>();
 
     for (const [, productSeed] of grouped.entries()) {
       try {
@@ -987,7 +1276,8 @@ export class ProductService {
               category: productSeed.category || null,
               brand: productSeed.brand || "The 1970",
               weight: productSeed.weight || 0,
-              imageUrl: productSeed.variants[0]?.imageUrl || product.imageUrl || null,
+              imageUrl:
+                productSeed.variants[0]?.imageUrl || product.imageUrl || null,
               description: productSeed.description || null,
               status: ProductStatus.ACTIVE,
             },
@@ -998,12 +1288,14 @@ export class ProductService {
         }
 
         for (const variantSeed of productSeed.variants) {
-          const existingVariant = variantBySku.get(variantSeed.sku.trim());
+          const cleanSku = variantSeed.sku.trim();
+          const existingVariant = variantBySku.get(cleanSku);
+          inventoryBySku.set(cleanSku, variantSeed.branchStocks || {});
 
           if (!existingVariant) {
             variantsToCreate.push({
               productId: product.id,
-              sku: variantSeed.sku.trim(),
+              sku: cleanSku,
               color: variantSeed.color.trim(),
               size: variantSeed.size.trim(),
               price: new Prisma.Decimal(this.toNumber(variantSeed.retailPrice)),
@@ -1017,18 +1309,21 @@ export class ProductService {
                 product: { connect: { id: product.id } },
                 color: variantSeed.color.trim(),
                 size: variantSeed.size.trim(),
-                price: new Prisma.Decimal(this.toNumber(variantSeed.retailPrice)),
-                costPrice: new Prisma.Decimal(this.toNumber(variantSeed.importPrice)),
+                price: new Prisma.Decimal(
+                  this.toNumber(variantSeed.retailPrice),
+                ),
+                costPrice: new Prisma.Decimal(
+                  this.toNumber(variantSeed.importPrice),
+                ),
+                status: VariantStatus.ACTIVE,
               },
             });
           }
-
-          productIdsNeedingInventory.add(product.id);
         }
       } catch (error) {
-        failedRows += productSeed.variants.length;
+        failedRows += Math.max(1, productSeed.variants.length);
         errors.push(
-          `${productSeed.name}: ${error instanceof Error ? error.message : "Import lỗi"}`
+          `${productSeed.name}: ${error instanceof Error ? error.message : "Import lỗi"}`,
         );
       }
     }
@@ -1047,36 +1342,41 @@ export class ProductService {
           this.prisma.productVariant.update({
             where: { id: item.id },
             data: item.data,
-          })
-        )
+          }),
+        ),
       );
     }
 
-    const finalVariants = await this.prisma.productVariant.findMany({
-      where: { sku: { in: allSkus } },
-      select: { id: true, sku: true },
-    });
+    const importedVariants = allSkus.length
+      ? await this.prisma.productVariant.findMany({
+        where: { sku: { in: allSkus } },
+        select: { id: true, sku: true },
+      })
+      : [];
 
-    const finalVariantBySku = new Map(finalVariants.map((variant) => [variant.sku, variant]));
-    const finalVariantIds = finalVariants.map((variant) => variant.id);
+    let inventoryRows = 0;
+    const variantIds = importedVariants.map((variant) => variant.id);
 
-    if (finalVariantIds.length > 0) {
-      for (const chunk of this.chunkArray(finalVariantIds, 1000)) {
-        await this.prisma.inventoryItem.deleteMany({
-          where: { variantId: { in: chunk } },
-        });
-      }
-    }
+    if (variantIds.length) {
+      await this.prisma.inventoryItem.deleteMany({
+        where: { variantId: { in: variantIds } },
+      });
 
-    const inventoryRows: Prisma.InventoryItemCreateManyInput[] = [];
+      const branchIds = new Set(
+        (await this.prisma.branch.findMany({ select: { id: true } })).map(
+          (branch) => branch.id,
+        ),
+      );
 
-    for (const productSeed of grouped.values()) {
-      for (const variantSeed of productSeed.variants) {
-        const variant = finalVariantBySku.get(variantSeed.sku.trim());
-        if (!variant) continue;
+      const inventoryCreateRows: Prisma.InventoryItemCreateManyInput[] = [];
 
-        for (const [branchId, qty] of Object.entries(variantSeed.branchStocks || {})) {
-          inventoryRows.push({
+      for (const variant of importedVariants) {
+        const branchStocks = inventoryBySku.get(variant.sku) || {};
+
+        for (const [branchId, qty] of Object.entries(branchStocks)) {
+          if (!branchIds.has(branchId)) continue;
+
+          inventoryCreateRows.push({
             variantId: variant.id,
             branchId,
             availableQty: this.toNumber(qty),
@@ -1085,17 +1385,18 @@ export class ProductService {
           });
         }
       }
+
+      for (const chunk of this.chunkArray(inventoryCreateRows, 3000)) {
+        if (!chunk.length) continue;
+        await this.prisma.inventoryItem.createMany({
+          data: chunk,
+          skipDuplicates: true,
+        });
+        inventoryRows += chunk.length;
+      }
     }
 
-    for (const chunk of this.chunkArray(inventoryRows, 1000)) {
-      if (!chunk.length) continue;
-      await this.prisma.inventoryItem.createMany({
-        data: chunk,
-        skipDuplicates: true,
-      });
-    }
-
-    successRows = finalVariants.length;
+    successRows = allSkus.length;
 
     return {
       successRows,
@@ -1105,7 +1406,8 @@ export class ProductService {
       importedVariants: allSkus.length,
       createdVariants: variantsToCreate.length,
       updatedVariants: variantsToUpdate.length,
-      inventoryRows: inventoryRows.length,
+      inventoryRows,
+      note: "Import 1 bước: tạo/cập nhật sản phẩm + variant, giá nhập BB và tồn kho các chi nhánh từ file Excel.",
     };
   }
 
@@ -1131,7 +1433,7 @@ export class ProductService {
     }
 
     return Array.from(categoryByKey.values()).sort((a, b) =>
-      a.localeCompare(b, "vi")
+      a.localeCompare(b, "vi"),
     );
   }
 
@@ -1140,7 +1442,7 @@ export class ProductService {
     const cleanNewName = String(newName || "").trim();
 
     if (!cleanOldName) {
-      throw new BadRequestException("Thiếu danh mục cần đổi");
+      throw new BadRequestException("Thiếu danh mục cần gộp");
     }
 
     if (!cleanNewName) {
@@ -1148,60 +1450,146 @@ export class ProductService {
     }
 
     const normalizedOld = this.normalizeHeader(cleanOldName);
+    const normalizedNew = this.normalizeHeader(cleanNewName);
+    const newSlug = this.normalizeSlug(cleanNewName);
+    const newCode = newSlug.replace(/-/g, "_").toUpperCase();
+
+    let targetCategory = await this.prisma.category.findFirst({
+      where: {
+        OR: [{ name: cleanNewName }, { slug: newSlug }],
+      },
+      select: { id: true, name: true },
+    });
+
+    if (!targetCategory) {
+      targetCategory = await this.prisma.category.create({
+        data: {
+          name: cleanNewName,
+          slug: newSlug,
+          code: newCode,
+          description: null,
+          isActive: true,
+        },
+        select: { id: true, name: true },
+      });
+    } else {
+      targetCategory = await this.prisma.category.update({
+        where: { id: targetCategory.id },
+        data: {
+          name: cleanNewName,
+          slug: newSlug,
+          code: newCode,
+          isActive: true,
+        },
+        select: { id: true, name: true },
+      });
+    }
 
     const products = await this.prisma.product.findMany({
       where: { category: { not: null } },
-      select: { id: true, category: true },
+      select: { id: true, category: true, categoryId: true },
     });
 
-    const matchedIds = products
-      .filter((product) => this.normalizeHeader(product.category) === normalizedOld)
+    const matchedProductIds = products
+      .filter((product) => {
+        const categoryKey = this.normalizeHeader(product.category);
+        return categoryKey === normalizedOld || categoryKey === normalizedNew;
+      })
       .map((product) => product.id);
 
-    if (!matchedIds.length) {
-      return { updated: 0, category: cleanNewName };
+    let updatedProducts = 0;
+
+    for (const chunk of this.chunkArray(matchedProductIds, 1000)) {
+      if (!chunk.length) continue;
+      const result = await this.prisma.product.updateMany({
+        where: { id: { in: chunk } },
+        data: {
+          category: cleanNewName,
+          categoryId: targetCategory.id,
+        },
+      });
+
+      updatedProducts += result.count;
+    }
+
+    const oldCategories = await this.prisma.category.findMany({
+      where: {
+        NOT: { id: targetCategory.id },
+      },
+      select: { id: true, name: true, slug: true },
+    });
+
+    const oldCategoryIds = oldCategories
+      .filter((category) => {
+        const nameKey = this.normalizeHeader(category.name);
+        const slugKey = this.normalizeHeader(category.slug);
+        return (
+          nameKey === normalizedOld ||
+          nameKey === normalizedNew ||
+          slugKey === normalizedOld ||
+          slugKey === normalizedNew
+        );
+      })
+      .map((category) => category.id);
+
+    let relinkedProducts = 0;
+
+    if (oldCategoryIds.length > 0) {
+      const relinked = await this.prisma.product.updateMany({
+        where: { categoryId: { in: oldCategoryIds } },
+        data: {
+          category: cleanNewName,
+          categoryId: targetCategory.id,
+        },
+      });
+      relinkedProducts = relinked.count;
+
+      await this.prisma.category.deleteMany({
+        where: { id: { in: oldCategoryIds } },
+      });
+    }
+
+    return {
+      success: true,
+      category: cleanNewName,
+      categoryId: targetCategory.id,
+      updatedProducts: updatedProducts + relinkedProducts,
+      removedOldCategories: oldCategoryIds.length,
+    };
+  }
+
+  async updateCostBulk(
+    items: Array<{ variantId?: string; sku?: string; costPrice: number }>,
+  ) {
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new BadRequestException("Không có dữ liệu giá nhập để cập nhật");
     }
 
     let updated = 0;
-    for (const chunk of this.chunkArray(matchedIds, 1000)) {
-      const result = await this.prisma.product.updateMany({
-        where: { id: { in: chunk } },
-        data: { category: cleanNewName },
-      });
-      updated += result.count;
+
+    for (const chunk of this.chunkArray(items, 200)) {
+      await Promise.all(
+        chunk.map(async (item) => {
+          const costPrice = this.toNumber(item.costPrice);
+          if (costPrice <= 0) return;
+
+          const where = item.variantId
+            ? { id: item.variantId }
+            : { sku: String(item.sku || "").trim() };
+
+          const result = await this.prisma.productVariant.updateMany({
+            where,
+            data: { costPrice: new Prisma.Decimal(costPrice) },
+          });
+
+          updated += result.count;
+        }),
+      );
     }
 
-    try {
-      const slug = this.normalizeSlug(cleanNewName);
-      const code = slug.replace(/-/g, "_").toUpperCase();
-
-      const existing = await this.prisma.category.findFirst({
-        where: { OR: [{ slug }, { name: cleanNewName }] },
-        select: { id: true },
-      });
-
-      if (existing) {
-        await this.prisma.category.update({
-          where: { id: existing.id },
-          data: { name: cleanNewName, slug, code, isActive: true },
-        });
-      } else {
-        await this.prisma.category.create({
-          data: {
-            name: cleanNewName,
-            slug,
-            code,
-            description: null,
-            isActive: true,
-          },
-        });
-      }
-    } catch {
-      // Product.category is still updated even if the config category sync fails.
-    }
-
-    return { updated, category: cleanNewName };
+    return { success: true, updated };
   }
+
   async addVariant(productId: string, data: AddVariantInput) {
     const product = await this.prisma.product.findUnique({
       where: { id: productId },
@@ -1248,7 +1636,7 @@ export class ProductService {
             availableQty: this.toNumber(availableQty),
             reservedQty: 0,
             incomingQty: 0,
-          })
+          }),
         );
 
         if (inventoryRows.length > 0) {
@@ -1273,10 +1661,34 @@ export class ProductService {
       {
         maxWait: 10000,
         timeout: 20000,
-      }
+      },
     );
   }
 
+
+async checkMissingCostFromExcel(file: Express.Multer.File) {
+  if (!file) {
+    return { success: false, message: "Thiếu file" };
+  }
+
+  const workbook = XLSX.read(file.buffer, { type: "buffer" });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+
+  const rows: any[] = XLSX.utils.sheet_to_json(sheet);
+
+  const result = rows.filter((row) => {
+    const cost =
+      Number(row["Giá nhập"] || row["Gia nhap"] || row["costPrice"] || 0);
+
+    return cost <= 0;
+  });
+
+  return {
+    success: true,
+    total: result.length,
+    data: result,
+  };
+}
   async toggleProductStatus(productId: string) {
     const product = await this.prisma.product.findUnique({
       where: { id: productId },
@@ -1325,75 +1737,162 @@ export class ProductService {
     return { success: true };
   }
   async syncCategoriesFromProducts() {
-  const products = await this.prisma.product.findMany({
-    where: { category: { not: null } },
-    select: { id: true, category: true },
-  });
-
-  const groups = new Map<string, { name: string; productIds: string[] }>();
-
-  for (const product of products) {
-    const name = String(product.category || "").trim();
-    if (!name) continue;
-
-    const key = this.normalizeHeader(name);
-
-    if (!groups.has(key)) {
-      groups.set(key, { name, productIds: [] });
-    }
-
-    groups.get(key)!.productIds.push(product.id);
-  }
-
-  const existingCategories = await this.prisma.category.findMany({
-    select: { id: true, name: true },
-  });
-
-  const categoryByKey = new Map(
-    existingCategories.map((category) => [
-      this.normalizeHeader(category.name),
-      category,
-    ])
-  );
-
-  let created = 0;
-  let updatedProducts = 0;
-
-  for (const [key, group] of groups.entries()) {
-    let category = categoryByKey.get(key);
-
-    if (!category) {
-      category = await this.prisma.category.create({
-        data: {
-          name: group.name,
-          code: this.normalizeSlug(group.name).replace(/-/g, "_").toUpperCase(),
-          slug: this.normalizeSlug(group.name),
-          description: null,
-          isActive: true,
-        },
-        select: { id: true, name: true },
-      });
-
-      categoryByKey.set(key, category);
-      created += 1;
-    }
-
-    const result = await this.prisma.product.updateMany({
-      where: { id: { in: group.productIds } },
-      data: {
-        categoryId: category.id,
-        category: category.name,
-      },
+    const products = await this.prisma.product.findMany({
+      where: { category: { not: null } },
+      select: { id: true, category: true },
     });
 
-    updatedProducts += result.count;
-  }
+    const groups = new Map<string, { name: string; productIds: string[] }>();
 
-  return {
-    success: true,
-    categories: groups.size,
-    created,
-    updatedProducts,
-  };
-}
+    for (const product of products) {
+      const name = String(product.category || "").trim();
+      if (!name) continue;
+
+      const key = this.normalizeHeader(name);
+
+      if (!groups.has(key)) {
+        groups.set(key, { name, productIds: [] });
+      }
+
+      groups.get(key)!.productIds.push(product.id);
+    }
+
+    const existingCategories = await this.prisma.category.findMany({
+      select: { id: true, name: true },
+    });
+
+    const categoryByKey = new Map(
+      existingCategories.map((category) => [
+        this.normalizeHeader(category.name),
+        category,
+      ]),
+    );
+
+    let created = 0;
+    let updatedProducts = 0;
+
+    for (const [key, group] of groups.entries()) {
+      let category = categoryByKey.get(key);
+
+      if (!category) {
+        category = await this.prisma.category.create({
+          data: {
+            name: group.name,
+            code: this.normalizeSlug(group.name)
+              .replace(/-/g, "_")
+              .toUpperCase(),
+            slug: this.normalizeSlug(group.name),
+            description: null,
+            isActive: true,
+          },
+          select: { id: true, name: true },
+        });
+
+        categoryByKey.set(key, category);
+        created += 1;
+      }
+
+      const result = await this.prisma.product.updateMany({
+        where: { id: { in: group.productIds } },
+        data: {
+          categoryId: category.id,
+          category: category.name,
+        },
+      });
+
+      updatedProducts += result.count;
+    }
+
+    return {
+      success: true,
+      categories: groups.size,
+      created,
+      updatedProducts,
+    };
+  }
+  async mergeDuplicateProducts() {
+    const products = await this.prisma.product.findMany({
+      where: {
+        status: { not: ProductStatus.INACTIVE },
+      },
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: "asc" },
+    });
+
+    const groups = new Map<string, typeof products>();
+
+    for (const product of products) {
+      const key = this.normalizeSlug(product.slug || product.name);
+      if (!key) continue;
+
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(product);
+    }
+
+    let mergedProducts = 0;
+    let movedVariants = 0;
+
+    for (const [, group] of groups.entries()) {
+      if (group.length <= 1) continue;
+
+      const keeper = group[0];
+      const duplicates = group.slice(1);
+
+      for (const duplicate of duplicates) {
+        const duplicateVariants = await this.prisma.productVariant.findMany({
+          where: { productId: duplicate.id },
+          select: {
+            id: true,
+            sku: true,
+          },
+        });
+
+        for (const variant of duplicateVariants) {
+          const sameSku = await this.prisma.productVariant.findFirst({
+            where: {
+              productId: keeper.id,
+              sku: variant.sku,
+              NOT: { id: variant.id },
+            },
+            select: { id: true },
+          });
+
+          if (sameSku) {
+            await this.prisma.inventoryItem.deleteMany({
+              where: { variantId: variant.id },
+            });
+
+            await this.prisma.productVariant.delete({
+              where: { id: variant.id },
+            });
+          } else {
+            await this.prisma.productVariant.update({
+              where: { id: variant.id },
+              data: { productId: keeper.id },
+            });
+
+            movedVariants += 1;
+          }
+        }
+
+        await this.prisma.product.update({
+          where: { id: duplicate.id },
+          data: { status: ProductStatus.INACTIVE },
+        });
+
+        mergedProducts += 1;
+      }
+    }
+
+    return {
+      success: true,
+      mergedProducts,
+      movedVariants,
+    };
+  }
 }

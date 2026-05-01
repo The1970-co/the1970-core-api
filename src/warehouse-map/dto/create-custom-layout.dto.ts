@@ -1,11 +1,11 @@
-export type CustomLayoutAisleDto = {
-  aisle: string; // A, B, C hoặc D01
-  rackCount: number;
-  floors?: number;
-};
-
+// create-custom-layout.dto.ts
 export class CreateCustomLayoutDto {
-  zone?: string; // mặc định A
+  zone?: string;
   resetBeforeCreate?: boolean;
-  aisles: CustomLayoutAisleDto[];
+  floorId?: string;
+  aisles: {
+    aisle: string;
+    rackCount: number;
+    floors?: number;
+  }[];
 }

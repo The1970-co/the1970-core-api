@@ -18,6 +18,11 @@ export class StocktakeSessionController {
     return this.service.listSessions(branchId);
   }
 
+  @Get("active/current")
+  getActiveSession(@Query("branchId") branchId?: string) {
+    return this.service.getActiveSession(branchId);
+  }
+
   @Get(":id")
   getSession(@Param("id") id: string) {
     return this.service.getSession(id);
@@ -26,6 +31,16 @@ export class StocktakeSessionController {
   @Patch(":id/start")
   startSession(@Param("id") id: string) {
     return this.service.startSession(id);
+  }
+
+  @Patch(":id/pause")
+  pauseSession(@Param("id") id: string) {
+    return this.service.pauseSession(id);
+  }
+
+  @Patch(":id/resume")
+  resumeSession(@Param("id") id: string) {
+    return this.service.resumeSession(id);
   }
 
   @Patch(":id/finish")
@@ -54,6 +69,14 @@ export class StocktakeSessionController {
   @Get(":id/summary")
   getSummary(@Param("id") id: string) {
     return this.service.getSessionSummary(id);
+  }
+
+  @Get(":id/workers/:workerId/summary")
+  getWorkerSummary(
+    @Param("id") id: string,
+    @Param("workerId") workerId: string
+  ) {
+    return this.service.getWorkerSummary(id, workerId);
   }
 
   @Get(":id/zone-summary")

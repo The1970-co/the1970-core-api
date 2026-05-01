@@ -37,11 +37,6 @@ export class WarehouseMapController {
     return this.service.getZones(branchId);
   }
 
-  @Get(":id/full")
-  getFullMap(@Param("id") id: string) {
-    return this.service.getFullMap(id);
-  }
-
   @Get(":id")
   getMap(@Param("id") id: string) {
     return this.service.getMap(id);
@@ -52,32 +47,9 @@ export class WarehouseMapController {
     return this.service.createQuickLayout(id);
   }
 
-  @Post(":id/custom-layout")
-  createCustomLayout(
-    @Param("id") id: string,
-    @Body() dto: CreateCustomLayoutDto
-  ) {
-    return this.service.createCustomLayout(id, dto);
-  }
-
   @Post(":id/reset-layout")
   resetLayout(@Param("id") id: string) {
     return this.service.resetLayout(id);
-  }
-
-  @Post(":id/floors")
-  createFloor(@Param("id") id: string, @Body() dto: CreateFloorDto) {
-    return this.service.createFloor(id, dto);
-  }
-
-  @Post(":id/zones")
-  createZone(@Param("id") id: string, @Body() dto: CreateZoneDto) {
-    return this.service.createZone(id, dto);
-  }
-
-  @Post(":id/doors")
-  createDoor(@Param("id") id: string, @Body() dto: CreateDoorDto) {
-    return this.service.createDoor(id, dto);
   }
 
   @Post("racks")
@@ -95,6 +67,38 @@ export class WarehouseMapController {
     return this.service.deleteRack(id);
   }
 
+  @Post("assign")
+  assignVariant(@Body() dto: AssignVariantLocationDto) {
+    return this.service.assignVariant(dto);
+  }
+  @Post(":id/custom-layout")
+createCustomLayout(
+  @Param("id") id: string,
+  @Body() dto: CreateCustomLayoutDto
+) {
+  return this.service.createCustomLayout(id, dto);
+}
+
+  @Get(":id/full")
+  getFullMap(@Param("id") id: string) {
+    return this.service.getFullMap(id);
+  }
+
+  @Post(":id/floors")
+  createFloor(@Param("id") id: string, @Body() dto: CreateFloorDto) {
+    return this.service.createFloor(id, dto);
+  }
+
+  @Delete("floors/:floorId")
+  deleteFloor(@Param("floorId") floorId: string) {
+    return this.service.deleteFloor(floorId);
+  }
+
+  @Post(":id/zones")
+  createZone(@Param("id") id: string, @Body() dto: CreateZoneDto) {
+    return this.service.createZone(id, dto);
+  }
+
   @Patch("zones/:zoneId")
   updateZone(@Param("zoneId") zoneId: string, @Body() dto: Partial<CreateZoneDto>) {
     return this.service.updateZone(zoneId, dto);
@@ -105,13 +109,91 @@ export class WarehouseMapController {
     return this.service.deleteZone(zoneId);
   }
 
+  @Post(":id/doors")
+  createDoor(@Param("id") id: string, @Body() dto: CreateDoorDto) {
+    return this.service.createDoor(id, dto);
+  }
+
+  @Patch("doors/:doorId")
+  updateDoor(@Param("doorId") doorId: string, @Body() dto: Partial<CreateDoorDto>) {
+    return this.service.updateDoor(doorId, dto);
+  }
+
   @Delete("doors/:doorId")
   deleteDoor(@Param("doorId") doorId: string) {
     return this.service.deleteDoor(doorId);
   }
 
-  @Post("assign")
-  assignVariant(@Body() dto: AssignVariantLocationDto) {
-    return this.service.assignVariant(dto);
+
+
+  // ===============================
+  // PHASE 2 - REAL OPERATION ROUTES
+  // ===============================
+
+  @Get("variants/search")
+  searchVariants(
+    @Query("q") q?: string,
+    @Query("branchId") branchId?: string,
+    @Query("limit") limit?: string
+  ) {
+    return this.service.searchVariants({
+      q,
+      branchId,
+      limit: limit ? Number(limit) : undefined,
+    });
   }
+
+  @Get("racks/:rackId/inventory")
+  getRackInventory(@Param("rackId") rackId: string) {
+    return this.service.getRackInventory(rackId);
+  }
+
+  @Post("racks/:rackId/assign-sku")
+  async assignSkuToRack(
+    @Param("rackId") rackId: string,
+    @Body() body: { sku?: string; variantId?: string; shelfId?: string; isPrimary?: boolean; note?: string }
+  ) {
+    await this.service.assignSkuToRack({
+      ...body,
+      rackId,
+    });
+
+    return this.service.getRackInventory(rackId);
+  }
+
+  @Delete("locations/:locationId")
+  removeSkuFromRack(@Param("locationId") locationId: string) {
+    return this.service.removeSkuFromRack(locationId).then(() => ({ ok: true }));
+  }
+
+  @Post(":id/scan-rack")
+  scanRack(
+    @Param("id") mapId: string,
+    @Body() body: { code: string; branchId?: string }
+  ) {
+    return this.service.scanRack({
+      code: body.code,
+      mapId,
+      branchId: body.branchId,
+    });
+  }
+
+  @Post(":id/picking-route")
+  createPickingRoute(
+    @Param("id") mapId: string,
+    @Body() body: { skus: string[]; branchId?: string }
+  ) {
+    return this.service.createPickingRoute(mapId, body);
+  }
+
+  @Get(":id/heatmap")
+  getHeatmap(@Param("id") mapId: string) {
+    return this.service.getHeatmap(mapId);
+  }
+
+  @Get(":id/rebalance-suggestions")
+  getRebalanceSuggestions(@Param("id") mapId: string) {
+    return this.service.getRebalanceSuggestions(mapId);
+  }
+
 }

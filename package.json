@@ -40,6 +40,7 @@
     "pg": "^8.20.0",
     "qrcode": "^1.5.4",
     "react-rnd": "^10.5.3",
+    "react-window": "^2.2.7",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "speakeasy": "^2.0.0",
