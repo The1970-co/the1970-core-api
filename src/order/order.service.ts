@@ -401,6 +401,14 @@ export class OrderService {
       quantity: Number(item.quantity ?? item.qty ?? 0),
     }));
 
+    const invalidItem = normalizedItems.find(
+      (item) => !item.variantId || item.quantity <= 0
+    );
+
+    if (invalidItem) {
+      throw new BadRequestException("Sản phẩm hoặc số lượng không hợp lệ.");
+    }
+
     const createdOrder = await this.prisma.$transaction(
       async (tx) => {
         const customerPhone = this.normalizePhone(body.customerPhone);
@@ -417,9 +425,16 @@ export class OrderService {
 
         this.ensureBranchAccess(user, branchId);
 
+        if (!branchId) {
+          throw new BadRequestException("Thiếu chi nhánh bán hàng.");
+        }
+
         if (mode === "ship") {
           this.ensureShipModePayload(body, branchId);
         }
+
+        const isPosSale =
+          salesChannel === SalesChannel.POS || body?.isPosSale === true;
 
         let customerId: string | null =
           body.customerId ? String(body.customerId) : null;
@@ -429,7 +444,15 @@ export class OrderService {
             where: { phone: customerPhone },
           });
 
-          if (!customer) {
+          if (customer) {
+            customer = await tx.customer.update({
+              where: { id: customer.id },
+              data: {
+                fullName: customerName || customer.fullName,
+                source: salesChannel,
+              },
+            });
+          } else {
             customer = await tx.customer.create({
               data: {
                 fullName: customerName,
@@ -442,63 +465,198 @@ export class OrderService {
           customerId = customer.id;
         }
 
-        let totalAmount = 0;
-        const preparedItems: Array<{
-          variantId: string;
-          sku: string;
-          productName: string;
-          color: string | null;
-          size: string | null;
-          qty: number;
-          unitPrice: Prisma.Decimal;
-          lineTotal: Prisma.Decimal;
-        }> = [];
+        const variantIds: string[] = Array.from(
+          new Set(normalizedItems.map((item) => String(item.variantId)))
+        );
 
-        for (const item of normalizedItems) {
-          if (!branchId) {
-            throw new BadRequestException("Thiếu branchId khi chuẩn bị đơn hàng");
-          }
-
-          const variant = await tx.productVariant.findUnique({
-            where: { id: item.variantId },
-            include: {
-              product: true,
-              inventoryItems: {
-                where: { branchId },
+        const variants = await tx.productVariant.findMany({
+          where: {
+            id: { in: variantIds },
+          },
+          include: {
+            product: {
+              select: {
+                name: true,
               },
             },
-          });
+            inventoryItems: {
+              where: { branchId },
+              select: {
+                variantId: true,
+                branchId: true,
+                availableQty: true,
+              },
+            },
+          },
+        }) as any[];
+
+        const variantMap = new Map<string, any>(
+          variants.map((variant) => [String(variant.id), variant])
+        );
+
+        const qtyByVariantId = normalizedItems.reduce((acc, item) => {
+          const key = String(item.variantId);
+          acc[key] = (acc[key] || 0) + Number(item.quantity || 0);
+          return acc;
+        }, {} as Record<string, number>);
+
+        for (const item of normalizedItems) {
+          const variant = variantMap.get(String(item.variantId));
 
           if (!variant) {
             throw new BadRequestException(`Variant không tồn tại: ${item.variantId}`);
           }
 
-          const qty = Number(item.quantity || 0);
+          const inventory = Array.isArray(variant.inventoryItems)
+            ? variant.inventoryItems[0]
+            : null;
 
-          if (qty <= 0) {
-            throw new BadRequestException(`Số lượng không hợp lệ cho ${variant.sku}`);
+          if (!inventory) {
+            throw new BadRequestException(
+              `Variant ${variant.sku} chưa có tồn kho ở chi nhánh ${branchId}`
+            );
           }
 
+          const availableQty = Number(inventory.availableQty || 0);
+          const neededQty = Number(qtyByVariantId[String(item.variantId)] || 0);
+
+          if (availableQty < neededQty) {
+            throw new BadRequestException(
+              `Không đủ tồn kho cho ${variant.sku}. Còn ${availableQty}, cần ${neededQty}`
+            );
+          }
+        }
+
+        let totalAmount = 0;
+
+        const preparedItems = normalizedItems.map((item) => {
+          const variant = variantMap.get(String(item.variantId));
+          const qty = Number(item.quantity || 0);
           const unitPriceNumber = this.toNumber(variant.price);
           const lineTotalNumber = qty * unitPriceNumber;
 
           totalAmount += lineTotalNumber;
 
-          preparedItems.push({
-            variantId: variant.id,
-            sku: variant.sku,
+          return {
+            variantId: String(variant.id),
+            sku: String(variant.sku || ""),
             productName: variant.product?.name || "Unknown Product",
             color: variant.color || null,
             size: variant.size || null,
             qty,
             unitPrice: new Prisma.Decimal(unitPriceNumber),
             lineTotal: new Prisma.Decimal(lineTotalNumber),
-          });
+          };
+        });
+
+        const discountAmountNumber = this.toNumber(body.discountAmount || 0);
+        const shippingFeeNumber = this.toNumber(body.shippingFee || 0);
+        const finalAmountNumber = Math.max(
+          0,
+          totalAmount - discountAmountNumber + shippingFeeNumber
+        );
+
+        const discountAmount = new Prisma.Decimal(discountAmountNumber);
+        const shippingFee = new Prisma.Decimal(shippingFeeNumber);
+        const finalAmount = new Prisma.Decimal(finalAmountNumber);
+
+        const rawPayments = Array.isArray(body.payments)
+          ? body.payments
+          : body.paymentSourceId || body.paidAmount
+            ? [
+              {
+                paymentSourceId: body.paymentSourceId
+                  ? String(body.paymentSourceId)
+                  : null,
+                amount: Number(body.paidAmount || finalAmountNumber),
+                note: body.paymentNote || null,
+              },
+            ]
+            : [];
+
+        const cleanedPayments = rawPayments
+          .map((paymentInput: any) => ({
+            paymentSourceId:
+              paymentInput?.paymentSourceId ||
+              paymentInput?.sourceId ||
+              paymentInput?.id
+                ? String(
+                    paymentInput?.paymentSourceId ||
+                      paymentInput?.sourceId ||
+                      paymentInput?.id
+                  )
+                : null,
+            amount: Number(
+              paymentInput?.amount ??
+                paymentInput?.value ??
+                paymentInput?.paidAmount ??
+                0
+            ),
+            note: paymentInput?.note || body.paymentNote || null,
+          }))
+          .filter((payment: any) => payment.paymentSourceId && payment.amount > 0);
+
+        const paymentSourceIds: string[] = Array.from(
+          new Set(cleanedPayments.map((payment: any) => String(payment.paymentSourceId)))
+        );
+
+        const paymentSources = paymentSourceIds.length
+          ? await tx.paymentSource.findMany({
+              where: { id: { in: paymentSourceIds } },
+            })
+          : [];
+
+        const paymentSourceMap = new Map(
+          paymentSources.map((source) => [source.id, source])
+        );
+
+        for (const payment of cleanedPayments) {
+          if (!paymentSourceMap.has(payment.paymentSourceId!)) {
+            throw new BadRequestException(
+              `Nguồn tiền không tồn tại: ${payment.paymentSourceId}`
+            );
+          }
         }
 
-        const discountAmount = new Prisma.Decimal(0);
-        const shippingFee = new Prisma.Decimal(0);
-        const finalAmount = new Prisma.Decimal(totalAmount);
+        let totalPaid = 0;
+        let hasCodPayment = false;
+
+        for (const payment of cleanedPayments) {
+          const source = paymentSourceMap.get(payment.paymentSourceId!)!;
+
+          if (source.type === "COD") {
+            hasCodPayment = true;
+          } else {
+            totalPaid += Number(payment.amount || 0);
+          }
+        }
+
+        let paymentStatus: PaymentStatus = PaymentStatus.UNPAID;
+
+        if (hasCodPayment && totalPaid <= 0) {
+          paymentStatus = PaymentStatus.PENDING_COD;
+        } else if (totalPaid > 0 && totalPaid < finalAmountNumber) {
+          paymentStatus = PaymentStatus.PARTIAL;
+        } else if (totalPaid >= finalAmountNumber && finalAmountNumber > 0) {
+          paymentStatus = PaymentStatus.PAID;
+        }
+
+        const shouldCompletePosSale =
+          isPosSale &&
+          paymentStatus === PaymentStatus.PAID &&
+          finalAmountNumber > 0;
+
+        const initialPaymentStatus = shouldCompletePosSale
+          ? PaymentStatus.PAID
+          : paymentStatus;
+
+        const initialFulfillmentStatus = shouldCompletePosSale
+          ? FulfillmentStatus.FULFILLED
+          : modeConfig.fulfillmentStatus;
+
+        const initialOrderStatus = shouldCompletePosSale
+          ? OrderStatus.COMPLETED
+          : modeConfig.status;
 
         const order = await tx.order.create({
           data: {
@@ -518,9 +676,9 @@ export class OrderService {
             shippingFee,
             finalAmount,
 
-            paymentStatus: PaymentStatus.UNPAID,
-            fulfillmentStatus: modeConfig.fulfillmentStatus,
-            status: modeConfig.status,
+            paymentStatus: initialPaymentStatus,
+            fulfillmentStatus: initialFulfillmentStatus,
+            status: initialOrderStatus,
             note: body.note || null,
 
             customerAddressId: body?.shippingSnapshot?.shippingAddressId || null,
@@ -542,133 +700,78 @@ export class OrderService {
               body?.shippingSnapshot?.ghnDistrictId || null,
             shippingGhnWardCode:
               body?.shippingSnapshot?.ghnWardCode || null,
-
-            items: {
-              create: preparedItems,
-            },
-          },
-          include: {
-            items: true,
-            shipment: true,
-            payments: {
-              include: {
-                paymentSource: true,
-              },
-            },
-            customer: {
-              select: {
-                id: true,
-                fullName: true,
-                phone: true,
-              },
-            },
           },
         });
 
-        if (modeConfig.deductStockNow) {
-          await this.deductStockForItems(tx, normalizedItems, order.id, branchId);
-        }
-        // =========================
-        // CREATE PAYMENT / MULTI PAYMENT
-        // =========================
+        await tx.orderItem.createMany({
+          data: preparedItems.map((item) => ({
+            orderId: order.id,
+            variantId: item.variantId,
+            sku: item.sku,
+            productName: item.productName,
+            color: item.color,
+            size: item.size,
+            qty: item.qty,
+            unitPrice: item.unitPrice,
+            lineTotal: item.lineTotal,
+          })),
+        });
 
-        const rawPayments = Array.isArray(body.payments)
-          ? body.payments
-          : body.paymentSourceId || body.paidAmount
-            ? [
-              {
-                paymentSourceId: body.paymentSourceId
-                  ? String(body.paymentSourceId)
-                  : null,
-                amount: Number(body.paidAmount || finalAmount),
-                note: body.paymentNote || null,
-              },
-            ]
-            : [];
+        if (cleanedPayments.length) {
+          await tx.payment.createMany({
+            data: cleanedPayments.map((payment: any) => {
+              const source = paymentSourceMap.get(payment.paymentSourceId!)!;
 
-        let totalPaid = 0;
-        let hasCodPayment = false;
-
-        for (const paymentInput of rawPayments) {
-          const paymentSourceId = paymentInput?.paymentSourceId
-            ? String(paymentInput.paymentSourceId)
-            : null;
-          const amount = Number(paymentInput?.amount || 0);
-
-          if (!paymentSourceId || amount <= 0) continue;
-
-          const paymentSource = await tx.paymentSource.findUnique({
-            where: { id: paymentSourceId },
-          });
-
-          if (!paymentSource) {
-            throw new BadRequestException(
-              `Nguồn tiền không tồn tại: ${paymentSourceId}`
-            );
-          }
-
-          if (paymentSource.type === "COD") {
-            hasCodPayment = true;
-          } else {
-            totalPaid += amount;
-          }
-
-          await tx.payment.create({
-            data: {
-              orderId: order.id,
-              amount: new Prisma.Decimal(amount),
-              status:
-                paymentSource.type === "COD"
-                  ? PaymentStatus.PENDING_COD
-                  : PaymentStatus.PAID,
-              method: paymentSource.name,
-              paymentSourceId,
-              note: paymentInput?.note || body.paymentNote || null,
-              paidAt: paymentSource.type === "COD" ? null : new Date(),
-            },
+              return {
+                orderId: order.id,
+                amount: new Prisma.Decimal(payment.amount),
+                status:
+                  source.type === "COD"
+                    ? PaymentStatus.PENDING_COD
+                    : PaymentStatus.PAID,
+                method: source.name,
+                paymentSourceId: payment.paymentSourceId,
+                note: payment.note || null,
+                paidAt: source.type === "COD" ? null : new Date(),
+              };
+            }),
           });
         }
 
-        const finalAmountNumber = Number(finalAmount);
-        let paymentStatus: PaymentStatus = PaymentStatus.UNPAID;
+        if (modeConfig.deductStockNow || shouldCompletePosSale) {
+          await Promise.all(
+            Object.entries(qtyByVariantId).map(([variantId, qty]) =>
+              tx.inventoryItem.update({
+                where: {
+                  variantId_branchId: {
+                    variantId,
+                    branchId,
+                  },
+                },
+                data: {
+                  availableQty: {
+                    decrement: Number(qty || 0),
+                  },
+                },
+              })
+            )
+          );
 
-        if (hasCodPayment && totalPaid <= 0) {
-          paymentStatus = PaymentStatus.PENDING_COD;
-        } else if (totalPaid > 0 && totalPaid < finalAmountNumber) {
-          paymentStatus = PaymentStatus.PARTIAL;
-        } else if (totalPaid >= finalAmountNumber && finalAmountNumber > 0) {
-          paymentStatus = PaymentStatus.PAID;
-        }
-
-        const isPosSale =
-          salesChannel === SalesChannel.POS || body?.isPosSale === true;
-
-        const shouldCompletePosSale =
-          isPosSale &&
-          paymentStatus === PaymentStatus.PAID &&
-          finalAmountNumber > 0 &&
-          !modeConfig.deductStockNow;
-
-        if (shouldCompletePosSale) {
-          await this.deductStockForItems(tx, normalizedItems, order.id, branchId);
-
-          await tx.order.update({
-            where: { id: order.id },
-            data: {
-              paymentStatus: PaymentStatus.PAID,
-              fulfillmentStatus: FulfillmentStatus.FULFILLED,
-              status: OrderStatus.COMPLETED,
-              soldAt: new Date(),
-            },
-          });
-        } else {
-          await tx.order.update({
-            where: { id: order.id },
-            data: {
-              paymentStatus,
-            },
+          await tx.inventoryMovement.createMany({
+            data: Object.entries(qtyByVariantId).map(([variantId, qty]) => ({
+              variantId,
+              type: InventoryMovementType.SALE,
+              qty: -Number(qty || 0),
+              note: shouldCompletePosSale
+                ? "Trừ kho POS khi thanh toán"
+                : "Trừ kho khi xuất đơn",
+              refType: "ORDER",
+              refId: order.id,
+              branchId,
+            })),
           });
         }
+
         if (customerId) {
           await tx.customer.update({
             where: { id: customerId },
@@ -682,6 +785,45 @@ export class OrderService {
               lastOrderAt: new Date(),
             },
           });
+        }
+
+        if (isPosSale) {
+          return {
+            ...order,
+            items: preparedItems.map((item) => ({
+              ...item,
+              id: item.variantId,
+              orderId: order.id,
+              unitPrice: item.unitPrice,
+              lineTotal: item.lineTotal,
+            })),
+            shipment: null,
+            payments: cleanedPayments.map((payment: any) => {
+              const source = paymentSourceMap.get(payment.paymentSourceId!)!;
+
+              return {
+                id: payment.paymentSourceId,
+                orderId: order.id,
+                amount: new Prisma.Decimal(payment.amount),
+                status:
+                  source.type === "COD"
+                    ? PaymentStatus.PENDING_COD
+                    : PaymentStatus.PAID,
+                method: source.name,
+                paymentSourceId: payment.paymentSourceId,
+                paymentSource: source,
+                note: payment.note || null,
+                paidAt: source.type === "COD" ? null : new Date(),
+              };
+            }),
+            customer: customerId
+              ? {
+                  id: customerId,
+                  fullName: customerName || null,
+                  phone: customerPhone || null,
+                }
+              : null,
+          };
         }
 
         const completedOrder = await tx.order.findUnique({

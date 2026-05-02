@@ -8,7 +8,7 @@ import { PrismaService } from "../prisma/prisma.service";
 
 @Injectable()
 export class ReturnsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
 
   private n(v: any) {
     return Number(v || 0);
@@ -42,6 +42,20 @@ export class ReturnsService {
 
   private voucherCode(direction: "IN" | "OUT") {
     return `${direction === "IN" ? "PT" : "PC"}-${Date.now()}`;
+  }
+
+  private async ensurePaymentSourceExists(paymentSourceId?: string | null) {
+    if (!paymentSourceId) return null;
+
+    const source = await this.prisma.paymentSource.findUnique({
+      where: { id: String(paymentSourceId) },
+    });
+
+    if (!source) {
+      throw new BadRequestException(`Nguồn tiền không tồn tại: ${paymentSourceId}`);
+    }
+
+    return source;
   }
 
   private isReturnableOrder(order: any) {
@@ -157,7 +171,9 @@ export class ReturnsService {
       return acc;
     }, {} as Record<string, number>);
 
-    for (const [orderItemId, requestedQty] of Object.entries(requestedQtyByOrderItemId)) {
+    for (const [orderItemId, requestedQtyRaw] of Object.entries(requestedQtyByOrderItemId)) {
+      const requestedQty = Number(requestedQtyRaw || 0);
+
       const orderItem = orderItemMap.get(orderItemId);
       const purchasedQty = Number(orderItem?.qty || 0);
       const previousQty = Number(previousQtyByOrderItemId[orderItemId] || 0);
@@ -244,6 +260,14 @@ export class ReturnsService {
 
     if (extraChargeAmount > 0 && !body.extraChargePaymentSourceId) {
       throw new BadRequestException("Thiếu nguồn tiền khách bù thêm.");
+    }
+
+    if (refundAmount > 0) {
+      await this.ensurePaymentSourceExists(body.refundPaymentSourceId);
+    }
+
+    if (extraChargeAmount > 0) {
+      await this.ensurePaymentSourceExists(body.extraChargePaymentSourceId);
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -581,20 +605,20 @@ export class ReturnsService {
       ...mapped,
       originalOrder: order
         ? {
-            ...order,
-            finalAmount: this.n(order.finalAmount),
-            soldAt: order.soldAt
-              ? new Date(order.soldAt).toLocaleString("vi-VN")
-              : null,
-            createdAt: order.createdAt
-              ? new Date(order.createdAt).toLocaleString("vi-VN")
-              : null,
-            payments: (order.payments || []).map((payment: any) => ({
-              ...payment,
-              amount: this.n(payment.amount),
-              sourceName: payment.paymentSource?.name || payment.method || null,
-            })),
-          }
+          ...order,
+          finalAmount: this.n(order.finalAmount),
+          soldAt: order.soldAt
+            ? new Date(order.soldAt).toLocaleString("vi-VN")
+            : null,
+          createdAt: order.createdAt
+            ? new Date(order.createdAt).toLocaleString("vi-VN")
+            : null,
+          payments: (order.payments || []).map((payment: any) => ({
+            ...payment,
+            amount: this.n(payment.amount),
+            sourceName: payment.paymentSource?.name || payment.method || null,
+          })),
+        }
         : null,
     };
   }
