@@ -316,6 +316,7 @@ export class OrderService {
       finalAmount: this.toNumber(order.finalAmount),
       createdAt: new Date(order.createdAt).toLocaleString("vi-VN"),
       updatedAt: new Date(order.updatedAt).toLocaleString("vi-VN"),
+      soldAt: order.soldAt ? new Date(order.soldAt).toLocaleString("vi-VN") : null,
       customerName: order.customerName || order.customer?.fullName || "Khách lẻ",
       customerPhone: order.customerPhone || order.customer?.phone || "—",
       items: Array.isArray(order.items)
@@ -332,6 +333,18 @@ export class OrderService {
           codAmount: this.toNumber(order.shipment.codAmount),
         }
         : null,
+      payments: Array.isArray(order.payments)
+        ? order.payments.map((payment: any) => ({
+          ...payment,
+          amount: this.toNumber(payment.amount),
+          sourceName: payment.paymentSource?.name || payment.method || null,
+          sourceCode: payment.paymentSource?.code || null,
+          sourceType: payment.paymentSource?.type || null,
+          paidAt: payment.paidAt
+            ? new Date(payment.paidAt).toLocaleString("vi-VN")
+            : null,
+        }))
+        : [],
     };
   }
 
@@ -496,6 +509,9 @@ export class OrderService {
             customerPhone: customerPhone || null,
             branchId,
             currency: "VND",
+            createdByStaffId: user?.id || null,
+            createdByStaffName: user?.name || user?.code || user?.username || null,
+            soldAt: new Date(),
 
             totalAmount: new Prisma.Decimal(totalAmount),
             discountAmount,
@@ -534,6 +550,11 @@ export class OrderService {
           include: {
             items: true,
             shipment: true,
+            payments: {
+              include: {
+                paymentSource: true,
+              },
+            },
             customer: {
               select: {
                 id: true,
@@ -548,63 +569,106 @@ export class OrderService {
           await this.deductStockForItems(tx, normalizedItems, order.id, branchId);
         }
         // =========================
-        // CREATE PAYMENT (NEW)
+        // CREATE PAYMENT / MULTI PAYMENT
         // =========================
 
-        const paymentSourceId = body.paymentSourceId
-          ? String(body.paymentSourceId)
-          : null;
+        const rawPayments = Array.isArray(body.payments)
+          ? body.payments
+          : body.paymentSourceId || body.paidAmount
+            ? [
+              {
+                paymentSourceId: body.paymentSourceId
+                  ? String(body.paymentSourceId)
+                  : null,
+                amount: Number(body.paidAmount || finalAmount),
+                note: body.paymentNote || null,
+              },
+            ]
+            : [];
 
-        const paidAmount = Number(body.paidAmount || 0);
-        const finalAmountNumber = Number(totalAmount);
+        let totalPaid = 0;
+        let hasCodPayment = false;
 
-        let paymentStatus: PaymentStatus = PaymentStatus.UNPAID;
+        for (const paymentInput of rawPayments) {
+          const paymentSourceId = paymentInput?.paymentSourceId
+            ? String(paymentInput.paymentSourceId)
+            : null;
+          const amount = Number(paymentInput?.amount || 0);
 
-        // PARTIAL
-        if (paidAmount > 0 && paidAmount < finalAmountNumber) {
-          paymentStatus = PaymentStatus.PARTIAL;
-        }
+          if (!paymentSourceId || amount <= 0) continue;
 
-        // FULL PAID
-        if (paidAmount >= finalAmountNumber && finalAmountNumber > 0) {
-          paymentStatus = PaymentStatus.PAID;
-        }
-
-        // check source
-        const paymentSource = paymentSourceId
-          ? await tx.paymentSource.findUnique({
+          const paymentSource = await tx.paymentSource.findUnique({
             where: { id: paymentSourceId },
-          })
-          : null;
+          });
 
-        // COD override
-        if (paymentSource?.type === "COD") {
-          paymentStatus = PaymentStatus.PENDING_COD;
-        }
+          if (!paymentSource) {
+            throw new BadRequestException(
+              `Nguồn tiền không tồn tại: ${paymentSourceId}`
+            );
+          }
 
-        // tạo payment
-        if (paymentSourceId || paidAmount > 0) {
+          if (paymentSource.type === "COD") {
+            hasCodPayment = true;
+          } else {
+            totalPaid += amount;
+          }
+
           await tx.payment.create({
             data: {
               orderId: order.id,
-              amount: new Prisma.Decimal(paidAmount || finalAmountNumber),
-              status: paymentStatus,
-              method: paymentSource?.name || "Manual",
+              amount: new Prisma.Decimal(amount),
+              status:
+                paymentSource.type === "COD"
+                  ? PaymentStatus.PENDING_COD
+                  : PaymentStatus.PAID,
+              method: paymentSource.name,
               paymentSourceId,
-              note: body.paymentNote || null,
-              paidAt:
-                paymentStatus === PaymentStatus.PAID ? new Date() : null,
+              note: paymentInput?.note || body.paymentNote || null,
+              paidAt: paymentSource.type === "COD" ? null : new Date(),
             },
           });
         }
 
-        // update order paymentStatus
-        await tx.order.update({
-          where: { id: order.id },
-          data: {
-            paymentStatus,
-          },
-        });
+        const finalAmountNumber = Number(finalAmount);
+        let paymentStatus: PaymentStatus = PaymentStatus.UNPAID;
+
+        if (hasCodPayment && totalPaid <= 0) {
+          paymentStatus = PaymentStatus.PENDING_COD;
+        } else if (totalPaid > 0 && totalPaid < finalAmountNumber) {
+          paymentStatus = PaymentStatus.PARTIAL;
+        } else if (totalPaid >= finalAmountNumber && finalAmountNumber > 0) {
+          paymentStatus = PaymentStatus.PAID;
+        }
+
+        const isPosSale =
+          salesChannel === SalesChannel.POS || body?.isPosSale === true;
+
+        const shouldCompletePosSale =
+          isPosSale &&
+          paymentStatus === PaymentStatus.PAID &&
+          finalAmountNumber > 0 &&
+          !modeConfig.deductStockNow;
+
+        if (shouldCompletePosSale) {
+          await this.deductStockForItems(tx, normalizedItems, order.id, branchId);
+
+          await tx.order.update({
+            where: { id: order.id },
+            data: {
+              paymentStatus: PaymentStatus.PAID,
+              fulfillmentStatus: FulfillmentStatus.FULFILLED,
+              status: OrderStatus.COMPLETED,
+              soldAt: new Date(),
+            },
+          });
+        } else {
+          await tx.order.update({
+            where: { id: order.id },
+            data: {
+              paymentStatus,
+            },
+          });
+        }
         if (customerId) {
           await tx.customer.update({
             where: { id: customerId },
@@ -620,7 +684,27 @@ export class OrderService {
           });
         }
 
-        return order;
+        const completedOrder = await tx.order.findUnique({
+          where: { id: order.id },
+          include: {
+            items: true,
+            shipment: true,
+            payments: {
+              include: {
+                paymentSource: true,
+              },
+            },
+            customer: {
+              select: {
+                id: true,
+                fullName: true,
+                phone: true,
+              },
+            },
+          },
+        });
+
+        return completedOrder || order;
       },
       {
         maxWait: 10000,
@@ -705,6 +789,9 @@ export class OrderService {
           customerName: true,
           customerPhone: true,
           branchId: true,
+          createdByStaffId: true,
+          createdByStaffName: true,
+          soldAt: true,
           totalAmount: true,
           discountAmount: true,
           shippingFee: true,
@@ -733,6 +820,25 @@ export class OrderService {
               shippingFee: true,
             },
           },
+          payments: {
+            select: {
+              id: true,
+              method: true,
+              amount: true,
+              status: true,
+              paidAt: true,
+              paymentSourceId: true,
+              paymentSource: {
+                select: {
+                  id: true,
+                  code: true,
+                  name: true,
+                  type: true,
+                  branchId: true,
+                },
+              },
+            },
+          },
         },
       }),
       this.prisma.order.count({ where }),
@@ -746,7 +852,20 @@ const data = orders.map((order) => ({
   finalAmount: this.toNumber(order.finalAmount),
   createdAt: new Date(order.createdAt).toLocaleString("vi-VN"),
   updatedAt: new Date(order.updatedAt).toLocaleString("vi-VN"),
+  soldAt: order.soldAt ? new Date(order.soldAt).toLocaleString("vi-VN") : null,
   items: [],
+  payments: Array.isArray(order.payments)
+    ? order.payments.map((payment: any) => ({
+        ...payment,
+        amount: this.toNumber(payment.amount),
+        sourceName: payment.paymentSource?.name || payment.method || null,
+        sourceCode: payment.paymentSource?.code || null,
+        sourceType: payment.paymentSource?.type || null,
+        paidAt: payment.paidAt
+          ? new Date(payment.paidAt).toLocaleString("vi-VN")
+          : null,
+      }))
+    : [],
 
   shipment: order.shipment
     ? {
@@ -776,6 +895,11 @@ const data = orders.map((order) => ({
       include: {
         items: true,
         shipment: true,
+        payments: {
+          include: {
+            paymentSource: true,
+          },
+        },
         customer: {
           select: {
             id: true,
@@ -801,6 +925,11 @@ const data = orders.map((order) => ({
       include: {
         items: true,
         shipment: true,
+        payments: {
+          include: {
+            paymentSource: true,
+          },
+        },
         customer: {
           select: {
             id: true,
@@ -923,6 +1052,11 @@ const data = orders.map((order) => ({
         include: {
           items: true,
           shipment: true,
+          payments: {
+            include: {
+              paymentSource: true,
+            },
+          },
           customer: {
             select: {
               id: true,
@@ -1031,6 +1165,11 @@ const data = orders.map((order) => ({
       include: {
         items: true,
         shipment: true,
+        payments: {
+          include: {
+            paymentSource: true,
+          },
+        },
         customer: {
           select: {
             id: true,

@@ -11,33 +11,82 @@ import * as jwt from "jsonwebtoken";
 export class AuthService {
   constructor(private prisma: PrismaService) {}
 
-  private buildToken(user: any) {
+  private async getStaffAuthData(userId: string) {
+    const user = await this.prisma.staffUser.findUnique({
+      where: { id: userId },
+      include: {
+        roles: true,
+        branchPermissions: true,
+      },
+    });
+
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException("Tài khoản không hợp lệ.");
+    }
+
+    return user;
+  }
+
+  private normalizeRole(role: any) {
+    return String(role || "").toLowerCase();
+  }
+
+  private getRoleCodes(user: any) {
+    const rolesFromRelation = Array.isArray(user.roles)
+      ? user.roles
+          .map((r: any) => this.normalizeRole(r.roleCode))
+          .filter(Boolean)
+      : [];
+
+    const legacyRole = this.normalizeRole(user.role);
+
+    return Array.from(new Set([...rolesFromRelation, legacyRole].filter(Boolean)));
+  }
+
+  private async buildToken(user: any) {
+    const authUser = user.roles && user.branchPermissions
+      ? user
+      : await this.getStaffAuthData(user.id);
+
+    const roles = this.getRoleCodes(authUser);
+
     return jwt.sign(
       {
-        id: user.id,
-        sub: user.id,
-        code: user.code,
-        role: String(user.role).toLowerCase(),
-        branchId: user.branchId,
-        branchName: user.branchName,
-        name: user.name,
+        id: authUser.id,
+        sub: authUser.id,
+        code: authUser.code,
+        role: this.normalizeRole(authUser.role),
+        roles,
+        branchId: authUser.branchId,
+        branchName: authUser.branchName,
+        name: authUser.name,
         type: "staff",
+        branchPermissions: authUser.branchPermissions || [],
       },
       process.env.JWT_SECRET || "dev-secret",
       { expiresIn: "7d" }
     );
   }
 
-  private buildUser(user: any) {
+  private async buildUser(user: any) {
+    const authUser = user.roles && user.branchPermissions
+      ? user
+      : await this.getStaffAuthData(user.id);
+
+    const roles = this.getRoleCodes(authUser);
+
     return {
-      id: user.id,
-      code: user.code,
-      name: user.name,
-      role: String(user.role).toLowerCase(),
-      branchId: user.branchId,
-      branchName: user.branchName,
+      id: authUser.id,
+      code: authUser.code,
+      name: authUser.name,
+      role: this.normalizeRole(authUser.role),
+      roles,
+      branchId: authUser.branchId,
+      branchName: authUser.branchName,
+      branchPermissions: authUser.branchPermissions || [],
       type: "staff",
-      status: user.isActive ? "active" : "inactive",
+      status: authUser.isActive ? "active" : "inactive",
+      lastLoginAt: authUser.lastLoginAt,
     };
   }
 
@@ -49,7 +98,17 @@ export class AuthService {
     const code = codeInput.trim();
 
     const user = await this.prisma.staffUser.findFirst({
-      where: { code },
+      where: {
+        OR: [
+          { code },
+          { username: code },
+          { email: code },
+        ],
+      },
+      include: {
+        roles: true,
+        branchPermissions: true,
+      },
     });
 
     if (!user || !user.isActive) {
@@ -73,12 +132,14 @@ export class AuthService {
       data: { lastLoginAt: new Date() },
     });
 
-    if (user.secondPasswordEnabled) {
+    const freshUser = await this.getStaffAuthData(user.id);
+
+    if (freshUser.secondPasswordEnabled) {
       const tempToken = jwt.sign(
         {
-          id: user.id,
-          sub: user.id,
-          code: user.code,
+          id: freshUser.id,
+          sub: freshUser.id,
+          code: freshUser.code,
           type: "second-password",
         },
         process.env.JWT_SECRET || "dev-secret",
@@ -88,13 +149,13 @@ export class AuthService {
       return {
         needsSecondPassword: true,
         tempToken,
-        user: this.buildUser(user),
+        user: await this.buildUser(freshUser),
       };
     }
 
     return {
-      token: this.buildToken(user),
-      user: this.buildUser(user),
+      token: await this.buildToken(freshUser),
+      user: await this.buildUser(freshUser),
     };
   }
 
@@ -117,6 +178,10 @@ export class AuthService {
 
     const user = await this.prisma.staffUser.findUnique({
       where: { id: payload.sub },
+      include: {
+        roles: true,
+        branchPermissions: true,
+      },
     });
 
     if (!user || !user.isActive || !user.secondPasswordHash) {
@@ -134,24 +199,20 @@ export class AuthService {
       data: { lastLoginAt: new Date() },
     });
 
+    const freshUser = await this.getStaffAuthData(user.id);
+
     return {
-      token: this.buildToken(user),
-      user: this.buildUser(user),
+      token: await this.buildToken(freshUser),
+      user: await this.buildUser(freshUser),
     };
   }
 
   async me(userId: string) {
     const user = await this.prisma.staffUser.findUnique({
       where: { id: userId },
-      select: {
-        id: true,
-        code: true,
-        name: true,
-        role: true,
-        branchId: true,
-        branchName: true,
-        isActive: true,
-        lastLoginAt: true,
+      include: {
+        roles: true,
+        branchPermissions: true,
       },
     });
 
@@ -160,15 +221,8 @@ export class AuthService {
     }
 
     return {
-      id: user.id,
-      code: user.code,
-      name: user.name,
-      role: String(user.role).toLowerCase(),
-      branchId: user.branchId,
-      branchName: user.branchName,
-      type: "staff",
+      ...(await this.buildUser(user)),
       status: "active",
-      lastLoginAt: user.lastLoginAt,
     };
   }
 

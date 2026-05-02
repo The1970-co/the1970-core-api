@@ -44,25 +44,25 @@ model Product {
 }
 
 model ProductVariant {
-  id                   String                @id @default(cuid())
+  id                   String                   @id @default(cuid())
   productId            String
-  sku                  String                @unique
+  sku                  String                   @unique
   color                String?
   size                 String?
-  price                Decimal               @db.Decimal(14, 2)
-  compareAtPrice       Decimal?              @db.Decimal(14, 2)
-  costPrice            Decimal?              @db.Decimal(14, 2)
+  price                Decimal                  @db.Decimal(14, 2)
+  compareAtPrice       Decimal?                 @db.Decimal(14, 2)
+  costPrice            Decimal?                 @db.Decimal(14, 2)
   imageUrl             String?
-  status               VariantStatus         @default(ACTIVE)
-  createdAt            DateTime              @default(now())
-  updatedAt            DateTime              @updatedAt
+  status               VariantStatus            @default(ACTIVE)
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
   inventoryItems       InventoryItem[]
   movements            InventoryMovement[]
   orderItems           OrderItem[]
-  product              Product               @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product              Product                  @relation(fields: [productId], references: [id], onDelete: Cascade)
   purchaseReceiptItems PurchaseReceiptItem[]
   stockTransferItems   StockTransferItem[]
-  locations ProductVariantLocation[]
+  locations            ProductVariantLocation[]
 }
 
 model InventoryItem {
@@ -204,6 +204,9 @@ model Order {
   billingPostalCode     String?
   createdAt             DateTime                @default(now())
   updatedAt             DateTime                @updatedAt
+  createdByStaffId      String?
+  createdByStaffName    String?
+  soldAt                DateTime                @default(now())
   isPartialDelivery     Boolean                 @default(false)
   partialReason         String?
   customerAddress       CustomerAddress?        @relation(fields: [customerAddressId], references: [id])
@@ -222,6 +225,8 @@ model Order {
   @@index([shippingGhnDistrictId])
   @@index([shippingGhnWardCode])
   @@index([status])
+  @@index([createdByStaffId])
+  @@index([soldAt])
 }
 
 model OrderItem {
@@ -262,44 +267,44 @@ model Payment {
 }
 
 model Shipment {
-  id             String                  @id @default(cuid())
-  orderId        String                  @unique
-  carrier        String
-  trackingCode   String?
-  shippingStatus String                  @default("NOT_CREATED")
-  codAmount      Decimal?                @db.Decimal(14, 2)
-  shippingFee    Decimal?                @db.Decimal(14, 2)
-  note           String?
-  metadata       Json?
-  createdAt      DateTime                @default(now())
-  updatedAt      DateTime                @updatedAt
-  fromAddress    String?
-  fromName       String?
-  fromPhone      String?
-  lastSyncedAt   DateTime?
-  partnerStatus  String?
-  toAddress      String?
-  toName         String?
-  toPhone        String?
-  weight         Int?
-  order          Order                   @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  trackingCaches ShipmentTrackingCache[]
+  id                       String                  @id @default(cuid())
+  orderId                  String                  @unique
+  carrier                  String
+  trackingCode             String?
+  shippingStatus           String                  @default("NOT_CREATED")
+  codAmount                Decimal?                @db.Decimal(14, 2)
+  shippingFee              Decimal?                @db.Decimal(14, 2)
+  note                     String?
+  metadata                 Json?
+  createdAt                DateTime                @default(now())
+  updatedAt                DateTime                @updatedAt
+  fromAddress              String?
+  fromName                 String?
+  fromPhone                String?
+  lastSyncedAt             DateTime?
+  partnerStatus            String?
+  toAddress                String?
+  toName                   String?
+  toPhone                  String?
+  weight                   Int?
+  order                    Order                   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  trackingCaches           ShipmentTrackingCache[]
+  codReconciliationStatus  String?                 @default("NOT_RECONCILED")
+  codReconciledAt          DateTime?
+  codReconciliationBatchId String?
+  codReconciliationRowId   String?
+  codReconciliationIssue   String?
+  codReconciliationAmount  Int?
+  ahamoveOrderId           String?
+  ahamoveTrackingUrl       String?
+  ahamoveStatus            String?
+  ahamoveSubStatus         String?
+  ahamoveRaw               Json?
 
   @@index([trackingCode])
   @@index([shippingStatus])
   @@index([partnerStatus])
   @@index([lastSyncedAt])
-codReconciliationStatus  String?   @default("NOT_RECONCILED")
-codReconciledAt          DateTime?
-codReconciliationBatchId String?
-codReconciliationRowId   String?
-codReconciliationIssue   String?
-codReconciliationAmount  Int?
-  ahamoveOrderId      String?
-  ahamoveTrackingUrl  String?
-  ahamoveStatus       String?
-  ahamoveSubStatus    String?
-  ahamoveRaw          Json?
 }
 
 model AuditLog {
@@ -319,20 +324,87 @@ model AuditLog {
 }
 
 model StaffUser {
-  id               String            @id @default(cuid())
-  code             String            @unique
-  name             String
-  role             String
-  branchId         String?
-  branchName       String?
-  passwordHash     String            @default("")
-  isActive         Boolean           @default(true)
-  lastLoginAt      DateTime?
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
-  purchaseReceipts PurchaseReceipt[]
-secondPasswordHash    String?
-secondPasswordEnabled Boolean @default(false)
+  id       String  @id @default(cuid())
+  code     String  @unique
+  name     String
+  username String? @unique
+  email    String? @unique
+  phone    String?
+  address  String?
+  note     String?
+
+  // giữ lại để không vỡ code cũ, sau này bỏ dần
+  role       String?
+  branchId   String?
+  branchName String?
+
+  passwordHash          String  @default("")
+  secondPasswordHash    String?
+  secondPasswordEnabled Boolean @default(false)
+
+  isActive    Boolean   @default(true)
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  mainBranch Branch? @relation("StaffMainBranch", fields: [branchId], references: [id], onDelete: SetNull)
+
+  roles             StaffUserRole[]
+  branchPermissions StaffBranchPermission[]
+  purchaseReceipts  PurchaseReceipt[]
+
+  @@index([branchId])
+  @@index([email])
+  @@index([phone])
+  @@index([isActive])
+}
+
+model StaffUserRole {
+  id        String   @id @default(cuid())
+  staffId   String
+  roleCode  String
+  createdAt DateTime @default(now())
+
+  staff StaffUser @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@unique([staffId, roleCode])
+  @@index([roleCode])
+}
+
+model StaffBranchPermission {
+  id       String @id @default(cuid())
+  staffId  String
+  branchId String
+
+  canView         Boolean @default(true)
+  canSell         Boolean @default(false)
+  canCreateOrder  Boolean @default(false)
+  canApproveOrder Boolean @default(false)
+  canCancelOrder  Boolean @default(false)
+  canHandleReturn Boolean @default(false)
+
+  canViewStock     Boolean @default(false)
+  canManageStock   Boolean @default(false)
+  canStocktake     Boolean @default(false)
+  canTransferStock Boolean @default(false)
+  canReceiveStock  Boolean @default(false)
+
+  canViewCustomer Boolean @default(false)
+  canEditCustomer Boolean @default(false)
+
+  canViewReport Boolean @default(false)
+  canViewMoney  Boolean @default(false)
+
+  note      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  staff  StaffUser @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  branch Branch    @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@unique([staffId, branchId])
+  @@index([staffId])
+  @@index([branchId])
 }
 
 model Branch {
@@ -345,11 +417,13 @@ model Branch {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  importJobs         ImportJob[]
-  purchaseReceipts   PurchaseReceipt[]
-  stockTransfersFrom StockTransfer[] @relation("FromBranch")
-  stockTransfersTo   StockTransfer[] @relation("ToBranch")
-  variantLocations ProductVariantLocation[]
+  importJobs             ImportJob[]
+  purchaseReceipts       PurchaseReceipt[]
+  stockTransfersFrom     StockTransfer[]          @relation("FromBranch")
+  stockTransfersTo       StockTransfer[]          @relation("ToBranch")
+  variantLocations       ProductVariantLocation[]
+  staffUsers             StaffUser[]              @relation("StaffMainBranch")
+  staffBranchPermissions StaffBranchPermission[]
 }
 
 model ImportJob {
@@ -585,29 +659,29 @@ model ShipmentCodAuthCode {
 }
 
 model PartialDeliveryRecord {
-  id              String                @id @default(cuid())
-  orderId         String
-  orderCode       String
-  ghnTrackingCode String?
-  originalCod     Decimal               @db.Decimal(14, 2)
-  adjustedCod     Decimal               @db.Decimal(14, 2)
-  reason          String?
-  approvedBy      String?
-  approvedById    String?
-  note            String?
-  createdAt       DateTime              @default(now())
-  updatedAt       DateTime              @updatedAt
-  items           PartialDeliveryItem[]
-  order           Order                 @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  id                   String                @id @default(cuid())
+  orderId              String
+  orderCode            String
+  ghnTrackingCode      String?
+  originalCod          Decimal               @db.Decimal(14, 2)
+  adjustedCod          Decimal               @db.Decimal(14, 2)
+  reason               String?
+  approvedBy           String?
+  approvedById         String?
+  note                 String?
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  items                PartialDeliveryItem[]
+  order                Order                 @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  returnStatus         String?               @default("PENDING_RETURN")
+  returnReceivedAt     DateTime?
+  returnReceivedBy     String?
+  returnStockReceiptId String?
+  returnStockNote      String?
 
   @@index([orderId])
   @@index([orderCode])
   @@index([ghnTrackingCode])
-  returnStatus          String?   @default("PENDING_RETURN")
-  returnReceivedAt      DateTime?
-  returnReceivedBy      String?
-  returnStockReceiptId  String?
-  returnStockNote       String?
 }
 
 model PartialDeliveryItem {
@@ -755,41 +829,41 @@ enum BranchNotificationType {
 }
 
 model GhnCodReconciliationBatch {
-  id              String   @id @default(cuid())
-  fileName        String
-  transferCode    String?
-  transferDate    String?
-  totalRows       Int      @default(0)
-  matchedRows     Int      @default(0)
-  mismatchRows    Int      @default(0)
-  totalAmount     Int      @default(0)
-  transferFee     Int      @default(0)
-  netAmount       Int      @default(0)
-  parserMode      String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id           String   @id @default(cuid())
+  fileName     String
+  transferCode String?
+  transferDate String?
+  totalRows    Int      @default(0)
+  matchedRows  Int      @default(0)
+  mismatchRows Int      @default(0)
+  totalAmount  Int      @default(0)
+  transferFee  Int      @default(0)
+  netAmount    Int      @default(0)
+  parserMode   String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  rows            GhnCodReconciliationRow[]
+  rows GhnCodReconciliationRow[]
 }
 
 model GhnCodReconciliationRow {
-  id                          String   @id @default(cuid())
-  batchId                     String
-  orderId                     String?
-  orderCode                   String?
-  shipmentId                  String?
-  ghnCode                     String
-  customerOrderCode           String?
-  ghnStatus                   String?
-  codAmount                   Int      @default(0)
-  serviceFee                  Int      @default(0)
-  totalReconcileAmount        Int      @default(0)
-  reconciliationStatus        String
-  issues                      String[] @default([])
-  partialDeliveryRecordId     String?
-  partialDeliveryAdjustedCod  Int?
-  partialReturnReceived       Boolean?
-  createdAt                   DateTime @default(now())
+  id                         String   @id @default(cuid())
+  batchId                    String
+  orderId                    String?
+  orderCode                  String?
+  shipmentId                 String?
+  ghnCode                    String
+  customerOrderCode          String?
+  ghnStatus                  String?
+  codAmount                  Int      @default(0)
+  serviceFee                 Int      @default(0)
+  totalReconcileAmount       Int      @default(0)
+  reconciliationStatus       String
+  issues                     String[] @default([])
+  partialDeliveryRecordId    String?
+  partialDeliveryAdjustedCod Int?
+  partialReturnReceived      Boolean?
+  createdAt                  DateTime @default(now())
 
   batch GhnCodReconciliationBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
 
@@ -798,128 +872,129 @@ model GhnCodReconciliationRow {
   @@index([shipmentId])
   @@index([ghnCode])
 }
+
 model StocktakeSession {
-  id          String   @id @default(cuid())
-  branchId    String
-  name        String
-  note        String?
-  status      String   @default("DRAFT")
+  id       String  @id @default(cuid())
+  branchId String
+  name     String
+  note     String?
+  status   String  @default("DRAFT")
 
   createdById String?
   startedAt   DateTime?
   finishedAt  DateTime?
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  workers     StocktakeWorker[]
-  scanEvents  StocktakeScanEvent[]
+  workers    StocktakeWorker[]
+  scanEvents StocktakeScanEvent[]
+  areas      StocktakeArea[]
 
   @@index([branchId])
   @@index([status])
-areas StocktakeArea[]
 }
 
 model StocktakeWorker {
-  id          String   @id @default(cuid())
-  sessionId   String
-  name        String
-  userId      String?
-  zone        String?
-  deviceName  String?
-  isActive    Boolean  @default(true)
+  id         String  @id @default(cuid())
+  sessionId  String
+  name       String
+  userId     String?
+  zone       String?
+  deviceName String?
+  isActive   Boolean @default(true)
 
-  status      String    @default("IN_PROGRESS")
-  startedAt   DateTime? @default(now())
-  finishedAt  DateTime?
+  status     String    @default("IN_PROGRESS")
+  startedAt  DateTime? @default(now())
+  finishedAt DateTime?
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  session     StocktakeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  scanEvents  StocktakeScanEvent[]
+  session    StocktakeSession     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  scanEvents StocktakeScanEvent[]
 
   @@index([sessionId])
 }
 
-
 model StocktakeScanEvent {
-  id           String   @id @default(cuid())
-  sessionId    String
-  workerId     String?
-  branchId     String
+  id        String  @id @default(cuid())
+  sessionId String
+  workerId  String?
+  branchId  String
 
   variantId    String?
   sku          String
   barcode      String?
-  qtyDelta     Int      @default(1)
+  qtyDelta     Int     @default(1)
   zone         String?
   locationCode String?
 
-  status       String   @default("OK")
-  note         String?
+  status String  @default("OK")
+  note   String?
 
-  createdAt    DateTime @default(now())
+  createdAt DateTime @default(now())
 
-  session      StocktakeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  worker       StocktakeWorker? @relation(fields: [workerId], references: [id], onDelete: SetNull)
+  session StocktakeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  worker  StocktakeWorker? @relation(fields: [workerId], references: [id], onDelete: SetNull)
 
   @@index([sessionId])
   @@index([workerId])
   @@index([variantId])
   @@index([sku])
 }
+
 model WarehouseMap {
-  id        String   @id @default(cuid())
-  branchId  String
-  name      String
-  code      String   @unique
-  note      String?
-  width     Int      @default(1200)
-  height    Int      @default(800)
-  isActive  Boolean  @default(true)
+  id       String  @id @default(cuid())
+  branchId String
+  name     String
+  code     String  @unique
+  note     String?
+  width    Int     @default(1200)
+  height   Int     @default(800)
+  isActive Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  racks     WarehouseRack[]
+  racks  WarehouseRack[]
+  floors WarehouseFloor[]
+  zones  WarehouseZone[]
+  doors  WarehouseDoor[]
 
   @@index([branchId])
   @@index([code])
-floors WarehouseFloor[]
-zones  WarehouseZone[]
-doors  WarehouseDoor[]
 }
 
 model WarehouseRack {
-  id        String   @id @default(cuid())
-  mapId     String
-  branchId  String
+  id       String @id @default(cuid())
+  mapId    String
+  branchId String
 
-  code      String   @unique
-  name      String
+  code String @unique
+  name String
 
-  zone      String
-  aisle     String
-  rackNo    String
+  zone   String
+  aisle  String
+  rackNo String
 
-  floors    Int      @default(5)
+  floors Int @default(5)
 
-  x         Int      @default(0)
-  y         Int      @default(0)
-  w         Int      @default(120)
-  h         Int      @default(260)
-  rotation  Int      @default(0)
+  x        Int @default(0)
+  y        Int @default(0)
+  w        Int @default(120)
+  h        Int @default(260)
+  rotation Int @default(0)
 
-  status    String   @default("PENDING") // PENDING, IN_PROGRESS, FINISHED, MISMATCH
-  note      String?
-  isActive  Boolean  @default(true)
+  status   String  @default("PENDING") // PENDING, IN_PROGRESS, FINISHED, MISMATCH
+  note     String?
+  isActive Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  map       WarehouseMap @relation(fields: [mapId], references: [id], onDelete: Cascade)
-  shelves   WarehouseShelf[]
+  map              WarehouseMap             @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  shelves          WarehouseShelf[]
   variantLocations ProductVariantLocation[]
 
   @@index([mapId])
@@ -929,27 +1004,27 @@ model WarehouseRack {
 }
 
 model WarehouseShelf {
-  id        String   @id @default(cuid())
-  rackId    String
+  id     String @id @default(cuid())
+  rackId String
 
-  code      String   @unique
-  floorNo   Int
+  code    String @unique
+  floorNo Int
 
-  label     String?
-  capacity  Int      @default(0)
-  note      String?
+  label    String?
+  capacity Int     @default(0)
+  note     String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  rack      WarehouseRack @relation(fields: [rackId], references: [id], onDelete: Cascade)
+  rack             WarehouseRack            @relation(fields: [rackId], references: [id], onDelete: Cascade)
   variantLocations ProductVariantLocation[]
 
   @@index([rackId])
 }
 
 model ProductVariantLocation {
-  id        String   @id @default(cuid())
+  id String @id @default(cuid())
 
   variantId String
   branchId  String?
@@ -957,93 +1032,93 @@ model ProductVariantLocation {
   rackId    String?
   shelfId   String?
 
-  minQty    Int?
-  maxQty    Int?
-  note      String?
-  isActive  Boolean  @default(true)
+  minQty   Int?
+  maxQty   Int?
+  note     String?
+  isActive Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
-  branch  Branch?        @relation(fields: [branchId], references: [id], onDelete: SetNull)
-  area    StocktakeArea? @relation(fields: [areaId], references: [id], onDelete: SetNull)
-  rack    WarehouseRack? @relation(fields: [rackId], references: [id], onDelete: SetNull)
-  shelf   WarehouseShelf? @relation(fields: [shelfId], references: [id], onDelete: SetNull)
+  variant   ProductVariant  @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  branch    Branch?         @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  area      StocktakeArea?  @relation(fields: [areaId], references: [id], onDelete: SetNull)
+  rack      WarehouseRack?  @relation(fields: [rackId], references: [id], onDelete: SetNull)
+  shelf     WarehouseShelf? @relation(fields: [shelfId], references: [id], onDelete: SetNull)
+  isPrimary Boolean         @default(false)
 
   @@index([variantId])
   @@index([branchId])
   @@index([areaId])
   @@index([rackId])
   @@index([shelfId])
-  isPrimary Boolean @default(false)
 }
 
 model StocktakeArea {
-  id        String   @id @default(cuid())
+  id        String  @id @default(cuid())
   sessionId String
   branchId  String
   mapId     String?
 
-  scopeType String   // MAP | AISLE | RACK
+  scopeType String // MAP | AISLE | RACK
   aisle     String?
   rackId    String?
   rackCode  String?
   label     String
 
-  status    String   @default("PENDING")
+  status String @default("PENDING")
 
   startedAt  DateTime?
   finishedAt DateTime?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
 
-  session StocktakeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session          StocktakeSession         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  variantLocations ProductVariantLocation[]
 
   @@index([sessionId])
   @@index([branchId])
   @@index([mapId])
   @@index([scopeType])
   @@index([status])
-  variantLocations ProductVariantLocation[]
 }
 
 model WarehouseFloor {
-  id        String   @id @default(cuid())
-  mapId     String
-  name      String
-  level     Int      @default(1)
-  note      String?
+  id    String  @id @default(cuid())
+  mapId String
+  name  String
+  level Int     @default(1)
+  note  String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  map       WarehouseMap @relation(fields: [mapId], references: [id], onDelete: Cascade)
-  zones     WarehouseZone[]
-  doors     WarehouseDoor[]
+  map   WarehouseMap    @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  zones WarehouseZone[]
+  doors WarehouseDoor[]
 
   @@index([mapId])
 }
 
 model WarehouseZone {
-  id        String   @id @default(cuid())
-  mapId     String
-  floorId   String
-  name      String
-  type      String   @default("STORAGE")
+  id      String @id @default(cuid())
+  mapId   String
+  floorId String
+  name    String
+  type    String @default("STORAGE")
 
-  x         Float    @default(0)
-  y         Float    @default(0)
-  width     Float    @default(500)
-  height    Float    @default(300)
-  color     String?
-  note      String?
+  x      Float   @default(0)
+  y      Float   @default(0)
+  width  Float   @default(500)
+  height Float   @default(300)
+  color  String?
+  note   String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  map       WarehouseMap   @relation(fields: [mapId], references: [id], onDelete: Cascade)
-  floor     WarehouseFloor @relation(fields: [floorId], references: [id], onDelete: Cascade)
+  map   WarehouseMap   @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  floor WarehouseFloor @relation(fields: [floorId], references: [id], onDelete: Cascade)
 
   @@index([mapId])
   @@index([floorId])
@@ -1051,20 +1126,20 @@ model WarehouseZone {
 }
 
 model WarehouseDoor {
-  id        String   @id @default(cuid())
-  mapId     String
-  floorId   String
-  name      String   @default("Cửa kho")
-  side      String   @default("BOTTOM")
-  x         Float    @default(0)
-  y         Float    @default(0)
-  width     Float    @default(180)
+  id      String @id @default(cuid())
+  mapId   String
+  floorId String
+  name    String @default("Cửa kho")
+  side    String @default("BOTTOM")
+  x       Float  @default(0)
+  y       Float  @default(0)
+  width   Float  @default(180)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  map       WarehouseMap   @relation(fields: [mapId], references: [id], onDelete: Cascade)
-  floor     WarehouseFloor @relation(fields: [floorId], references: [id], onDelete: Cascade)
+  map   WarehouseMap   @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  floor WarehouseFloor @relation(fields: [floorId], references: [id], onDelete: Cascade)
 
   @@index([mapId])
   @@index([floorId])
@@ -1072,14 +1147,14 @@ model WarehouseDoor {
 
 // ===== STOCKTAKE SNAPSHOT + REALTIME COUNT PATCH =====
 model StocktakeSnapshot {
-  id          String   @id @default(cuid())
+  id          String @id @default(cuid())
   sessionId   String
   branchId    String
   variantId   String
-  snapshotQty Int      @default(0)
+  snapshotQty Int    @default(0)
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([sessionId, variantId, branchId])
   @@index([sessionId])
@@ -1088,26 +1163,26 @@ model StocktakeSnapshot {
 }
 
 model StocktakeCount {
-  id             String    @id @default(cuid())
-  sessionId      String
-  workerId       String?
-  branchId       String
-  variantId      String?
-  sku            String
+  id        String  @id @default(cuid())
+  sessionId String
+  workerId  String?
+  branchId  String
+  variantId String?
+  sku       String
 
-  countedQty     Int       @default(0)
-  eventCount     Int       @default(0)
+  countedQty Int @default(0)
+  eventCount Int @default(0)
 
-  zone           String?
-  areaId         String?
-  rackId         String?
-  rackCode       String?
-  locationCode   String?
-  status         String    @default("OK")
+  zone         String?
+  areaId       String?
+  rackId       String?
+  rackCode     String?
+  locationCode String?
+  status       String  @default("OK")
 
-  lastScannedAt  DateTime?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  lastScannedAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   @@unique([sessionId, branchId, sku, workerId])
   @@index([sessionId])
@@ -1118,4 +1193,84 @@ model StocktakeCount {
   @@index([rackId])
 }
 
+model ReturnExchange {
+  id                         String               @id @default(cuid())
+  code                       String               @unique
+  originalOrderId            String
+  originalBranchId           String?
+  originalStaffId            String?
+  originalStaffName          String?
+  handledByStaffId           String?
+  handledByStaffName         String?
+  handledAtBranchId          String?
+  returnReceiveBranchId      String?
+  exchangeIssueBranchId      String?
+  type                       String
+  status                     String               @default("DRAFT")
+  returnAmount               Decimal              @default(0) @db.Decimal(14, 2)
+  exchangeAmount             Decimal              @default(0) @db.Decimal(14, 2)
+  differenceAmount           Decimal              @default(0) @db.Decimal(14, 2)
+  refundAmount               Decimal              @default(0) @db.Decimal(14, 2)
+  extraChargeAmount          Decimal              @default(0) @db.Decimal(14, 2)
+  refundPaymentSourceId      String?
+  extraChargePaymentSourceId String?
+  note                       String?
+  createdAt                  DateTime             @default(now())
+  updatedAt                  DateTime             @updatedAt
+  items                      ReturnExchangeItem[]
+  cashVouchers               CashVoucher[]
 
+  @@index([originalOrderId])
+  @@index([originalBranchId])
+  @@index([handledAtBranchId])
+  @@index([returnReceiveBranchId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model ReturnExchangeItem {
+  id               String         @id @default(cuid())
+  returnExchangeId String
+  itemType         String         @default("RETURN")
+  orderItemId      String?
+  variantId        String?
+  sku              String?
+  productName      String?
+  qty              Int
+  unitPrice        Decimal        @default(0) @db.Decimal(14, 2)
+  refundPrice      Decimal        @default(0) @db.Decimal(14, 2)
+  lineTotal        Decimal        @default(0) @db.Decimal(14, 2)
+  reason           String?
+  returnExchange   ReturnExchange @relation(fields: [returnExchangeId], references: [id], onDelete: Cascade)
+
+  @@index([returnExchangeId])
+  @@index([itemType])
+  @@index([variantId])
+}
+
+model CashVoucher {
+  id              String          @id @default(cuid())
+  code            String          @unique
+  direction       String
+  voucherType     String
+  amount          Decimal         @default(0) @db.Decimal(14, 2)
+  paymentSourceId String?
+  branchId        String?
+  staffId         String?
+  staffName       String?
+  customerName    String?
+  customerPhone   String?
+  refType         String?
+  refId           String?
+  note            String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  returnExchange  ReturnExchange? @relation(fields: [refId], references: [id])
+
+  @@index([direction])
+  @@index([voucherType])
+  @@index([paymentSourceId])
+  @@index([branchId])
+  @@index([refType, refId])
+  @@index([createdAt])
+}

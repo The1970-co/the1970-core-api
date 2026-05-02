@@ -36,6 +36,11 @@ export class StaffController {
     return this.staffService.update(id, dto);
   }
 
+  @Patch(":id/permissions")
+  async updatePermissions(@Param("id") id: string, @Body() dto: any) {
+    return this.staffService.updatePermissions(id, dto);
+  }
+
   @Patch(":id/status")
   async updateStatus(
     @Param("id") id: string,
@@ -51,11 +56,12 @@ export class StaffController {
   ) {
     return this.staffService.updatePassword(id, dto.password);
   }
+
   @Patch(":id/second-password")
-updateSecondPassword(
-  @Param("id") id: string,
-  @Body() body: { secondPassword: string }
-) {
-  return this.staffService.updateSecondPassword(id, body.secondPassword);
-}
+  async updateSecondPassword(
+    @Param("id") id: string,
+    @Body() body: { secondPassword: string }
+  ) {
+    return this.staffService.updateSecondPassword(id, body.secondPassword);
+  }
 }

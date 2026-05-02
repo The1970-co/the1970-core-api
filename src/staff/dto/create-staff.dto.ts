@@ -1,4 +1,10 @@
-import { IsOptional, IsString, MinLength } from "class-validator";
+import {
+  IsArray,
+  IsEmail,
+  IsOptional,
+  IsString,
+  MinLength,
+} from "class-validator";
 
 export class CreateStaffDto {
   @IsString()
@@ -7,10 +13,36 @@ export class CreateStaffDto {
   @IsString()
   name!: string;
 
+  @IsOptional()
   @IsString()
-  role!: string;
+  username?: string | null;
 
-  // ✅ CHUẨN: dùng branchId
+  @IsOptional()
+  @IsEmail()
+  email?: string | null;
+
+  @IsOptional()
+  @IsString()
+  phone?: string | null;
+
+  @IsOptional()
+  @IsString()
+  address?: string | null;
+
+  @IsOptional()
+  @IsString()
+  note?: string | null;
+
+  // legacy role, vẫn giữ để không vỡ code cũ
+  @IsOptional()
+  @IsString()
+  role?: string;
+
+  // multi-role mới
+  @IsOptional()
+  @IsArray()
+  roles?: string[];
+
   @IsOptional()
   @IsString()
   branchId?: string | null;

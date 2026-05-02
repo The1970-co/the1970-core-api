@@ -25,11 +25,22 @@ export class RolesGuard implements CanActivate {
     const req = context.switchToHttp().getRequest();
     const user = req.user;
 
-    if (!user?.role) {
+    const required = requiredRoles.map((r) => String(r).toLowerCase());
+
+    const userRoles = [
+      ...(Array.isArray(user?.roles) ? user.roles : []),
+      user?.role,
+    ]
+      .map((r) => String(r || "").toLowerCase())
+      .filter(Boolean);
+
+    if (!userRoles.length) {
       throw new ForbiddenException("No role found");
     }
 
-    if (!requiredRoles.includes(user.role)) {
+    const ok = userRoles.some((role) => required.includes(role));
+
+    if (!ok) {
       throw new ForbiddenException("Bạn không có quyền truy cập");
     }
 
