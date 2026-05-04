@@ -24,18 +24,49 @@ export class StocktakeService {
       note?: string;
       refType?: string;
       refId?: string;
-      branchId?: string;
+      branchId: string;
+      beforeQty?: number;
+      afterQty?: number;
     }
   ) {
+    const branchId = String(input.branchId || '').trim();
+
+    if (!branchId) {
+      throw new BadRequestException('Thiếu branchId khi ghi lịch sử kho.');
+    }
+
+    let beforeQty =
+      typeof input.beforeQty === 'number' ? input.beforeQty : undefined;
+    let afterQty = typeof input.afterQty === 'number' ? input.afterQty : undefined;
+
+    if (beforeQty === undefined || afterQty === undefined) {
+      const inventory = await tx.inventoryItem.findUnique({
+        where: {
+          variantId_branchId: {
+            variantId: input.variantId,
+            branchId,
+          },
+        },
+        select: {
+          availableQty: true,
+        },
+      });
+
+      beforeQty = Number(inventory?.availableQty || 0);
+      afterQty = beforeQty + Number(input.qty || 0);
+    }
+
     await tx.inventoryMovement.create({
       data: {
         variantId: input.variantId,
         type: InventoryMovementType.ADJUSTMENT,
         qty: input.qty,
+        beforeQty,
+        afterQty,
         note: input.note || null,
         refType: input.refType || 'STOCKTAKE',
         refId: input.refId || null,
-        branchId: input.branchId || null,
+        branchId,
       },
     });
   }
@@ -83,6 +114,9 @@ export class StocktakeService {
 
           if (!inventoryItem) continue;
 
+          const beforeQty = Number(inventoryItem.availableQty || 0);
+          const afterQty = counted;
+
           await tx.inventoryItem.update({
             where: {
               variantId_branchId: {
@@ -91,7 +125,7 @@ export class StocktakeService {
               },
             },
             data: {
-              availableQty: counted,
+              availableQty: afterQty,
             },
           });
 
@@ -99,6 +133,8 @@ export class StocktakeService {
             variantId,
             qty: diff,
             branchId,
+            beforeQty,
+            afterQty,
             refType: 'STOCKTAKE',
             refId,
             note: [

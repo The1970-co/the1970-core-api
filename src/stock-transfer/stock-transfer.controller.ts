@@ -7,6 +7,7 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   UseGuards,
 } from "@nestjs/common";
 
@@ -30,8 +31,8 @@ export class StockTransferController {
   }
 
   @Post()
-  async create(@Body() body: CreateStockTransferDto) {
-    return this.stockTransferService.create(body);
+  async create(@Body() body: CreateStockTransferDto, @Req() req: any) {
+    return this.stockTransferService.create(body, req.user);
   }
 
   @Get("auto-rebalance/config")
@@ -78,6 +79,16 @@ export class StockTransferController {
     return this.stockTransferService.detail(id);
   }
 
+
+  @Patch(":id")
+  async updateDraft(
+    @Param("id") id: string,
+    @Body() body: CreateStockTransferDto,
+    @Req() req: any,
+  ) {
+    return this.stockTransferService.updateDraft(id, body, req.user);
+  }
+
   @Patch(":id/status")
   async updateStatus(
     @Param("id") id: string,
@@ -86,8 +97,13 @@ export class StockTransferController {
     return this.stockTransferService.updateStatus(id, body);
   }
 
+  @Delete("bulk-delete")
+  async bulkDelete(@Body() body: { ids?: string[] }, @Req() req: any) {
+    return this.stockTransferService.bulkDelete(body.ids || [], req.user);
+  }
+
   @Delete(":id")
-  async delete(@Param("id") id: string) {
-    return this.stockTransferService.delete(id);
+  async delete(@Param("id") id: string, @Req() req: any) {
+    return this.stockTransferService.delete(id, req.user);
   }
 }

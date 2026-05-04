@@ -39,6 +39,7 @@ model Product {
   categoryRel          Category?             @relation(fields: [categoryId], references: [id])
   variants             ProductVariant[]
   purchaseReceiptItems PurchaseReceiptItem[]
+  promotionProducts    PromotionProduct[]
 
   @@index([categoryId])
 }
@@ -81,18 +82,33 @@ model InventoryItem {
 }
 
 model InventoryMovement {
-  id          String                @id @default(cuid())
-  variantId   String
-  type        InventoryMovementType
-  qty         Int
-  note        String?
-  refType     String?
-  refId       String?
+  id String @id @default(cuid())
+
+  variantId String
+  branchId  String
+
+  type InventoryMovementType
+  qty  Int
+
+  beforeQty Int?
+  afterQty  Int?
+
+  note    String?
+  refType String?
+  refId   String?
+
   createdById String?
-  createdAt   DateTime              @default(now())
-  branchId    String?
-  createdBy   AdminUser?            @relation(fields: [createdById], references: [id])
-  variant     ProductVariant        @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  branch    Branch         @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  createdBy AdminUser?     @relation(fields: [createdById], references: [id])
+
+  @@index([variantId])
+  @@index([branchId])
+  @@index([type])
+  @@index([refType, refId])
+  @@index([createdAt])
 }
 
 model Customer {
@@ -408,14 +424,15 @@ model StaffBranchPermission {
 }
 
 model Branch {
-  id        String   @id
-  name      String
-  address   String?
-  phone     String?
-  email     String?
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                 String              @id
+  name               String
+  address            String?
+  phone              String?
+  email              String?
+  isActive           Boolean             @default(true)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  inventoryMovements InventoryMovement[]
 
   importJobs             ImportJob[]
   purchaseReceipts       PurchaseReceipt[]
@@ -424,6 +441,7 @@ model Branch {
   variantLocations       ProductVariantLocation[]
   staffUsers             StaffUser[]              @relation("StaffMainBranch")
   staffBranchPermissions StaffBranchPermission[]
+  promotions             Promotion[]
 }
 
 model ImportJob {
@@ -519,22 +537,23 @@ model Supplier {
 }
 
 model PurchaseReceipt {
-  id          String                @id @default(cuid())
-  receiptCode String                @unique
-  supplierId  String?
-  branchId    String
-  status      PurchaseReceiptStatus @default(DRAFT)
-  note        String?
-  createdById String?
-  confirmedAt DateTime?
-  createdAt   DateTime              @default(now())
-  updatedAt   DateTime              @updatedAt
-  adminUserId String?
-  adminUser   AdminUser?            @relation(fields: [adminUserId], references: [id])
-  branch      Branch                @relation(fields: [branchId], references: [id])
-  createdBy   StaffUser?            @relation(fields: [createdById], references: [id])
-  supplier    Supplier?             @relation(fields: [supplierId], references: [id], onDelete: Restrict)
-  items       PurchaseReceiptItem[]
+  id                      String                   @id @default(cuid())
+  receiptCode             String                   @unique
+  supplierId              String?
+  branchId                String
+  status                  PurchaseReceiptStatus    @default(DRAFT)
+  note                    String?
+  createdById             String?
+  confirmedAt             DateTime?
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  adminUserId             String?
+  adminUser               AdminUser?               @relation(fields: [adminUserId], references: [id])
+  branch                  Branch                   @relation(fields: [branchId], references: [id])
+  createdBy               StaffUser?               @relation(fields: [createdById], references: [id])
+  supplier                Supplier?                @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  items                   PurchaseReceiptItem[]
+  purchaseReceiptPayments PurchaseReceiptPayment[]
 
   @@index([supplierId])
   @@index([branchId])
@@ -701,17 +720,18 @@ model PartialDeliveryItem {
 }
 
 model PaymentSource {
-  id        String    @id @default(cuid())
-  code      String    @unique
-  name      String
-  type      String
-  branchId  String?
-  isActive  Boolean   @default(true)
-  sortOrder Int       @default(0)
-  note      String?
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  payments  Payment[]
+  id                      String                   @id @default(cuid())
+  code                    String                   @unique
+  name                    String
+  type                    String
+  branchId                String?
+  isActive                Boolean                  @default(true)
+  sortOrder               Int                      @default(0)
+  note                    String?
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  payments                Payment[]
+  purchaseReceiptPayments PurchaseReceiptPayment[]
 }
 
 model StockTransferAutoConfig {
@@ -757,6 +777,9 @@ enum InventoryMovementType {
   ADJUSTMENT
   RESERVE
   RELEASE
+  TRANSFER_OUT
+  TRANSFER_IN
+  STOCKTAKE_ADJUST
 }
 
 enum SalesChannel {
@@ -796,6 +819,9 @@ enum FulfillmentStatus {
 
 enum PurchaseReceiptStatus {
   DRAFT
+  PAYMENT_REQUESTED
+  PARTIALLY_PAID
+  PAID
   STOCK_IMPORTED
   COMPLETED
   CANCELLED
@@ -1273,4 +1299,83 @@ model CashVoucher {
   @@index([branchId])
   @@index([refType, refId])
   @@index([createdAt])
+}
+
+enum PromotionType {
+  PRODUCT_DISCOUNT
+  ORDER_DISCOUNT
+}
+
+enum PromotionDiscountType {
+  PERCENT
+  FIXED_AMOUNT
+}
+
+enum PromotionStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model Promotion {
+  id     String          @id @default(cuid())
+  name   String
+  type   PromotionType
+  status PromotionStatus @default(ACTIVE)
+
+  discountType  PromotionDiscountType
+  discountValue Decimal               @db.Decimal(18, 2)
+
+  minOrderAmount Decimal? @db.Decimal(18, 2)
+
+  branchId     String?
+  salesChannel SalesChannel?
+
+  startAt DateTime?
+  endAt   DateTime?
+
+  priority Int     @default(0)
+  note     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products PromotionProduct[]
+
+  branch Branch? @relation(fields: [branchId], references: [id])
+
+  @@index([status])
+  @@index([type])
+  @@index([branchId])
+  @@index([salesChannel])
+}
+
+model PromotionProduct {
+  id          String @id @default(cuid())
+  promotionId String
+  productId   String
+
+  promotion Promotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([promotionId, productId])
+  @@index([productId])
+}
+
+model PurchaseReceiptPayment {
+  id              String          @id @default(cuid())
+  receiptId       String
+  paymentSourceId String?
+  amount          Decimal         @default(0) @db.Decimal(14, 2)
+  note            String?
+  paidById        String?
+  paidByName      String?
+  paidAt          DateTime        @default(now())
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  receipt         PurchaseReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  paymentSource   PaymentSource?  @relation(fields: [paymentSourceId], references: [id])
+
+  @@index([receiptId])
+  @@index([paymentSourceId])
+  @@index([paidAt])
 }

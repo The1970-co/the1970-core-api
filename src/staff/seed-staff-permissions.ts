@@ -1,3 +1,6 @@
+// NOTE: File này hiện chỉ seed quyền chi nhánh theo role.
+// Quyền menu dạng PermissionKey như promotions.view / products.view đang nằm ở lib/authz phía frontend.
+
 import { PrismaService } from "../prisma/prisma.service";
 
 const prisma = new PrismaService();

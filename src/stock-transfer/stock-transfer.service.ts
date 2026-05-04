@@ -31,25 +31,107 @@ export class StockTransferService {
     private readonly branchNotificationsService: BranchNotificationsService
   ) {}
 
-  private async nextCode(direction: StockTransferDirection) {
-    const count = await this.prisma.stockTransfer.count({
-      where: { direction },
-    });
+  private isAdminUser(user?: any) {
+    const text = JSON.stringify(user || {}).toLowerCase();
+    return text.includes("owner") || text.includes("admin");
+  }
 
+  private assertAdminUser(user?: any) {
+    if (!this.isAdminUser(user)) {
+      throw new BadRequestException("Chỉ admin/owner được xoá phiếu chuyển kho");
+    }
+  }
+
+  private async nextCode(direction: StockTransferDirection) {
     const prefix =
       direction === StockTransferDirection.OUTBOUND_TO_BRANCH ? "CKCN" : "CVK";
 
-    return `${prefix}-${String(count + 1).padStart(6, "0")}`;
+    const rows = await this.prisma.stockTransfer.findMany({
+      where: {
+        transferCode: {
+          startsWith: `${prefix}-`,
+        },
+      },
+      select: {
+        transferCode: true,
+      },
+      take: 10000,
+    });
+
+    let maxNumber = 0;
+
+    for (const row of rows) {
+      const match = String(row.transferCode || "").match(
+        new RegExp(`^${prefix}-(\d+)$`)
+      );
+
+      if (!match) continue;
+
+      const currentNumber = Number(match[1] || 0);
+      if (Number.isFinite(currentNumber) && currentNumber > maxNumber) {
+        maxNumber = currentNumber;
+      }
+    }
+
+    return `${prefix}-${String(maxNumber + 1).padStart(6, "0")}`;
   }
 
-  async create(dto: CreateStockTransferDto) {
+  private resolveDirection(fromBranchId: string, toBranchId: string) {
+    if (toBranchId === "QO" && fromBranchId !== "QO") {
+      return StockTransferDirection.INBOUND_FROM_BRANCH;
+    }
+
+    return StockTransferDirection.OUTBOUND_TO_BRANCH;
+  }
+
+  private getLockedFromBranchId(dto: CreateStockTransferDto, user?: any) {
+    const userBranchId = String(
+      user?.branchId || user?.branch?.id || user?.branchCode || ""
+    ).trim();
+
+    const userRoleText = JSON.stringify({
+      role: user?.role,
+      type: user?.type,
+      roles: user?.roles,
+      permissions: user?.permissions,
+    }).toLowerCase();
+
+    const isAdminOrOwner =
+      userRoleText.includes("admin") || userRoleText.includes("owner");
+
+    if (!isAdminOrOwner && userBranchId) {
+      return userBranchId;
+    }
+
+    const fallbackFromBranchId = String(dto.fromBranchId || "").trim();
+
+    if (!fallbackFromBranchId) {
+      throw new BadRequestException("Thiếu kho gửi");
+    }
+
+    return fallbackFromBranchId;
+  }
+
+  async create(dto: CreateStockTransferDto, user?: any) {
+    const lockedFromBranchId = this.getLockedFromBranchId(dto, user);
+
     if (!dto.items?.length) {
       throw new BadRequestException("Phiếu chuyển kho phải có ít nhất 1 dòng hàng");
     }
 
-    if (dto.fromBranchId === dto.toBranchId) {
+    if (!dto.toBranchId) {
+      throw new BadRequestException("Thiếu kho nhận hàng");
+    }
+
+    if (lockedFromBranchId === dto.toBranchId) {
       throw new BadRequestException("Kho gửi và kho nhận không được trùng nhau");
     }
+
+    if (dto.items.some((item) => Number(item.qty || 0) <= 0)) {
+      throw new BadRequestException("Số lượng chuyển phải lớn hơn 0");
+    }
+
+    const direction = this.resolveDirection(lockedFromBranchId, dto.toBranchId);
 
     const variantIds = dto.items.map((item) => item.variantId);
 
@@ -67,15 +149,15 @@ export class StockTransferService {
       );
     }
 
-    const code = await this.nextCode(dto.direction);
+    const code = await this.nextCode(direction);
 
     const transfer = await this.prisma.stockTransfer.create({
       data: {
         transferCode: code,
-        direction: dto.direction,
-        sourceType: dto.sourceType,
+        direction,
+        sourceType: dto.sourceType ?? StockTransferSourceType.MANUAL,
         sourceRefId: dto.sourceRefId,
-        fromBranchId: dto.fromBranchId,
+        fromBranchId: lockedFromBranchId,
         toBranchId: dto.toBranchId,
         note: dto.note,
         status: TransferStatus.DRAFT,
@@ -97,7 +179,16 @@ export class StockTransferService {
         },
       },
       include: {
-        items: true,
+        items: {
+          include: {
+            variant: {
+              include: {
+                product: true,
+              },
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        },
         fromBranch: true,
         toBranch: true,
       },
@@ -360,7 +451,16 @@ async handleAutoRebalanceCron() {
     const transfer = await this.prisma.stockTransfer.findUnique({
       where: { id },
       include: {
-        items: true,
+        items: {
+          include: {
+            variant: {
+              include: {
+                product: true,
+              },
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        },
         fromBranch: true,
         toBranch: true,
         notifications: { orderBy: { createdAt: "asc" } },
@@ -811,7 +911,95 @@ const suggestions = result.suggestions.filter(
   };
 }
 
-  private async applyInventoryTransfer(
+  async updateDraft(id: string, dto: CreateStockTransferDto, user?: any) {
+    const existing = await this.prisma.stockTransfer.findUnique({
+      where: { id },
+      include: { items: true },
+    });
+
+    if (!existing) {
+      throw new NotFoundException("Không tìm thấy phiếu chuyển kho");
+    }
+
+    if (existing.status !== TransferStatus.DRAFT && existing.status !== TransferStatus.PENDING) {
+      throw new BadRequestException("Chỉ được sửa phiếu nháp hoặc phiếu chưa xác nhận");
+    }
+
+    const lockedFromBranchId = this.getLockedFromBranchId(dto, user);
+
+    if (!dto.items?.length) {
+      throw new BadRequestException("Phiếu chuyển kho phải có ít nhất 1 dòng hàng");
+    }
+
+    if (!dto.toBranchId) {
+      throw new BadRequestException("Thiếu kho nhận hàng");
+    }
+
+    if (lockedFromBranchId === dto.toBranchId) {
+      throw new BadRequestException("Kho gửi và kho nhận không được trùng nhau");
+    }
+
+    if (dto.items.some((item) => Number(item.qty || 0) <= 0)) {
+      throw new BadRequestException("Số lượng chuyển phải lớn hơn 0");
+    }
+
+    const direction = this.resolveDirection(lockedFromBranchId, dto.toBranchId);
+
+    const variantIds = dto.items.map((item) => item.variantId);
+
+    const variants = await this.prisma.productVariant.findMany({
+      where: { id: { in: variantIds } },
+      include: { product: true },
+    });
+
+    const variantMap = new Map(variants.map((variant) => [variant.id, variant]));
+    const missingVariantIds = variantIds.filter((variantId) => !variantMap.has(variantId));
+
+    if (missingVariantIds.length > 0) {
+      throw new BadRequestException(
+        `Không tìm thấy biến thể sản phẩm: ${missingVariantIds.join(", ")}`
+      );
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.stockTransferItem.deleteMany({
+        where: { transferId: id },
+      });
+
+      return tx.stockTransfer.update({
+        where: { id },
+        data: {
+          direction,
+          sourceType: dto.sourceType ?? existing.sourceType,
+          sourceRefId: dto.sourceRefId,
+          fromBranchId: lockedFromBranchId,
+          toBranchId: dto.toBranchId,
+          note: dto.note,
+          items: {
+            create: dto.items.map((item) => {
+              const variant = variantMap.get(item.variantId);
+
+              return {
+                variantId: item.variantId,
+                sku: item.sku ?? variant?.sku ?? null,
+                productName: item.productName ?? variant?.product?.name ?? null,
+                color: item.color ?? variant?.color ?? null,
+                size: item.size ?? variant?.size ?? null,
+                qty: Number(item.qty || 0),
+              };
+            }),
+          },
+        },
+        include: {
+          items: true,
+          fromBranch: true,
+          toBranch: true,
+        },
+      });
+    });
+  }
+
+  private async finalizeReceivedInventoryTransfer(
     tx: Prisma.TransactionClient,
     transfer: {
       id: string;
@@ -929,10 +1117,6 @@ const suggestions = result.suggestions.filter(
       throw new NotFoundException("Không tìm thấy phiếu chuyển kho");
     }
 
-    if (transfer.status === TransferStatus.CONFIRMED && dto.status === TransferStatus.CONFIRMED) {
-      throw new BadRequestException("Phiếu này đã được xác nhận trước đó");
-    }
-
     if (transfer.status === TransferStatus.COMPLETED) {
       throw new BadRequestException("Phiếu đã hoàn thành, không thể cập nhật trạng thái");
     }
@@ -941,9 +1125,29 @@ const suggestions = result.suggestions.filter(
       throw new BadRequestException("Phiếu đã huỷ, không thể cập nhật trạng thái");
     }
 
+    if (dto.status === TransferStatus.CONFIRMED) {
+      if (transfer.status === TransferStatus.CONFIRMED) {
+        throw new BadRequestException("Phiếu này đã được xác nhận chuyển trước đó");
+      }
+
+      if (transfer.status !== TransferStatus.DRAFT && transfer.status !== TransferStatus.PENDING) {
+        throw new BadRequestException("Chỉ được xác nhận chuyển từ phiếu nháp/chờ xác nhận");
+      }
+    }
+
+    if (dto.status === TransferStatus.COMPLETED && transfer.status !== TransferStatus.CONFIRMED) {
+      throw new BadRequestException("Chỉ được xác nhận nhận đủ sau khi phiếu đã được xác nhận chuyển");
+    }
+
+    if (dto.status === TransferStatus.CANCELLED && transfer.status === TransferStatus.CONFIRMED) {
+      throw new BadRequestException("Phiếu đã xác nhận chuyển, không được huỷ trực tiếp. Nếu cần, tạo phiếu điều chỉnh/hoàn chuyển riêng.");
+    }
+
     const updated = await this.prisma.$transaction(async (tx) => {
-      if (dto.status === TransferStatus.CONFIRMED) {
-        await this.applyInventoryTransfer(tx, transfer, dto);
+      // IMPORTANT: không trừ/cộng kho khi người gửi bấm xác nhận chuyển.
+      // Chỉ khi bên nhận bấm xác nhận đã nhận đủ (COMPLETED) mới ghi inventory.
+      if (dto.status === TransferStatus.COMPLETED) {
+        await this.finalizeReceivedInventoryTransfer(tx, transfer, dto);
       }
 
       const updateData: Prisma.StockTransferUpdateInput = {
@@ -979,10 +1183,10 @@ const suggestions = result.suggestions.filter(
       await this.branchNotificationsService.createNotification({
         branchId: updated.toBranchId,
         branchName: updated.toBranch?.name ?? updated.toBranchId,
-        title: "QO đã xác nhận chuyển kho",
-        message: `Phiếu ${updated.transferCode} đã được QO xác nhận. Chi nhánh ${
+        title: "Phiếu chuyển kho chờ nhận",
+        message: `Phiếu ${updated.transferCode} đã được xác nhận chuyển. Chi nhánh ${
           updated.toBranch?.name ?? updated.toBranchId
-        } chuẩn bị nhận hàng.`,
+        } kiểm hàng và bấm xác nhận nhận đủ để nhập kho.`,
         type: BranchNotificationType.TRANSFER_OUT_CONFIRMED,
         transferId: updated.id,
         transferCode: updated.transferCode,
@@ -997,11 +1201,23 @@ const suggestions = result.suggestions.filter(
       await this.branchNotificationsService.createNotification({
         branchId: "QO",
         branchName: updated.toBranch?.name ?? "Kho QO",
-        title: "Phiếu chuyển về đã được xác nhận",
+        title: "Phiếu chuyển về chờ nhận",
         message: `Phiếu ${updated.transferCode} từ ${
           updated.fromBranch?.name ?? updated.fromBranchId
-        } đã được xác nhận chuyển về kho QO.`,
+        } đã được xác nhận chuyển về kho QO. Kho QO kiểm hàng và xác nhận nhận đủ để nhập kho.`,
         type: BranchNotificationType.TRANSFER_IN_CONFIRMED,
+        transferId: updated.id,
+        transferCode: updated.transferCode,
+      });
+    }
+
+    if (dto.status === TransferStatus.COMPLETED) {
+      await this.branchNotificationsService.createNotification({
+        branchId: updated.fromBranchId,
+        branchName: updated.fromBranch?.name ?? updated.fromBranchId,
+        title: "Phiếu chuyển kho đã hoàn tất",
+        message: `Phiếu ${updated.transferCode} đã được bên nhận xác nhận đủ. Hệ thống đã trừ kho ${updated.fromBranchId} và cộng kho ${updated.toBranchId}.`,
+        type: BranchNotificationType.TRANSFER_OUT_CONFIRMED,
         transferId: updated.id,
         transferCode: updated.transferCode,
       });
@@ -1018,29 +1234,59 @@ const suggestions = result.suggestions.filter(
     };
   }
 
-  async delete(id: string) {
-    const transfer = await this.prisma.stockTransfer.findUnique({
-      where: { id },
-      include: { items: true },
-    });
+  async delete(id: string, user?: any) {
+    this.assertAdminUser(user);
 
-    if (!transfer) {
-      throw new NotFoundException("Không tìm thấy phiếu chuyển kho");
+    const result = await this.bulkDelete([id], user);
+    return { success: true, deletedCount: result.deletedCount };
+  }
+
+  async bulkDelete(ids: string[], user?: any) {
+    this.assertAdminUser(user);
+
+    const uniqueIds = Array.from(
+      new Set((ids || []).map((id) => String(id || "").trim()).filter(Boolean))
+    );
+
+    if (uniqueIds.length === 0) {
+      throw new BadRequestException("Chưa chọn phiếu chuyển kho để xoá");
     }
 
-    if (transfer.status !== TransferStatus.DRAFT && transfer.status !== TransferStatus.PENDING) {
-      throw new BadRequestException("Chỉ được xoá phiếu nháp hoặc phiếu chưa xác nhận");
+    const transfers = await this.prisma.stockTransfer.findMany({
+      where: { id: { in: uniqueIds } },
+      select: { id: true, transferCode: true, status: true },
+    });
+
+    const foundIds = new Set(transfers.map((item) => item.id));
+    const missingIds = uniqueIds.filter((id) => !foundIds.has(id));
+
+    if (missingIds.length > 0) {
+      throw new NotFoundException(`Không tìm thấy phiếu chuyển kho: ${missingIds.join(", ")}`);
     }
 
-    await this.prisma.stockTransferItem.deleteMany({
-      where: { transferId: id },
+    const lockedTransfers = transfers.filter(
+      (item) => item.status !== TransferStatus.DRAFT && item.status !== TransferStatus.PENDING
+    );
+
+    if (lockedTransfers.length > 0) {
+      throw new BadRequestException(
+        `Chỉ được xoá phiếu nháp hoặc phiếu chưa xác nhận: ${lockedTransfers
+          .map((item) => item.transferCode)
+          .join(", ")}`
+      );
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.stockTransferItem.deleteMany({
+        where: { transferId: { in: uniqueIds } },
+      });
+
+      await tx.stockTransfer.deleteMany({
+        where: { id: { in: uniqueIds } },
+      });
     });
 
-    await this.prisma.stockTransfer.delete({
-      where: { id },
-    });
-
-    return { success: true };
+    return { success: true, deletedCount: uniqueIds.length };
   }
 
 }

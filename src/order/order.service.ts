@@ -14,6 +14,8 @@ import {
 } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { ShipmentService } from "../shipment/shipment.service";
+import { PromotionsService } from "../promotions/promotions.service";
+import { PromotionEngineService } from "../promotions/promotion-engine.service";
 
 type TxClient = Omit<
   PrismaClient,
@@ -37,7 +39,9 @@ type GetOrdersParams = {
 export class OrderService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly shipmentService: ShipmentService
+    private readonly shipmentService: ShipmentService,
+    private readonly promotionsService: PromotionsService,
+    private readonly promotionEngine: PromotionEngineService
   ) { }
 
   private toNumber(value: unknown) {
@@ -73,25 +77,57 @@ export class OrderService {
     }
   }
 
-  private buildOrderWhereByUser(user: any, extraWhere?: Prisma.OrderWhereInput) {
-    if (this.isOwner(user)) {
-      return extraWhere || {};
-    }
+private buildOrderWhereByUser(user: any, extraWhere?: Prisma.OrderWhereInput) {
+  if (this.isOwner(user)) {
+    return extraWhere || {};
+  }
 
-    const userBranch = this.resolveBranchIdFromUser(user);
+  const userBranch = this.resolveBranchIdFromUser(user);
 
-    if (!userBranch) {
-      return {
-        ...extraWhere,
-        id: "__NO_ACCESS__",
-      } satisfies Prisma.OrderWhereInput;
-    }
+  if (!userBranch) {
+    return {
+      ...extraWhere,
+      id: "__NO_ACCESS__",
+    } as Prisma.OrderWhereInput;
+  }
 
+  const branchPermission = user?.branchPermissions?.find(
+    (p: any) => String(p.branchId) === String(userBranch)
+  );
+
+  const canViewBranch = !!branchPermission?.canViewBranchOrders;
+  const canViewOwn = !!branchPermission?.canViewOwnOrders;
+
+  // ❌ Không có quyền gì → chặn
+  if (!canViewBranch && !canViewOwn) {
+    return {
+      ...extraWhere,
+      id: "__NO_ACCESS__",
+    } as Prisma.OrderWhereInput;
+  }
+
+  // ✅ Xem toàn chi nhánh
+  if (canViewBranch) {
     return {
       ...extraWhere,
       branchId: userBranch,
-    } satisfies Prisma.OrderWhereInput;
+    } as Prisma.OrderWhereInput;
   }
+
+  // ✅ Chỉ xem đơn của mình
+  if (canViewOwn) {
+    return {
+      ...extraWhere,
+      branchId: userBranch,
+      createdByStaffId: user.id,
+    } as Prisma.OrderWhereInput;
+  }
+
+  return {
+    ...extraWhere,
+    id: "__NO_ACCESS__",
+  } as Prisma.OrderWhereInput;
+}
 
   private resolveMode(body: any): CreateOrderMode {
     const mode = String(body?.mode || "draft");
@@ -121,6 +157,22 @@ export class OrderService {
       fulfillmentStatus: FulfillmentStatus.PROCESSING,
       deductStockNow: true,
     };
+  }
+
+  private isPickupLikeOrder(body: any, salesChannel?: SalesChannel | string | null) {
+    const snapshot = body?.shippingSnapshot || {};
+    const channel = String(salesChannel || body?.salesChannel || "").toUpperCase();
+
+    return (
+      body?.isPosSale === true ||
+      channel === "POS" ||
+      String(body?.deliveryMethod || "").toUpperCase() === "PICKUP" ||
+      String(body?.shippingMethod || "").toUpperCase() === "PICKUP" ||
+      String(body?.fulfillmentType || "").toUpperCase() === "PICKUP" ||
+      String(snapshot?.shippingPartner || "").toLowerCase() === "pickup" ||
+      String(snapshot?.shippingMethod || "").toUpperCase() === "PICKUP" ||
+      String(snapshot?.fulfillmentType || "").toUpperCase() === "PICKUP"
+    );
   }
 
   private ensureShipModePayload(body: any, branchId?: string | null) {
@@ -162,18 +214,49 @@ export class OrderService {
       note?: string;
       refType?: string;
       refId?: string;
-      branchId?: string;
+      branchId: string;
+      beforeQty?: number;
+      afterQty?: number;
     }
   ) {
+    const branchId = String(input.branchId || "").trim();
+
+    if (!branchId) {
+      throw new BadRequestException("Thiếu branchId khi ghi lịch sử kho.");
+    }
+
+    let beforeQty =
+      typeof input.beforeQty === "number" ? input.beforeQty : undefined;
+    let afterQty = typeof input.afterQty === "number" ? input.afterQty : undefined;
+
+    if (beforeQty === undefined || afterQty === undefined) {
+      const inventory = await tx.inventoryItem.findUnique({
+        where: {
+          variantId_branchId: {
+            variantId: input.variantId,
+            branchId,
+          },
+        },
+        select: {
+          availableQty: true,
+        },
+      });
+
+      beforeQty = Number(inventory?.availableQty || 0);
+      afterQty = beforeQty + Number(input.qty || 0);
+    }
+
     await tx.inventoryMovement.create({
       data: {
         variantId: input.variantId,
         type: input.type,
         qty: input.qty,
+        beforeQty,
+        afterQty,
         note: input.note || null,
         refType: input.refType || null,
         refId: input.refId || null,
-        branchId: input.branchId || null,
+        branchId,
       },
     });
   }
@@ -224,6 +307,9 @@ export class OrderService {
         );
       }
 
+      const beforeQty = availableQty;
+      const afterQty = beforeQty - neededQty;
+
       await tx.inventoryItem.update({
         where: {
           variantId_branchId: {
@@ -232,9 +318,7 @@ export class OrderService {
           },
         },
         data: {
-          availableQty: {
-            decrement: neededQty,
-          },
+          availableQty: afterQty,
         },
       });
 
@@ -242,6 +326,8 @@ export class OrderService {
         variantId: item.variantId,
         type: InventoryMovementType.SALE,
         qty: -neededQty,
+        beforeQty,
+        afterQty,
         note: "Trừ kho khi xuất đơn",
         refType: "ORDER",
         refId: orderRefId,
@@ -281,6 +367,9 @@ export class OrderService {
 
       const qty = Number(item.qty || 0);
 
+      const beforeQty = Number(inventory.availableQty || 0);
+      const afterQty = beforeQty + qty;
+
       await tx.inventoryItem.update({
         where: {
           variantId_branchId: {
@@ -289,9 +378,7 @@ export class OrderService {
           },
         },
         data: {
-          availableQty: {
-            increment: qty,
-          },
+          availableQty: afterQty,
         },
       });
 
@@ -299,6 +386,8 @@ export class OrderService {
         variantId: item.variantId,
         type: InventoryMovementType.CANCEL,
         qty,
+        beforeQty,
+        afterQty,
         note: "Hoàn kho khi hủy đơn",
         refType: "ORDER",
         refId: orderId,
@@ -416,6 +505,10 @@ export class OrderService {
         const salesChannel = String(
           body.salesChannel || "SHOWROOM"
         ) as SalesChannel;
+        const isPosSale =
+          salesChannel === SalesChannel.POS || body?.isPosSale === true;
+        const isPickupOrder = this.isPickupLikeOrder(body, salesChannel);
+        const isInstantCounterSale = isPosSale || isPickupOrder;
 
         let branchId = body.branchId ? String(body.branchId).trim() : null;
 
@@ -429,12 +522,9 @@ export class OrderService {
           throw new BadRequestException("Thiếu chi nhánh bán hàng.");
         }
 
-        if (mode === "ship") {
+        if (mode === "ship" && !isInstantCounterSale) {
           this.ensureShipModePayload(body, branchId);
         }
-
-        const isPosSale =
-          salesChannel === SalesChannel.POS || body?.isPosSale === true;
 
         let customerId: string | null =
           body.customerId ? String(body.customerId) : null;
@@ -476,6 +566,7 @@ export class OrderService {
           include: {
             product: {
               select: {
+                id: true,
                 name: true,
               },
             },
@@ -527,30 +618,66 @@ export class OrderService {
           }
         }
 
-        let totalAmount = 0;
-
-        const preparedItems = normalizedItems.map((item) => {
+        const rawPreparedItems = normalizedItems.map((item) => {
           const variant = variantMap.get(String(item.variantId));
           const qty = Number(item.quantity || 0);
           const unitPriceNumber = this.toNumber(variant.price);
           const lineTotalNumber = qty * unitPriceNumber;
 
-          totalAmount += lineTotalNumber;
-
           return {
             variantId: String(variant.id),
+            productId: variant.product?.id ? String(variant.product.id) : null,
             sku: String(variant.sku || ""),
             productName: variant.product?.name || "Unknown Product",
             color: variant.color || null,
             size: variant.size || null,
             qty,
-            unitPrice: new Prisma.Decimal(unitPriceNumber),
-            lineTotal: new Prisma.Decimal(lineTotalNumber),
+            unitPriceNumber,
+            lineTotalNumber,
           };
         });
 
-        const discountAmountNumber = this.toNumber(body.discountAmount || 0);
-        const shippingFeeNumber = this.toNumber(body.shippingFee || 0);
+        const activePromotions = await this.promotionsService.getActivePromotions({
+          branchId,
+          salesChannel,
+        });
+
+        const promotionResult = this.promotionEngine.apply({
+          items: rawPreparedItems.map((item) => ({
+            productId: item.productId,
+            variantId: item.variantId,
+            quantity: item.qty,
+            unitPrice: item.unitPriceNumber,
+          })),
+          promotions: activePromotions,
+        });
+
+        const totalAmount = promotionResult.subtotal;
+
+        const preparedItems = rawPreparedItems.map((item) => ({
+          variantId: item.variantId,
+          sku: item.sku,
+          productName: item.productName,
+          color: item.color,
+          size: item.size,
+          qty: item.qty,
+          unitPrice: new Prisma.Decimal(item.unitPriceNumber),
+          lineTotal: new Prisma.Decimal(item.lineTotalNumber),
+        }));
+
+        const manualDiscountAmountNumber = this.toNumber(body.discountAmount || 0);
+        const autoDiscountAmountNumber = this.toNumber(
+          promotionResult.totalDiscountAmount || 0
+        );
+        const autoPromotionNote = Array.isArray(promotionResult.appliedPromotions)
+          ? promotionResult.appliedPromotions
+              .map((promotion: any) => `${promotion.name}: ${Number(promotion.discountAmount || 0).toLocaleString("vi-VN")}đ`)
+              .join(", ")
+          : "";
+        const discountAmountNumber = manualDiscountAmountNumber + autoDiscountAmountNumber;
+        const shippingFeeNumber = isInstantCounterSale
+          ? 0
+          : this.toNumber(body.shippingFee || 0);
         const finalAmountNumber = Math.max(
           0,
           totalAmount - discountAmountNumber + shippingFeeNumber
@@ -606,12 +733,12 @@ export class OrderService {
             })
           : [];
 
-        const paymentSourceMap = new Map(
-          paymentSources.map((source) => [source.id, source])
+        const paymentSourceMap = new Map<string, any>(
+          paymentSources.map((source: any) => [String(source.id), source])
         );
 
         for (const payment of cleanedPayments) {
-          if (!paymentSourceMap.has(payment.paymentSourceId!)) {
+          if (!paymentSourceMap.has(String(payment.paymentSourceId!))) {
             throw new BadRequestException(
               `Nguồn tiền không tồn tại: ${payment.paymentSourceId}`
             );
@@ -622,7 +749,7 @@ export class OrderService {
         let hasCodPayment = false;
 
         for (const payment of cleanedPayments) {
-          const source = paymentSourceMap.get(payment.paymentSourceId!)!;
+          const source = paymentSourceMap.get(String(payment.paymentSourceId!))!;
 
           if (source.type === "COD") {
             hasCodPayment = true;
@@ -641,20 +768,15 @@ export class OrderService {
           paymentStatus = PaymentStatus.PAID;
         }
 
-        const shouldCompletePosSale =
-          isPosSale &&
-          paymentStatus === PaymentStatus.PAID &&
-          finalAmountNumber > 0;
+        const shouldCompleteCounterSale = isInstantCounterSale;
 
-        const initialPaymentStatus = shouldCompletePosSale
-          ? PaymentStatus.PAID
-          : paymentStatus;
+        const initialPaymentStatus = paymentStatus;
 
-        const initialFulfillmentStatus = shouldCompletePosSale
+        const initialFulfillmentStatus = shouldCompleteCounterSale
           ? FulfillmentStatus.FULFILLED
           : modeConfig.fulfillmentStatus;
 
-        const initialOrderStatus = shouldCompletePosSale
+        const initialOrderStatus = shouldCompleteCounterSale
           ? OrderStatus.COMPLETED
           : modeConfig.status;
 
@@ -679,27 +801,50 @@ export class OrderService {
             paymentStatus: initialPaymentStatus,
             fulfillmentStatus: initialFulfillmentStatus,
             status: initialOrderStatus,
-            note: body.note || null,
+            note:
+              autoDiscountAmountNumber > 0
+                ? `${body.note ? body.note + " | " : ""}Tự áp dụng khuyến mại: ${autoDiscountAmountNumber.toLocaleString("vi-VN")}đ${autoPromotionNote ? ` (${autoPromotionNote})` : ""}`
+                : body.note || null,
 
-            customerAddressId: body?.shippingSnapshot?.shippingAddressId || null,
-            shippingRecipientName:
-              body?.shippingSnapshot?.shippingRecipientName || null,
-            shippingPhone: body?.shippingSnapshot?.shippingPhone || null,
-            shippingAddressLine1:
-              body?.shippingSnapshot?.shippingAddressLine1 || null,
-            shippingAddressLine2:
-              body?.shippingSnapshot?.shippingAddressLine2 || null,
-            shippingWard: body?.shippingSnapshot?.shippingWard || null,
-            shippingDistrict: body?.shippingSnapshot?.shippingDistrict || null,
-            shippingCity: body?.shippingSnapshot?.shippingCity || null,
-            shippingProvince: body?.shippingSnapshot?.shippingProvince || null,
-            shippingCountry: body?.shippingSnapshot?.shippingCountry || null,
-            shippingPostalCode:
-              body?.shippingSnapshot?.shippingPostalCode || null,
-            shippingGhnDistrictId:
-              body?.shippingSnapshot?.ghnDistrictId || null,
-            shippingGhnWardCode:
-              body?.shippingSnapshot?.ghnWardCode || null,
+            customerAddressId: isInstantCounterSale
+              ? null
+              : body?.shippingSnapshot?.shippingAddressId || null,
+            shippingRecipientName: isInstantCounterSale
+              ? null
+              : body?.shippingSnapshot?.shippingRecipientName || null,
+            shippingPhone: isInstantCounterSale
+              ? null
+              : body?.shippingSnapshot?.shippingPhone || null,
+            shippingAddressLine1: isInstantCounterSale
+              ? null
+              : body?.shippingSnapshot?.shippingAddressLine1 || null,
+            shippingAddressLine2: isInstantCounterSale
+              ? null
+              : body?.shippingSnapshot?.shippingAddressLine2 || null,
+            shippingWard: isInstantCounterSale
+              ? null
+              : body?.shippingSnapshot?.shippingWard || null,
+            shippingDistrict: isInstantCounterSale
+              ? null
+              : body?.shippingSnapshot?.shippingDistrict || null,
+            shippingCity: isInstantCounterSale
+              ? null
+              : body?.shippingSnapshot?.shippingCity || null,
+            shippingProvince: isInstantCounterSale
+              ? null
+              : body?.shippingSnapshot?.shippingProvince || null,
+            shippingCountry: isInstantCounterSale
+              ? null
+              : body?.shippingSnapshot?.shippingCountry || null,
+            shippingPostalCode: isInstantCounterSale
+              ? null
+              : body?.shippingSnapshot?.shippingPostalCode || null,
+            shippingGhnDistrictId: isInstantCounterSale
+              ? null
+              : body?.shippingSnapshot?.ghnDistrictId || null,
+            shippingGhnWardCode: isInstantCounterSale
+              ? null
+              : body?.shippingSnapshot?.ghnWardCode || null,
           },
         });
 
@@ -720,7 +865,7 @@ export class OrderService {
         if (cleanedPayments.length) {
           await tx.payment.createMany({
             data: cleanedPayments.map((payment: any) => {
-              const source = paymentSourceMap.get(payment.paymentSourceId!)!;
+              const source = paymentSourceMap.get(String(payment.paymentSourceId!))!;
 
               return {
                 orderId: order.id,
@@ -738,38 +883,59 @@ export class OrderService {
           });
         }
 
-        if (modeConfig.deductStockNow || shouldCompletePosSale) {
-          await Promise.all(
-            Object.entries(qtyByVariantId).map(([variantId, qty]) =>
-              tx.inventoryItem.update({
-                where: {
-                  variantId_branchId: {
-                    variantId,
-                    branchId,
-                  },
-                },
-                data: {
-                  availableQty: {
-                    decrement: Number(qty || 0),
-                  },
-                },
-              })
-            )
-          );
+        if (modeConfig.deductStockNow || shouldCompleteCounterSale) {
+          for (const [variantId, qty] of Object.entries(qtyByVariantId)) {
+            const deductQty = Number(qty || 0);
 
-          await tx.inventoryMovement.createMany({
-            data: Object.entries(qtyByVariantId).map(([variantId, qty]) => ({
+            if (deductQty <= 0) continue;
+
+            const inventory = await tx.inventoryItem.findUnique({
+              where: {
+                variantId_branchId: {
+                  variantId,
+                  branchId,
+                },
+              },
+              select: {
+                availableQty: true,
+              },
+            });
+
+            if (!inventory) {
+              throw new BadRequestException(
+                `Variant ${variantId} chưa có tồn kho ở chi nhánh ${branchId}`
+              );
+            }
+
+            const beforeQty = Number(inventory.availableQty || 0);
+            const afterQty = beforeQty - deductQty;
+
+            await tx.inventoryItem.update({
+              where: {
+                variantId_branchId: {
+                  variantId,
+                  branchId,
+                },
+              },
+              data: {
+                availableQty: afterQty,
+              },
+            });
+
+            await this.logInventoryMovement(tx, {
               variantId,
               type: InventoryMovementType.SALE,
-              qty: -Number(qty || 0),
-              note: shouldCompletePosSale
-                ? "Trừ kho POS khi thanh toán"
+              qty: -deductQty,
+              beforeQty,
+              afterQty,
+              note: shouldCompleteCounterSale
+                ? "Trừ kho bán tại quầy / khách nhận tại cửa hàng"
                 : "Trừ kho khi xuất đơn",
               refType: "ORDER",
               refId: order.id,
               branchId,
-            })),
-          });
+            });
+          }
         }
 
         if (customerId) {
@@ -780,14 +946,14 @@ export class OrderService {
                 increment: 1,
               },
               totalSpent: {
-                increment: new Prisma.Decimal(totalAmount),
+                increment: new Prisma.Decimal(finalAmountNumber),
               },
               lastOrderAt: new Date(),
             },
           });
         }
 
-        if (isPosSale) {
+        if (isInstantCounterSale) {
           return {
             ...order,
             items: preparedItems.map((item) => ({
@@ -799,7 +965,7 @@ export class OrderService {
             })),
             shipment: null,
             payments: cleanedPayments.map((payment: any) => {
-              const source = paymentSourceMap.get(payment.paymentSourceId!)!;
+              const source = paymentSourceMap.get(String(payment.paymentSourceId!))!;
 
               return {
                 id: payment.paymentSourceId,
@@ -854,7 +1020,7 @@ export class OrderService {
       }
     );
 
-    if (mode === "ship") {
+    if (mode === "ship" && !this.isPickupLikeOrder(body, body?.salesChannel)) {
       await this.createShipmentIfNeeded(createdOrder, body);
     }
 
@@ -1056,7 +1222,20 @@ const data = orders.map((order) => ({
       throw new BadRequestException("Không tìm thấy đơn hàng");
     }
 
-    this.ensureBranchAccess(user, order.branchId);
+    if (!this.isOwner(user)) {
+  const branchPermission = user?.branchPermissions?.find(
+    (p: any) => String(p.branchId) === String(order.branchId)
+  );
+
+  const canViewBranch = !!branchPermission?.canViewBranchOrders;
+  const canViewOwn = !!branchPermission?.canViewOwnOrders;
+
+  if (!canViewBranch) {
+    if (!canViewOwn || order.createdByStaffId !== user.id) {
+      throw new ForbiddenException("Bạn không có quyền xem đơn này.");
+    }
+  }
+}
 
     return this.mapOrderResponse(order);
   }

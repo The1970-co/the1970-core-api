@@ -40,7 +40,10 @@ export class StaffService {
     }
 
     const email = String((dto as any).email || "").trim() || null;
-    const username = String((dto as any).username || "").trim() || null;
+    // Tên đăng nhập lưu thường để tránh trùng ADMIN/admin và dễ login.
+    // Nếu không nhập username, mặc định lấy code viết thường.
+    const usernameInput = String((dto as any).username || "").trim();
+    const username = (usernameInput || dto.code.trim()).toLowerCase();
 
     if (email) {
       const existingEmail = await this.prisma.staffUser.findUnique({
@@ -197,7 +200,7 @@ export class StaffService {
       : current.email;
 
     const username = dto.username !== undefined
-      ? String(dto.username || "").trim() || null
+      ? String(dto.username || "").trim().toLowerCase() || current.username
       : current.username;
 
     if (email && email !== current.email) {
@@ -314,6 +317,8 @@ export class StaffService {
             canView: Boolean(b.canView ?? true),
 
             canSell: Boolean(b.canSell),
+            canViewOwnOrders: Boolean(b.canViewOwnOrders),
+            canViewBranchOrders: Boolean(b.canViewBranchOrders),
             canCreateOrder: Boolean(b.canCreateOrder),
             canApproveOrder: Boolean(b.canApproveOrder),
             canCancelOrder: Boolean(b.canCancelOrder),
@@ -328,8 +333,6 @@ export class StaffService {
             canViewCustomer: Boolean(b.canViewCustomer),
             canEditCustomer: Boolean(b.canEditCustomer),
 
-            canViewReport: Boolean(b.canViewReport),
-            canViewMoney: Boolean(b.canViewMoney),
 
             note: b.note ? String(b.note) : null,
           })),
@@ -409,6 +412,8 @@ export class StaffService {
       canView: true,
 
       canSell: orderStaff,
+      canViewOwnOrders: orderStaff,
+      canViewBranchOrders: manager || isFulltime,
       canCreateOrder: orderStaff,
       canApproveOrder: manager || isFulltime,
       canCancelOrder: manager || isFulltime,
@@ -423,8 +428,6 @@ export class StaffService {
       canViewCustomer: orderStaff || manager,
       canEditCustomer: manager || isFulltime,
 
-      canViewReport: manager,
-      canViewMoney: high,
     };
   }
 }

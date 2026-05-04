@@ -27,6 +27,9 @@ import { StocktakeSessionModule } from "./stocktake-session/stocktake-session.mo
 import { WarehouseMapModule } from "./warehouse-map/warehouse-map.module";
 import { StocktakeAreaModule } from "./stocktake-area/stocktake-area.module";
 import { ReturnsModule } from "./returns/returns.module";
+import { DashboardModule } from './dashboard/dashboard.module';
+import { PromotionsModule } from './promotions/promotions.module';
+import { SupplierPaymentsModule } from './supplier-payments/supplier-payments.module';
 @Module({
   imports: [
     PrismaModule,
@@ -57,6 +60,9 @@ import { ReturnsModule } from "./returns/returns.module";
     WarehouseMapModule,
     StocktakeAreaModule,
     ReturnsModule,
+    DashboardModule,
+    PromotionsModule,
+    SupplierPaymentsModule,
   ],
 })
 export class AppModule {}

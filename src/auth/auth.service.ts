@@ -11,6 +11,10 @@ import * as jwt from "jsonwebtoken";
 export class AuthService {
   constructor(private prisma: PrismaService) {}
 
+  private readonly jwtSecret = process.env.JWT_SECRET || "dev-secret";
+  private readonly refreshSecret =
+    process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || "dev-secret";
+
   private async getStaffAuthData(userId: string) {
     const user = await this.prisma.staffUser.findUnique({
       where: { id: userId },
@@ -40,13 +44,16 @@ export class AuthService {
 
     const legacyRole = this.normalizeRole(user.role);
 
-    return Array.from(new Set([...rolesFromRelation, legacyRole].filter(Boolean)));
+    return Array.from(
+      new Set([...rolesFromRelation, legacyRole].filter(Boolean))
+    );
   }
 
-  private async buildToken(user: any) {
-    const authUser = user.roles && user.branchPermissions
-      ? user
-      : await this.getStaffAuthData(user.id);
+  private async buildAccessToken(user: any) {
+    const authUser =
+      user.roles && user.branchPermissions
+        ? user
+        : await this.getStaffAuthData(user.id);
 
     const roles = this.getRoleCodes(authUser);
 
@@ -63,15 +70,46 @@ export class AuthService {
         type: "staff",
         branchPermissions: authUser.branchPermissions || [],
       },
-      process.env.JWT_SECRET || "dev-secret",
-      { expiresIn: "7d" }
+      this.jwtSecret,
+      { expiresIn: "15m" }
     );
   }
 
+  private async buildRefreshToken(user: any) {
+    const authUser =
+      user.roles && user.branchPermissions
+        ? user
+        : await this.getStaffAuthData(user.id);
+
+    return jwt.sign(
+      {
+        sub: authUser.id,
+        code: authUser.code,
+        type: "refresh",
+      },
+      this.refreshSecret,
+      { expiresIn: "30d" }
+    );
+  }
+
+  private async buildAuthResponse(user: any) {
+    const freshUser = await this.getStaffAuthData(user.id);
+    const accessToken = await this.buildAccessToken(freshUser);
+    const refreshToken = await this.buildRefreshToken(freshUser);
+
+    return {
+      token: accessToken,
+      accessToken,
+      refreshToken,
+      user: await this.buildUser(freshUser),
+    };
+  }
+
   private async buildUser(user: any) {
-    const authUser = user.roles && user.branchPermissions
-      ? user
-      : await this.getStaffAuthData(user.id);
+    const authUser =
+      user.roles && user.branchPermissions
+        ? user
+        : await this.getStaffAuthData(user.id);
 
     const roles = this.getRoleCodes(authUser);
 
@@ -99,11 +137,7 @@ export class AuthService {
 
     const user = await this.prisma.staffUser.findFirst({
       where: {
-        OR: [
-          { code },
-          { username: code },
-          { email: code },
-        ],
+        OR: [{ code }, { username: code }, { email: code }],
       },
       include: {
         roles: true,
@@ -142,7 +176,7 @@ export class AuthService {
           code: freshUser.code,
           type: "second-password",
         },
-        process.env.JWT_SECRET || "dev-secret",
+        this.jwtSecret,
         { expiresIn: "5m" }
       );
 
@@ -153,10 +187,7 @@ export class AuthService {
       };
     }
 
-    return {
-      token: await this.buildToken(freshUser),
-      user: await this.buildUser(freshUser),
-    };
+    return this.buildAuthResponse(freshUser);
   }
 
   async verifySecondPassword(tempToken: string, secondPassword: string) {
@@ -167,7 +198,7 @@ export class AuthService {
     let payload: any;
 
     try {
-      payload = jwt.verify(tempToken, process.env.JWT_SECRET || "dev-secret");
+      payload = jwt.verify(tempToken, this.jwtSecret);
     } catch {
       throw new UnauthorizedException("Phiên xác thực lớp 2 đã hết hạn.");
     }
@@ -199,11 +230,32 @@ export class AuthService {
       data: { lastLoginAt: new Date() },
     });
 
-    const freshUser = await this.getStaffAuthData(user.id);
+    return this.buildAuthResponse(user);
+  }
+
+  async refresh(refreshToken: string) {
+    if (!refreshToken) {
+      throw new UnauthorizedException("Missing refresh token");
+    }
+
+    let payload: any;
+
+    try {
+      payload = jwt.verify(refreshToken, this.refreshSecret);
+    } catch {
+      throw new UnauthorizedException("Phiên đăng nhập đã hết hạn.");
+    }
+
+    if (payload.type !== "refresh" || !payload.sub) {
+      throw new UnauthorizedException("Refresh token không hợp lệ.");
+    }
+
+    const user = await this.getStaffAuthData(payload.sub);
 
     return {
-      token: await this.buildToken(freshUser),
-      user: await this.buildUser(freshUser),
+      token: await this.buildAccessToken(user),
+      accessToken: await this.buildAccessToken(user),
+      user: await this.buildUser(user),
     };
   }
 
