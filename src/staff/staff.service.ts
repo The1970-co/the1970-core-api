@@ -4,9 +4,234 @@ import { CreateStaffDto } from "./dto/create-staff.dto";
 import { UpdateStaffStatusDto } from "./dto/update-staff-status.dto";
 import * as bcrypt from "bcrypt";
 
+type BranchPermissionTemplate = {
+  canView?: boolean;
+  canSell?: boolean;
+  canViewOwnOrders?: boolean;
+  canViewBranchOrders?: boolean;
+  canCreateOrder?: boolean;
+  canApproveOrder?: boolean;
+  canCancelOrder?: boolean;
+  canHandleReturn?: boolean;
+  canViewStock?: boolean;
+  canManageStock?: boolean;
+  canStocktake?: boolean;
+  canTransferStock?: boolean;
+  canReceiveStock?: boolean;
+  canViewCustomer?: boolean;
+  canEditCustomer?: boolean;
+};
+
+type BranchRoleInput = {
+  branchId: string;
+  roleCode: string;
+};
+
+const ROLE_TEMPLATES: Record<string, BranchPermissionTemplate> = {
+  owner: {
+    canView: true,
+    canSell: true,
+    canViewOwnOrders: true,
+    canViewBranchOrders: true,
+    canCreateOrder: true,
+    canApproveOrder: true,
+    canCancelOrder: true,
+    canHandleReturn: true,
+    canViewStock: true,
+    canManageStock: true,
+    canStocktake: true,
+    canTransferStock: true,
+    canReceiveStock: true,
+    canViewCustomer: true,
+    canEditCustomer: true,
+  },
+  admin: {
+    canView: true,
+    canSell: true,
+    canViewOwnOrders: true,
+    canViewBranchOrders: true,
+    canCreateOrder: true,
+    canApproveOrder: true,
+    canCancelOrder: true,
+    canHandleReturn: true,
+    canViewStock: true,
+    canManageStock: true,
+    canStocktake: true,
+    canTransferStock: true,
+    canReceiveStock: true,
+    canViewCustomer: true,
+    canEditCustomer: true,
+  },
+  "branch-manager": {
+    canView: true,
+    canSell: true,
+    canViewOwnOrders: true,
+    canViewBranchOrders: true,
+    canCreateOrder: true,
+    canApproveOrder: true,
+    canCancelOrder: true,
+    canHandleReturn: true,
+    canViewStock: true,
+    canManageStock: true,
+    canStocktake: true,
+    canTransferStock: true,
+    canReceiveStock: true,
+    canViewCustomer: true,
+    canEditCustomer: true,
+  },
+  fulltime: {
+    canView: true,
+    canSell: true,
+    canViewOwnOrders: true,
+    canViewBranchOrders: true,
+    canCreateOrder: true,
+    canHandleReturn: true,
+    canViewStock: true,
+    canStocktake: true,
+    canTransferStock: true,
+    canReceiveStock: true,
+    canViewCustomer: true,
+  },
+  "retail-staff": {
+    canView: true,
+    canSell: true,
+    canViewOwnOrders: true,
+    canCreateOrder: true,
+    canHandleReturn: true,
+    canViewStock: true,
+    canViewCustomer: true,
+  },
+  "stock-auditor": {
+    canView: true,
+    canViewStock: true,
+    canStocktake: true,
+  },
+  "stock-staff": {
+    canView: true,
+    canViewStock: true,
+    canManageStock: true,
+    canStocktake: true,
+    canTransferStock: true,
+    canReceiveStock: true,
+  },
+};
+
 @Injectable()
 export class StaffService {
   constructor(private readonly prisma: PrismaService) {}
+
+  private normalizeRole(role: any) {
+    return String(role || "").trim().toLowerCase();
+  }
+
+  private normalizeRoles(input: any): string[] {
+    const raw = Array.isArray(input)
+      ? input
+      : input
+        ? [input]
+        : [];
+
+    return Array.from(
+      new Set(raw.map((role) => this.normalizeRole(role)).filter(Boolean)),
+    );
+  }
+
+  private validateRole(roleCode: string) {
+    const normalized = this.normalizeRole(roleCode);
+    if (!normalized || !ROLE_TEMPLATES[normalized]) {
+      throw new BadRequestException(`Role không hợp lệ: ${roleCode || "trống"}`);
+    }
+    return normalized;
+  }
+
+  private permissionsForRole(roleCode: string) {
+    const normalized = this.validateRole(roleCode);
+    return {
+      canView: false,
+      canSell: false,
+      canViewOwnOrders: false,
+      canViewBranchOrders: false,
+      canCreateOrder: false,
+      canApproveOrder: false,
+      canCancelOrder: false,
+      canHandleReturn: false,
+      canViewStock: false,
+      canManageStock: false,
+      canStocktake: false,
+      canTransferStock: false,
+      canReceiveStock: false,
+      canViewCustomer: false,
+      canEditCustomer: false,
+      ...ROLE_TEMPLATES[normalized],
+      canViewReport: false,
+      canViewMoney: false,
+    };
+  }
+
+  private async assertBranchesExist(branchIds: string[]) {
+    const uniqueIds = Array.from(new Set(branchIds.filter(Boolean)));
+    if (!uniqueIds.length) return;
+
+    const branches = await this.prisma.branch.findMany({
+      where: { id: { in: uniqueIds } },
+      select: { id: true },
+    });
+
+    const existingIds = new Set(branches.map((branch) => branch.id));
+    const missingBranch = uniqueIds.find((id) => !existingIds.has(id));
+
+    if (missingBranch) {
+      throw new BadRequestException(`Chi nhánh không tồn tại: ${missingBranch}`);
+    }
+  }
+
+  private normalizeBranchRoles(input: any[]): BranchRoleInput[] {
+    if (!Array.isArray(input)) return [];
+
+    const map = new Map<string, BranchRoleInput>();
+
+    input.forEach((item) => {
+      const branchId = String(item?.branchId || "").trim();
+      const roleCode = this.validateRole(item?.roleCode || item?.role || item?.roleId);
+
+      if (!branchId) return;
+      map.set(branchId, { branchId, roleCode });
+    });
+
+    return Array.from(map.values());
+  }
+
+  private deriveLegacyRolesFromBranchRoles(branchRoles: BranchRoleInput[], fallbackRole?: string) {
+    const roles = branchRoles.map((row) => row.roleCode);
+    if (!roles.length && fallbackRole) roles.push(this.normalizeRole(fallbackRole));
+    return Array.from(new Set(roles.filter(Boolean)));
+  }
+
+  private async replaceBranchRolesAndPermissions(tx: any, staffId: string, branchRoles: BranchRoleInput[]) {
+    await tx.staffBranchRole.deleteMany({ where: { staffId } });
+    await tx.staffBranchPermission.deleteMany({ where: { staffId } });
+
+    if (!branchRoles.length) return;
+
+    await tx.staffBranchRole.createMany({
+      data: branchRoles.map((row) => ({
+        staffId,
+        branchId: row.branchId,
+        roleCode: row.roleCode,
+      })),
+      skipDuplicates: true,
+    });
+
+    await tx.staffBranchPermission.createMany({
+      data: branchRoles.map((row) => ({
+        staffId,
+        branchId: row.branchId,
+        ...this.permissionsForRole(row.roleCode),
+        note: `Auto generated from role ${row.roleCode}`,
+      })),
+      skipDuplicates: true,
+    });
+  }
 
   async create(dto: CreateStaffDto) {
     if (!dto.password || dto.password.length < 4) {
@@ -21,15 +246,9 @@ export class StaffService {
       throw new BadRequestException("Thiếu tên nhân viên");
     }
 
-    const roles = Array.isArray((dto as any).roles)
-      ? (dto as any).roles.map((r: string) => String(r).trim()).filter(Boolean)
-      : [];
-
-    const legacyRole = String((dto as any).role || roles[0] || "").trim();
-
-    if (!legacyRole) {
-      throw new BadRequestException("Thiếu role");
-    }
+    const branchRoles = this.normalizeBranchRoles((dto as any).branchRoles || []);
+    const rolesFromDto = this.normalizeRoles((dto as any).roles);
+    const legacyRole = this.validateRole((dto as any).role || rolesFromDto[0] || branchRoles[0]?.roleCode);
 
     const existingByCode = await this.prisma.staffUser.findUnique({
       where: { code: dto.code.trim() },
@@ -40,32 +259,18 @@ export class StaffService {
     }
 
     const email = String((dto as any).email || "").trim() || null;
-    // Tên đăng nhập lưu thường để tránh trùng ADMIN/admin và dễ login.
-    // Nếu không nhập username, mặc định lấy code viết thường.
     const usernameInput = String((dto as any).username || "").trim();
     const username = (usernameInput || dto.code.trim()).toLowerCase();
 
     if (email) {
-      const existingEmail = await this.prisma.staffUser.findUnique({
-        where: { email },
-      });
-
-      if (existingEmail) {
-        throw new BadRequestException("Email nhân viên đã tồn tại");
-      }
+      const existingEmail = await this.prisma.staffUser.findUnique({ where: { email } });
+      if (existingEmail) throw new BadRequestException("Email nhân viên đã tồn tại");
     }
 
     if (username) {
-      const existingUsername = await this.prisma.staffUser.findUnique({
-        where: { username },
-      });
-
-      if (existingUsername) {
-        throw new BadRequestException("Tên đăng nhập đã tồn tại");
-      }
+      const existingUsername = await this.prisma.staffUser.findUnique({ where: { username } });
+      if (existingUsername) throw new BadRequestException("Tên đăng nhập đã tồn tại");
     }
-
-    const hash = await bcrypt.hash(dto.password, 10);
 
     let branchId: string | null = null;
     let branchName: string | null = null;
@@ -73,56 +278,55 @@ export class StaffService {
     if (dto.branchId) {
       const branch = await this.prisma.branch.findUnique({
         where: { id: String(dto.branchId).trim() },
-        select: {
-          id: true,
-          name: true,
-        },
+        select: { id: true, name: true },
       });
 
-      if (!branch) {
-        throw new BadRequestException("Chi nhánh không tồn tại");
-      }
-
+      if (!branch) throw new BadRequestException("Chi nhánh không tồn tại");
       branchId = branch.id;
       branchName = branch.name;
     }
 
-    const created = await this.prisma.staffUser.create({
-      data: {
-        code: dto.code.trim(),
-        name: dto.name.trim(),
-        username,
-        email,
-        phone: String((dto as any).phone || "").trim() || null,
-        address: String((dto as any).address || "").trim() || null,
-        note: String((dto as any).note || "").trim() || null,
-        role: legacyRole,
-        branchId,
-        branchName,
-        passwordHash: hash,
-        isActive: true,
-      },
-    });
+    const initialBranchRoles = branchRoles.length
+      ? branchRoles
+      : branchId
+        ? [{ branchId, roleCode: legacyRole }]
+        : [];
 
-    const finalRoles = roles.length ? roles : [legacyRole];
+    await this.assertBranchesExist(initialBranchRoles.map((row) => row.branchId));
 
-    await this.prisma.staffUserRole.createMany({
-      data: finalRoles.map((roleCode: string) => ({
-        staffId: created.id,
-        roleCode: roleCode.toLowerCase(),
-      })),
-      skipDuplicates: true,
-    });
+    const hash = await bcrypt.hash(dto.password, 10);
 
-    if (branchId) {
-      await this.prisma.staffBranchPermission.create({
+    const created = await this.prisma.$transaction(async (tx) => {
+      const staff = await tx.staffUser.create({
         data: {
-          staffId: created.id,
+          code: dto.code.trim(),
+          name: dto.name.trim(),
+          username,
+          email,
+          phone: String((dto as any).phone || "").trim() || null,
+          address: String((dto as any).address || "").trim() || null,
+          note: String((dto as any).note || "").trim() || null,
+          role: legacyRole,
           branchId,
-          ...this.defaultBranchPermissions(legacyRole),
+          branchName,
+          passwordHash: hash,
+          isActive: true,
         },
       });
-    }
+
+      const finalRoles = this.deriveLegacyRolesFromBranchRoles(initialBranchRoles, legacyRole);
+
+      if (finalRoles.length) {
+        await tx.staffUserRole.createMany({
+          data: finalRoles.map((roleCode) => ({ staffId: staff.id, roleCode })),
+          skipDuplicates: true,
+        });
+      }
+
+      await this.replaceBranchRolesAndPermissions(tx, staff.id, initialBranchRoles);
+
+      return staff;
+    });
 
     return this.findOne(created.id);
   }
@@ -132,11 +336,8 @@ export class StaffService {
       orderBy: [{ createdAt: "desc" }],
       include: {
         roles: true,
-        branchPermissions: {
-          include: {
-            branch: true,
-          },
-        },
+        branchRoles: { include: { branch: true } },
+        branchPermissions: { include: { branch: true } },
       },
     });
   }
@@ -146,29 +347,18 @@ export class StaffService {
       where: { id },
       include: {
         roles: true,
-        branchPermissions: {
-          include: {
-            branch: true,
-          },
-        },
+        branchRoles: { include: { branch: true } },
+        branchPermissions: { include: { branch: true } },
       },
     });
   }
 
   async update(id: string, dto: any) {
-    const current = await this.prisma.staffUser.findUnique({
-      where: { id },
-    });
+    const current = await this.prisma.staffUser.findUnique({ where: { id } });
 
-    if (!current) {
-      throw new BadRequestException("Nhân viên không tồn tại");
-    }
+    if (!current) throw new BadRequestException("Nhân viên không tồn tại");
 
-    const roleInput = String(dto.role || current.role || "").trim();
-
-    if (!roleInput) {
-      throw new BadRequestException("Thiếu role");
-    }
+    const roleInput = this.validateRole(dto.role || current.role || "retail-staff");
 
     let branchId: string | null = current.branchId || null;
     let branchName: string | null = current.branchName || null;
@@ -177,16 +367,10 @@ export class StaffService {
       if (dto.branchId) {
         const branch = await this.prisma.branch.findUnique({
           where: { id: String(dto.branchId).trim() },
-          select: {
-            id: true,
-            name: true,
-          },
+          select: { id: true, name: true },
         });
 
-        if (!branch) {
-          throw new BadRequestException("Chi nhánh không tồn tại");
-        }
-
+        if (!branch) throw new BadRequestException("Chi nhánh không tồn tại");
         branchId = branch.id;
         branchName = branch.name;
       } else {
@@ -195,32 +379,17 @@ export class StaffService {
       }
     }
 
-    const email = dto.email !== undefined
-      ? String(dto.email || "").trim() || null
-      : current.email;
-
-    const username = dto.username !== undefined
-      ? String(dto.username || "").trim().toLowerCase() || current.username
-      : current.username;
+    const email = dto.email !== undefined ? String(dto.email || "").trim() || null : current.email;
+    const username = dto.username !== undefined ? String(dto.username || "").trim().toLowerCase() || current.username : current.username;
 
     if (email && email !== current.email) {
-      const existingEmail = await this.prisma.staffUser.findUnique({
-        where: { email },
-      });
-
-      if (existingEmail && existingEmail.id !== id) {
-        throw new BadRequestException("Email nhân viên đã tồn tại");
-      }
+      const existingEmail = await this.prisma.staffUser.findUnique({ where: { email } });
+      if (existingEmail && existingEmail.id !== id) throw new BadRequestException("Email nhân viên đã tồn tại");
     }
 
     if (username && username !== current.username) {
-      const existingUsername = await this.prisma.staffUser.findUnique({
-        where: { username },
-      });
-
-      if (existingUsername && existingUsername.id !== id) {
-        throw new BadRequestException("Tên đăng nhập đã tồn tại");
-      }
+      const existingUsername = await this.prisma.staffUser.findUnique({ where: { username } });
+      if (existingUsername && existingUsername.id !== id) throw new BadRequestException("Tên đăng nhập đã tồn tại");
     }
 
     await this.prisma.staffUser.update({
@@ -230,18 +399,9 @@ export class StaffService {
         name: dto.name !== undefined ? String(dto.name).trim() : current.name,
         username,
         email,
-        phone:
-          dto.phone !== undefined
-            ? String(dto.phone || "").trim() || null
-            : current.phone,
-        address:
-          dto.address !== undefined
-            ? String(dto.address || "").trim() || null
-            : current.address,
-        note:
-          dto.note !== undefined
-            ? String(dto.note || "").trim() || null
-            : current.note,
+        phone: dto.phone !== undefined ? String(dto.phone || "").trim() || null : current.phone,
+        address: dto.address !== undefined ? String(dto.address || "").trim() || null : current.address,
+        note: dto.note !== undefined ? String(dto.note || "").trim() || null : current.note,
         role: roleInput,
         branchId,
         branchName,
@@ -251,99 +411,44 @@ export class StaffService {
     return this.findOne(id);
   }
 
-  async updatePermissions(staffId: string, dto: any) {
-    const staff = await this.prisma.staffUser.findUnique({
-      where: { id: staffId },
-    });
+  async updateBranchRoles(staffId: string, dto: any) {
+    const staff = await this.prisma.staffUser.findUnique({ where: { id: staffId } });
+    if (!staff) throw new BadRequestException("Nhân viên không tồn tại");
 
-    if (!staff) {
-      throw new BadRequestException("Nhân viên không tồn tại");
-    }
+    const branchRoles = this.normalizeBranchRoles(dto.branchRoles || []);
+    await this.assertBranchesExist(branchRoles.map((row) => row.branchId));
 
-    const roles = Array.isArray(dto.roles)
-      ? dto.roles.map((r: string) => String(r).trim().toLowerCase()).filter(Boolean)
-      : [];
+    const legacyRoles = this.deriveLegacyRolesFromBranchRoles(branchRoles, staff.role || undefined);
+    const primaryRole = legacyRoles[0] || staff.role || null;
+    const primaryBranchId = branchRoles[0]?.branchId || staff.branchId || null;
+    let primaryBranchName: string | null = staff.branchName || null;
 
-    if (!roles.length) {
-      throw new BadRequestException("Cần chọn ít nhất 1 vai trò");
-    }
-
-    const branchPermissions = Array.isArray(dto.branchPermissions)
-      ? dto.branchPermissions
-      : [];
-
-    const branchIds = branchPermissions
-      .map((b: any) => String(b.branchId || "").trim())
-      .filter(Boolean);
-
-    if (branchIds.length) {
-      const existingBranches = await this.prisma.branch.findMany({
-        where: { id: { in: branchIds } },
-        select: { id: true },
+    if (primaryBranchId) {
+      const branch = await this.prisma.branch.findUnique({
+        where: { id: primaryBranchId },
+        select: { name: true },
       });
-
-      const existingIds = new Set(existingBranches.map((b) => b.id));
-
-      const missingBranch = branchIds.find((id: string) => !existingIds.has(id));
-
-      if (missingBranch) {
-        throw new BadRequestException(`Chi nhánh không tồn tại: ${missingBranch}`);
-      }
+      primaryBranchName = branch?.name || primaryBranchName;
     }
 
     await this.prisma.$transaction(async (tx) => {
-      await tx.staffUserRole.deleteMany({
-        where: { staffId },
-      });
+      await tx.staffUserRole.deleteMany({ where: { staffId } });
 
-      await tx.staffUserRole.createMany({
-        data: roles.map((roleCode: string) => ({
-          staffId,
-          roleCode,
-        })),
-        skipDuplicates: true,
-      });
-
-      await tx.staffBranchPermission.deleteMany({
-        where: { staffId },
-      });
-
-      if (branchPermissions.length) {
-        await tx.staffBranchPermission.createMany({
-          data: branchPermissions.map((b: any) => ({
-            staffId,
-            branchId: String(b.branchId).trim(),
-
-            canView: Boolean(b.canView ?? true),
-
-            canSell: Boolean(b.canSell),
-            canViewOwnOrders: Boolean(b.canViewOwnOrders),
-            canViewBranchOrders: Boolean(b.canViewBranchOrders),
-            canCreateOrder: Boolean(b.canCreateOrder),
-            canApproveOrder: Boolean(b.canApproveOrder),
-            canCancelOrder: Boolean(b.canCancelOrder),
-            canHandleReturn: Boolean(b.canHandleReturn),
-
-            canViewStock: Boolean(b.canViewStock),
-            canManageStock: Boolean(b.canManageStock),
-            canStocktake: Boolean(b.canStocktake),
-            canTransferStock: Boolean(b.canTransferStock),
-            canReceiveStock: Boolean(b.canReceiveStock),
-
-            canViewCustomer: Boolean(b.canViewCustomer),
-            canEditCustomer: Boolean(b.canEditCustomer),
-
-
-            note: b.note ? String(b.note) : null,
-          })),
+      if (legacyRoles.length) {
+        await tx.staffUserRole.createMany({
+          data: legacyRoles.map((roleCode) => ({ staffId, roleCode })),
           skipDuplicates: true,
         });
       }
 
+      await this.replaceBranchRolesAndPermissions(tx, staffId, branchRoles);
+
       await tx.staffUser.update({
         where: { id: staffId },
         data: {
-          role: roles[0],
+          role: primaryRole,
+          branchId: primaryBranchId,
+          branchName: primaryBranchName,
         },
       });
     });
@@ -351,12 +456,24 @@ export class StaffService {
     return this.findOne(staffId);
   }
 
+  async updatePermissions(staffId: string, dto: any) {
+    if (Array.isArray(dto.branchRoles)) {
+      return this.updateBranchRoles(staffId, dto);
+    }
+
+    const branchPermissions = Array.isArray(dto.branchPermissions) ? dto.branchPermissions : [];
+    const branchRoles = branchPermissions.map((row: any) => ({
+      branchId: String(row.branchId || "").trim(),
+      roleCode: this.normalizeRole(row.roleCode || row.role || dto.roles?.[0] || "retail-staff"),
+    }));
+
+    return this.updateBranchRoles(staffId, { branchRoles });
+  }
+
   async updateStatus(id: string, dto: UpdateStaffStatusDto) {
     return this.prisma.staffUser.update({
       where: { id },
-      data: {
-        isActive: dto.status === "ACTIVE",
-      },
+      data: { isActive: dto.status === "ACTIVE" },
     });
   }
 
@@ -369,9 +486,7 @@ export class StaffService {
 
     return this.prisma.staffUser.update({
       where: { id },
-      data: {
-        passwordHash: hash,
-      },
+      data: { passwordHash: hash },
     });
   }
 
@@ -391,43 +506,5 @@ export class StaffService {
     });
 
     return { message: "Đã cập nhật mật khẩu lớp 2." };
-  }
-
-  private defaultBranchPermissions(role: string) {
-    const r = String(role || "").toLowerCase();
-
-    const isOwner = r === "owner";
-    const isAdmin = r === "admin";
-    const isFulltime = r === "fulltime";
-    const isRetail = r === "retail-staff";
-    const isStockAuditor = r === "stock-auditor";
-    const isBranchManager = r === "branch-manager";
-
-    const high = isOwner || isAdmin;
-    const manager = high || isBranchManager;
-    const orderStaff = manager || isFulltime || isRetail;
-    const stockStaff = manager || isFulltime || isStockAuditor;
-
-    return {
-      canView: true,
-
-      canSell: orderStaff,
-      canViewOwnOrders: orderStaff,
-      canViewBranchOrders: manager || isFulltime,
-      canCreateOrder: orderStaff,
-      canApproveOrder: manager || isFulltime,
-      canCancelOrder: manager || isFulltime,
-      canHandleReturn: orderStaff,
-
-      canViewStock: stockStaff,
-      canManageStock: manager || isFulltime,
-      canStocktake: stockStaff,
-      canTransferStock: manager || isFulltime,
-      canReceiveStock: stockStaff,
-
-      canViewCustomer: orderStaff || manager,
-      canEditCustomer: manager || isFulltime,
-
-    };
   }
 }

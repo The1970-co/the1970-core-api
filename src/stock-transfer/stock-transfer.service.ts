@@ -42,39 +42,39 @@ export class StockTransferService {
     }
   }
 
-  private async nextCode(direction: StockTransferDirection) {
-    const prefix =
-      direction === StockTransferDirection.OUTBOUND_TO_BRANCH ? "CKCN" : "CVK";
+private async nextCode(direction: StockTransferDirection) {
+  const prefix =
+    direction === StockTransferDirection.OUTBOUND_TO_BRANCH ? "CKCN" : "CVK";
 
-    const rows = await this.prisma.stockTransfer.findMany({
-      where: {
-        transferCode: {
-          startsWith: `${prefix}-`,
-        },
+  const rows = await this.prisma.stockTransfer.findMany({
+    where: {
+      transferCode: {
+        startsWith: `${prefix}-`,
       },
-      select: {
-        transferCode: true,
-      },
-      take: 10000,
-    });
+    },
+    select: {
+      transferCode: true,
+    },
+    take: 10000,
+  });
 
-    let maxNumber = 0;
+  let maxNumber = 0;
 
-    for (const row of rows) {
-      const match = String(row.transferCode || "").match(
-        new RegExp(`^${prefix}-(\d+)$`)
-      );
+  for (const row of rows) {
+    const match = String(row.transferCode || "").match(
+      new RegExp(`^${prefix}-(\\d+)$`)
+    );
 
-      if (!match) continue;
+    if (!match) continue;
 
-      const currentNumber = Number(match[1] || 0);
-      if (Number.isFinite(currentNumber) && currentNumber > maxNumber) {
-        maxNumber = currentNumber;
-      }
+    const currentNumber = Number(match[1] || 0);
+    if (Number.isFinite(currentNumber) && currentNumber > maxNumber) {
+      maxNumber = currentNumber;
     }
-
-    return `${prefix}-${String(maxNumber + 1).padStart(6, "0")}`;
   }
+
+  return `${prefix}-${String(maxNumber + 1).padStart(6, "0")}`;
+}
 
   private resolveDirection(fromBranchId: string, toBranchId: string) {
     if (toBranchId === "QO" && fromBranchId !== "QO") {

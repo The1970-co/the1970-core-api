@@ -20,6 +20,7 @@ export class AuthService {
       where: { id: userId },
       include: {
         roles: true,
+        branchRoles: { include: { branch: true } },
         branchPermissions: true,
       },
     });
@@ -51,7 +52,7 @@ export class AuthService {
 
   private async buildAccessToken(user: any) {
     const authUser =
-      user.roles && user.branchPermissions
+      user.roles && user.branchRoles && user.branchPermissions
         ? user
         : await this.getStaffAuthData(user.id);
 
@@ -68,6 +69,7 @@ export class AuthService {
         branchName: authUser.branchName,
         name: authUser.name,
         type: "staff",
+        branchRoles: authUser.branchRoles || [],
         branchPermissions: authUser.branchPermissions || [],
       },
       this.jwtSecret,
@@ -77,7 +79,7 @@ export class AuthService {
 
   private async buildRefreshToken(user: any) {
     const authUser =
-      user.roles && user.branchPermissions
+      user.roles && user.branchRoles && user.branchPermissions
         ? user
         : await this.getStaffAuthData(user.id);
 
@@ -107,7 +109,7 @@ export class AuthService {
 
   private async buildUser(user: any) {
     const authUser =
-      user.roles && user.branchPermissions
+      user.roles && user.branchRoles && user.branchPermissions
         ? user
         : await this.getStaffAuthData(user.id);
 
@@ -121,6 +123,7 @@ export class AuthService {
       roles,
       branchId: authUser.branchId,
       branchName: authUser.branchName,
+      branchRoles: authUser.branchRoles || [],
       branchPermissions: authUser.branchPermissions || [],
       type: "staff",
       status: authUser.isActive ? "active" : "inactive",
@@ -141,6 +144,7 @@ export class AuthService {
       },
       include: {
         roles: true,
+        branchRoles: { include: { branch: true } },
         branchPermissions: true,
       },
     });
@@ -211,6 +215,7 @@ export class AuthService {
       where: { id: payload.sub },
       include: {
         roles: true,
+        branchRoles: { include: { branch: true } },
         branchPermissions: true,
       },
     });
@@ -264,6 +269,7 @@ export class AuthService {
       where: { id: userId },
       include: {
         roles: true,
+        branchRoles: { include: { branch: true } },
         branchPermissions: true,
       },
     });

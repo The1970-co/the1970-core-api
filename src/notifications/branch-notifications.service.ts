@@ -1,8 +1,5 @@
 import { Injectable, BadRequestException } from "@nestjs/common";
-import {
-  BranchNotificationType,
-  Prisma,
-} from "@prisma/client";
+import { BranchNotificationType, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { ListBranchNotificationsDto } from "./dto/list-branch-notifications.dto";
 import { MarkNotificationReadDto } from "./dto/mark-notification-read.dto";
@@ -61,30 +58,109 @@ export class BranchNotificationsService {
   }
 
   async markRead(dto: MarkNotificationReadDto) {
-    if (dto.notificationId) {
-      return this.prisma.branchNotification.update({
-        where: { id: dto.notificationId },
-        data: {
-          isRead: true,
-          readAt: new Date(),
-        },
-      });
-    }
+    const now = new Date();
 
-    if (dto.branchId) {
+    const branchId = String(dto.branchId || "").trim();
+    const transferCode = String(dto.transferCode || "").trim();
+    const notificationId = String(dto.notificationId || "").trim();
+
+    // CASE 1: FE gửi đủ branchId + transferCode.
+    // Mark toàn bộ notification cùng phiếu ở chi nhánh đó.
+    if (branchId && transferCode) {
       const result = await this.prisma.branchNotification.updateMany({
         where: {
-          branchId: dto.branchId,
+          branchId,
+          transferCode,
           isRead: false,
         },
         data: {
           isRead: true,
-          readAt: new Date(),
+          readAt: now,
         },
       });
 
       return {
         success: true,
+        mode: "BRANCH_TRANSFER_CODE",
+        branchId,
+        transferCode,
+        updatedCount: result.count,
+      };
+    }
+
+    // CASE 2: FE chỉ gửi notificationId.
+    // HARD FIX: tự tìm notification, nếu có transferCode thì cũng mark toàn bộ notification cùng phiếu.
+    // Đây là chỗ chặn vòng lặp refresh/poll kéo lại thông báo cũ.
+    if (notificationId) {
+      const notification = await this.prisma.branchNotification.findUnique({
+        where: { id: notificationId },
+      });
+
+      if (!notification) {
+        return {
+          success: true,
+          mode: "NOT_FOUND_BUT_IGNORED",
+          updatedCount: 0,
+        };
+      }
+
+      if (notification.branchId && notification.transferCode) {
+        const result = await this.prisma.branchNotification.updateMany({
+          where: {
+            branchId: notification.branchId,
+            transferCode: notification.transferCode,
+            isRead: false,
+          },
+          data: {
+            isRead: true,
+            readAt: now,
+          },
+        });
+
+        return {
+          success: true,
+          mode: "NOTIFICATION_ID_RESOLVED_TO_TRANSFER_CODE",
+          branchId: notification.branchId,
+          transferCode: notification.transferCode,
+          updatedCount: result.count,
+        };
+      }
+
+      const row = await this.prisma.branchNotification.update({
+        where: { id: notificationId },
+        data: {
+          isRead: true,
+          readAt: now,
+        },
+      });
+
+      return {
+        success: true,
+        mode: "NOTIFICATION_ID_ONLY",
+        branchId: row.branchId,
+        transferCode: row.transferCode,
+        updatedCount: 1,
+      };
+    }
+
+    // CASE 3: FE gửi branchId không có transferCode.
+    // Mark toàn bộ unread của branch.
+    if (branchId) {
+      const result = await this.prisma.branchNotification.updateMany({
+        where: {
+          branchId,
+          isRead: false,
+        },
+        data: {
+          isRead: true,
+          readAt: now,
+        },
+      });
+
+      return {
+        success: true,
+        mode: "BRANCH_ALL",
+        branchId,
         updatedCount: result.count,
       };
     }

@@ -8,4 +8,8 @@ export class MarkNotificationReadDto {
   @IsOptional()
   @IsString()
   branchId?: string;
+
+  @IsOptional()
+  @IsString()
+  transferCode?: string;
 }

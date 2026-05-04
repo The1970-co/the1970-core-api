@@ -41,6 +41,13 @@ export class StaffController {
     return this.staffService.updatePermissions(id, dto);
   }
 
+
+
+  @Patch(":id/branch-roles")
+  async updateBranchRoles(@Param("id") id: string, @Body() dto: any) {
+    return this.staffService.updateBranchRoles(id, dto);
+  }
+
   @Patch(":id/status")
   async updateStatus(
     @Param("id") id: string,

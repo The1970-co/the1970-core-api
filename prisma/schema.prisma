@@ -368,6 +368,7 @@ model StaffUser {
   roles             StaffUserRole[]
   branchPermissions StaffBranchPermission[]
   purchaseReceipts  PurchaseReceipt[]
+  branchRoles       StaffBranchRole[]
 
   @@index([branchId])
   @@index([email])
@@ -392,12 +393,14 @@ model StaffBranchPermission {
   staffId  String
   branchId String
 
-  canView         Boolean @default(true)
-  canSell         Boolean @default(false)
-  canCreateOrder  Boolean @default(false)
-  canApproveOrder Boolean @default(false)
-  canCancelOrder  Boolean @default(false)
-  canHandleReturn Boolean @default(false)
+  canView             Boolean @default(true)
+  canSell             Boolean @default(false)
+  canViewOwnOrders    Boolean @default(false)
+  canViewBranchOrders Boolean @default(false)
+  canCreateOrder      Boolean @default(false)
+  canApproveOrder     Boolean @default(false)
+  canCancelOrder      Boolean @default(false)
+  canHandleReturn     Boolean @default(false)
 
   canViewStock     Boolean @default(false)
   canManageStock   Boolean @default(false)
@@ -441,6 +444,7 @@ model Branch {
   variantLocations       ProductVariantLocation[]
   staffUsers             StaffUser[]              @relation("StaffMainBranch")
   staffBranchPermissions StaffBranchPermission[]
+  staffBranchRoles       StaffBranchRole[]
   promotions             Promotion[]
 }
 
@@ -1378,4 +1382,21 @@ model PurchaseReceiptPayment {
   @@index([receiptId])
   @@index([paymentSourceId])
   @@index([paidAt])
+}
+
+model StaffBranchRole {
+  id       String @id @default(cuid())
+  staffId  String
+  branchId String
+  roleCode String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  staff  StaffUser @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  branch Branch    @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@unique([staffId, branchId])
+  @@index([staffId])
+  @@index([branchId])
 }
