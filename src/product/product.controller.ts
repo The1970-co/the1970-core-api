@@ -122,6 +122,11 @@ export class ProductController {
     return this.productService.mergeDuplicateProducts();
   }
 
+  @Patch("descriptions/clear-all")
+  clearAllDescriptions() {
+    return this.productService.clearAllDescriptions();
+  }
+
   @Post()
   createProduct(@Body() body: any) {
     return this.productService.createProduct(body);

@@ -2,28 +2,27 @@ import {
   Body,
   Controller,
   Get,
-  Headers,
   Patch,
   Post,
   Req,
   Res,
-  UnauthorizedException,
   UseGuards,
 } from "@nestjs/common";
 import type { Request, Response } from "express";
-import * as jwt from "jsonwebtoken";
 import { AuthService } from "./auth.service";
 import { JwtGuard } from "./jwt.guard";
 
 @Controller("auth")
 export class AuthController {
-  constructor(private authService: AuthService) { }
+  constructor(private authService: AuthService) {}
 
   private getRefreshCookieOptions() {
+    const isProduction = process.env.NODE_ENV === "production";
+
     return {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "none" as const,
+      secure: isProduction,
+      sameSite: isProduction ? ("none" as const) : ("lax" as const),
       path: "/auth",
       maxAge: 30 * 24 * 60 * 60 * 1000,
     };
@@ -69,16 +68,18 @@ export class AuthController {
       body.secondPassword
     );
 
-    if (data.refreshToken) {
+    if (data?.refreshToken) {
       res.cookie(
         "refreshToken",
         data.refreshToken,
         this.getRefreshCookieOptions()
       );
+
+      const { refreshToken, ...safeData } = data;
+      return safeData;
     }
 
-    const { refreshToken, ...safeData } = data;
-    return safeData;
+    return data;
   }
 
   @Post("refresh")
@@ -89,28 +90,23 @@ export class AuthController {
 
   @Post("logout")
   logout(@Res({ passthrough: true }) res: Response) {
+    const isProduction = process.env.NODE_ENV === "production";
+
     res.clearCookie("refreshToken", {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "none",
+      secure: isProduction,
+      sameSite: isProduction ? "none" : "lax",
       path: "/auth",
     });
 
     return { message: "Đăng xuất thành công" };
   }
 
+  // ✅ FIX QUAN TRỌNG
+  @UseGuards(JwtGuard)
   @Get("me")
-  async me(@Headers("authorization") authorization?: string) {
-    if (!authorization?.startsWith("Bearer ")) {
-      throw new UnauthorizedException("Missing token");
-    }
-
-    const token = authorization.replace("Bearer ", "");
-    const payload = jwt.verify(token, process.env.JWT_SECRET || "dev-secret") as {
-      sub: string;
-    };
-
-    return this.authService.me(payload.sub);
+  async me(@Req() req: any) {
+    return this.authService.me(req.user.sub || req.user.id);
   }
 
   @UseGuards(JwtGuard)

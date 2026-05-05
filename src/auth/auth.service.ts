@@ -238,31 +238,34 @@ export class AuthService {
     return this.buildAuthResponse(user);
   }
 
-  async refresh(refreshToken: string) {
-    if (!refreshToken) {
-      throw new UnauthorizedException("Missing refresh token");
-    }
-
-    let payload: any;
-
-    try {
-      payload = jwt.verify(refreshToken, this.refreshSecret);
-    } catch {
-      throw new UnauthorizedException("Phiên đăng nhập đã hết hạn.");
-    }
-
-    if (payload.type !== "refresh" || !payload.sub) {
-      throw new UnauthorizedException("Refresh token không hợp lệ.");
-    }
-
-    const user = await this.getStaffAuthData(payload.sub);
-
-    return {
-      token: await this.buildAccessToken(user),
-      accessToken: await this.buildAccessToken(user),
-      user: await this.buildUser(user),
-    };
+async refresh(refreshToken: string) {
+  if (!refreshToken) {
+    throw new UnauthorizedException("Missing refresh token");
   }
+
+  let payload: any;
+
+  try {
+    payload = jwt.verify(refreshToken, this.refreshSecret);
+  } catch {
+    throw new UnauthorizedException("Phiên đăng nhập đã hết hạn.");
+  }
+
+  if (payload.type !== "refresh" || !payload.sub) {
+    throw new UnauthorizedException("Refresh token không hợp lệ.");
+  }
+
+  const user = await this.getStaffAuthData(payload.sub);
+
+  // ✅ FIX: không build 2 lần
+  const accessToken = await this.buildAccessToken(user);
+
+  return {
+    token: accessToken,
+    accessToken,
+    user: await this.buildUser(user),
+  };
+}
 
   async me(userId: string) {
     const user = await this.prisma.staffUser.findUnique({

@@ -1895,4 +1895,20 @@ async checkMissingCostFromExcel(file: Express.Multer.File) {
       movedVariants,
     };
   }
+
+
+  async clearAllDescriptions() {
+    const result = await this.prisma.product.updateMany({
+      data: {
+        description: null,
+      },
+    });
+
+    return {
+      success: true,
+      count: result.count,
+    };
+  }
+
+
 }
