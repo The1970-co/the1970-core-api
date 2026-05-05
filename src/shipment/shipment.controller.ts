@@ -174,4 +174,31 @@ export class ShipmentController {
   ghnWards(@Query("districtId") districtId: string) {
     return this.shipmentService.ghnWards(Number(districtId));
   }
+
+  @Post("ahamove/quote")
+  quoteAhamove(@Body() body: any) {
+    return this.shipmentService.quoteAhamove(body);
+  }
+
+  @Post(":orderId/ahamove/create")
+  createAhamoveShipment(
+    @Param("orderId") orderId: string,
+    @Body() body: any
+  ) {
+    return this.shipmentService.createAhamoveShipment(orderId, body);
+  }
+
+  @Post(":orderId/ahamove/cancel")
+  cancelAhamoveShipmentByOrderId(
+    @Param("orderId") orderId: string,
+    @Req() req: any
+  ) {
+    return this.shipmentService.cancelAhamoveShipmentByOrderId(orderId, req.user);
+  }
+
+  @Get(":id/ahamove/tracking")
+  trackAhamoveByShipmentId(@Param("id") id: string) {
+    return this.shipmentService.trackAhamoveByShipmentId(id);
+  }
+
 }

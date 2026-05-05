@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { GhnClient } from "./ghn.client";
+import { AhamoveClient } from "./ahamove.client";
 import { QuoteShipmentDto } from "./dto/quote-shipment.dto";
 import { CreateGhnShipmentDto } from "./dto/create-ghn-shipment.dto";
 import { TrackShipmentDto } from "./dto/track-shipment.dto";
@@ -16,6 +17,7 @@ export class ShipmentService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly ghnClient: GhnClient,
+    private readonly ahamoveClient: AhamoveClient,
     private readonly authTotpService: AuthTotpService
   ) {}
 
@@ -736,6 +738,342 @@ this.logger.warn(
       approvedBy: approveInfo.approverName,
     };
   }
+
+
+  private mapAhamoveShippingStatus(input?: string | null) {
+    const value = String(input || "").toUpperCase();
+
+    if (!value) return "NOT_CREATED";
+    if (value.includes("CANCEL")) return "CANCELLED";
+    if (value.includes("COMPLETED")) return "DELIVERED";
+    if (value.includes("IDLE") || value.includes("ASSIGNING")) return "CREATED";
+    if (value.includes("ACCEPTED")) return "PICKING";
+    if (value.includes("IN PROCESS") || value.includes("IN_PROCESS")) {
+      return "DELIVERING";
+    }
+
+    return value;
+  }
+
+  private getAhamoveOrderId(raw: any) {
+    return (
+      raw?.order_id ||
+      raw?.id ||
+      raw?.data?.order_id ||
+      raw?.data?.id ||
+      raw?.order?.order_id ||
+      raw?.order?.id ||
+      ""
+    );
+  }
+
+  private getAhamoveStatus(raw: any) {
+    return (
+      raw?.status ||
+      raw?.data?.status ||
+      raw?.order?.status ||
+      raw?.order_status ||
+      "CREATED"
+    );
+  }
+
+  private getAhamoveTrackingUrl(raw: any) {
+    return (
+      raw?.tracking_url ||
+      raw?.shared_link ||
+      raw?.data?.tracking_url ||
+      raw?.data?.shared_link ||
+      raw?.order?.tracking_url ||
+      raw?.order?.shared_link ||
+      null
+    );
+  }
+
+  async quoteAhamove(body: any) {
+    const fromName = body?.fromName || process.env.AHAMOVE_FROM_NAME || this.returnName;
+    const fromPhone =
+      body?.fromPhone || process.env.AHAMOVE_FROM_PHONE || this.returnPhone;
+    const fromAddress =
+      body?.fromAddress ||
+      process.env.AHAMOVE_FROM_ADDRESS ||
+      this.returnAddress;
+
+    const serviceId =
+      body?.serviceId || process.env.AHAMOVE_DEFAULT_SERVICE_ID || "HAN-BIKE";
+
+    if (!fromPhone || !fromAddress) {
+      throw new BadRequestException("Thiếu cấu hình AhaMove đầu gửi");
+    }
+
+    if (!body?.toName || !body?.toPhone || !body?.toAddress) {
+      throw new BadRequestException("Thiếu thông tin người nhận AhaMove");
+    }
+
+    const payload = {
+      service_id: serviceId,
+      path: [
+        {
+          address: fromAddress,
+          name: fromName,
+          mobile: fromPhone,
+        },
+        {
+          address: body.toAddress,
+          name: body.toName,
+          mobile: body.toPhone,
+          cod: Math.max(0, Math.round(Number(body?.codAmount || 0))),
+        },
+      ],
+      remarks: body?.note || "",
+      items: Array.isArray(body?.items) ? body.items : [],
+    };
+
+    return this.ahamoveClient.estimate(payload);
+  }
+
+  async createAhamoveShipment(orderId: string, dto: any) {
+    return this.prisma.$transaction(async (tx) => {
+      const order = await tx.order.findUnique({
+        where: { id: orderId },
+        include: { items: true },
+      });
+
+      if (!order) {
+        throw new BadRequestException("Không tìm thấy order");
+      }
+
+      const existingShipment = await tx.shipment.findFirst({
+        where: { orderId },
+      });
+
+      if (existingShipment?.ahamoveOrderId || existingShipment?.trackingCode) {
+        return {
+          duplicated: true,
+          ahamove: existingShipment.ahamoveRaw || existingShipment.metadata || null,
+          shipment: existingShipment,
+        };
+      }
+
+      const fromName = dto?.fromName || process.env.AHAMOVE_FROM_NAME || this.returnName;
+      const fromPhone =
+        dto?.fromPhone || process.env.AHAMOVE_FROM_PHONE || this.returnPhone;
+      const fromAddress =
+        dto?.fromAddress ||
+        process.env.AHAMOVE_FROM_ADDRESS ||
+        this.returnAddress;
+
+      const serviceId =
+        dto?.serviceId || process.env.AHAMOVE_DEFAULT_SERVICE_ID || "HAN-BIKE";
+
+      if (!fromPhone || !fromAddress) {
+        throw new BadRequestException("Thiếu cấu hình AhaMove đầu gửi");
+      }
+
+      if (!dto?.toName || !dto?.toPhone || !dto?.toAddress) {
+        throw new BadRequestException("Thiếu thông tin người nhận AhaMove");
+      }
+
+      const codAmount = Math.max(0, Math.round(Number(dto?.codAmount || 0)));
+
+      const items =
+        Array.isArray(dto?.items) && dto.items.length
+          ? dto.items
+          : (order.items || []).map((item: any) => ({
+              name: item.productName || item.sku || "Sản phẩm",
+              num: Number(item.qty || 1),
+              price: Number(item.unitPrice || 0),
+            }));
+
+      const payload = {
+        service_id: serviceId,
+        order_time: new Date().toISOString(),
+        path: [
+          {
+            address: fromAddress,
+            name: fromName,
+            mobile: fromPhone,
+          },
+          {
+            address: dto.toAddress,
+            name: dto.toName,
+            mobile: dto.toPhone,
+            cod: codAmount,
+          },
+        ],
+        remarks: dto?.note || `Đơn ${order.orderCode}`,
+        items,
+      };
+
+      const created = await this.ahamoveClient.createOrder(payload);
+      const ahamoveOrderId = this.getAhamoveOrderId(created);
+      const ahamoveStatus = this.getAhamoveStatus(created);
+      const trackingUrl = this.getAhamoveTrackingUrl(created);
+
+      if (!ahamoveOrderId) {
+        throw new BadRequestException("AhaMove không trả về order_id");
+      }
+
+      const shipment = await tx.shipment.upsert({
+        where: { orderId },
+        update: {
+          carrier: "AHAMOVE",
+          trackingCode: ahamoveOrderId,
+          shippingStatus: this.mapAhamoveShippingStatus(ahamoveStatus),
+          partnerStatus: ahamoveStatus,
+          codAmount,
+          shippingFee:
+            created?.fee ||
+            created?.total_fee ||
+            created?.data?.fee ||
+            created?.data?.total_fee ||
+            null,
+          fromName,
+          fromPhone,
+          fromAddress,
+          toName: dto.toName,
+          toPhone: dto.toPhone,
+          toAddress: dto.toAddress,
+          ahamoveOrderId,
+          ahamoveTrackingUrl: trackingUrl,
+          ahamoveStatus,
+          ahamoveSubStatus: created?.sub_status || created?.data?.sub_status || null,
+          ahamoveRaw: created,
+          metadata: created,
+          lastSyncedAt: new Date(),
+        },
+        create: {
+          orderId,
+          carrier: "AHAMOVE",
+          trackingCode: ahamoveOrderId,
+          shippingStatus: this.mapAhamoveShippingStatus(ahamoveStatus),
+          partnerStatus: ahamoveStatus,
+          codAmount,
+          shippingFee:
+            created?.fee ||
+            created?.total_fee ||
+            created?.data?.fee ||
+            created?.data?.total_fee ||
+            null,
+          fromName,
+          fromPhone,
+          fromAddress,
+          toName: dto.toName,
+          toPhone: dto.toPhone,
+          toAddress: dto.toAddress,
+          ahamoveOrderId,
+          ahamoveTrackingUrl: trackingUrl,
+          ahamoveStatus,
+          ahamoveSubStatus: created?.sub_status || created?.data?.sub_status || null,
+          ahamoveRaw: created,
+          metadata: created,
+          lastSyncedAt: new Date(),
+        },
+      });
+
+      await tx.order.update({
+        where: { id: orderId },
+        data: {
+          fulfillmentStatus: "PROCESSING",
+          status: "SHIPPED",
+        },
+      });
+
+      return {
+        duplicated: false,
+        ahamove: created,
+        shipment,
+      };
+    });
+  }
+
+  async trackAhamoveByShipmentId(id: string) {
+    const shipment = await this.prisma.shipment.findUnique({
+      where: { id },
+    });
+
+    if (!shipment) {
+      throw new BadRequestException("Không tìm thấy phiếu giao hàng");
+    }
+
+    const ahamoveOrderId = shipment.ahamoveOrderId || shipment.trackingCode;
+
+    if (!ahamoveOrderId) {
+      throw new BadRequestException("Phiếu chưa có mã đơn AhaMove");
+    }
+
+    const raw = await this.ahamoveClient.getOrderDetail(ahamoveOrderId);
+    const ahamoveStatus = this.getAhamoveStatus(raw);
+    const trackingUrl = this.getAhamoveTrackingUrl(raw);
+
+    const updated = await this.prisma.shipment.update({
+      where: { id: shipment.id },
+      data: {
+        shippingStatus: this.mapAhamoveShippingStatus(ahamoveStatus),
+        partnerStatus: ahamoveStatus,
+        ahamoveStatus,
+        ahamoveSubStatus: raw?.sub_status || raw?.data?.sub_status || null,
+        ahamoveTrackingUrl: trackingUrl,
+        ahamoveRaw: raw,
+        metadata: raw,
+        lastSyncedAt: new Date(),
+      },
+    });
+
+    return {
+      source: "ahamove_live",
+      shipment: updated,
+      tracking: raw,
+    };
+  }
+
+  async cancelAhamoveShipmentByOrderId(orderId: string, user: any) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        shipment: true,
+      },
+    });
+
+    if (!order) {
+      throw new BadRequestException("Không tìm thấy order");
+    }
+
+    const shipment = order.shipment;
+
+    if (!shipment?.ahamoveOrderId && !shipment?.trackingCode) {
+      return this.prisma.order.update({
+        where: { id: orderId },
+        data: {
+          status: "CANCELLED",
+          fulfillmentStatus: "UNFULFILLED",
+        },
+      });
+    }
+
+    const ahamoveOrderId = shipment.ahamoveOrderId || shipment.trackingCode || "";
+    const raw = await this.ahamoveClient.cancelOrder(ahamoveOrderId);
+
+    await this.prisma.shipment.update({
+      where: { id: shipment.id },
+      data: {
+        shippingStatus: "CANCELLED",
+        partnerStatus: "cancel",
+        ahamoveStatus: "CANCELLED",
+        ahamoveRaw: raw,
+        metadata: raw,
+        lastSyncedAt: new Date(),
+      },
+    });
+
+    return this.prisma.order.update({
+      where: { id: orderId },
+      data: {
+        status: "CANCELLED",
+        fulfillmentStatus: "UNFULFILLED",
+      },
+    });
+  }
+
 
   async getByOrder(orderId: string) {
     return this.prisma.shipment.findFirst({

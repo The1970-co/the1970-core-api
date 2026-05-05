@@ -445,7 +445,35 @@ private buildOrderWhereByUser(user: any, extraWhere?: Prisma.OrderWhereInput) {
     if (!snapshot) return null;
 
     const items = Array.isArray(order?.items) ? order.items : [];
+    const partner = String(snapshot?.shippingPartner || "GHN").toUpperCase();
 
+    // =======================
+    // 👉 AHAMOVE
+    // =======================
+    if (partner === "AHAMOVE") {
+      const ahamoveItems = items.map((item: any) => ({
+        name: item.productName || item.sku || "Sản phẩm",
+        num: Number(item.qty || 1),
+        price: this.toNumber(item.unitPrice),
+      }));
+
+      return this.shipmentService.createAhamoveShipment(order.id, {
+        fromName: process.env.AHAMOVE_FROM_NAME || "The 1970",
+        fromPhone: process.env.AHAMOVE_FROM_PHONE || "",
+        fromAddress: process.env.AHAMOVE_FROM_ADDRESS || "",
+
+        toName: snapshot.shippingRecipientName,
+        toPhone: snapshot.shippingPhone,
+        toAddress: snapshot.shippingAddressLine1,
+
+        codAmount: this.toNumber(order.finalAmount),
+        items: ahamoveItems,
+      });
+    }
+
+    // =======================
+    // 👉 GHN (GIỮ NGUYÊN)
+    // =======================
     const ghnItems = items.map((item: any) => ({
       name: item.productName || item.sku || "Sản phẩm",
       quantity: Number(item.qty || 0),

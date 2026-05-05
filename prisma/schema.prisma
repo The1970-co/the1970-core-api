@@ -316,10 +316,49 @@ model Shipment {
   ahamoveStatus            String?
   ahamoveSubStatus         String?
   ahamoveRaw               Json?
+  ahamoveShipment AhamoveShipment?
 
   @@index([trackingCode])
   @@index([shippingStatus])
   @@index([partnerStatus])
+  @@index([lastSyncedAt])
+  @@index([ahamoveOrderId])
+  @@index([ahamoveStatus])
+}
+model AhamoveShipment {
+  id             String   @id @default(cuid())
+  shipmentId     String   @unique
+  orderId        String?
+  ahamoveOrderId String   @unique
+
+  serviceId      String?
+  status         String?
+  subStatus      String?
+  trackingUrl    String?
+  sharedLink     String?
+
+  codAmount      Decimal? @db.Decimal(14, 2)
+  shippingFee    Decimal? @db.Decimal(14, 2)
+
+  fromName       String?
+  fromPhone      String?
+  fromAddress    String?
+  toName         String?
+  toPhone        String?
+  toAddress      String?
+
+  path           Json?
+  raw            Json?
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  lastSyncedAt   DateTime?
+
+  shipment       Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([status])
+  @@index([serviceId])
   @@index([lastSyncedAt])
 }
 
