@@ -77,57 +77,128 @@ export class OrderService {
     }
   }
 
-private buildOrderWhereByUser(user: any, extraWhere?: Prisma.OrderWhereInput) {
-  if (this.isOwner(user)) {
-    return extraWhere || {};
+  private getOrderPermissionKeys(user?: any, branchId?: string | null) {
+    const keys = new Set<string>();
+
+    const addKeys = (items?: any[]) => {
+      if (!Array.isArray(items)) return;
+      items.forEach((permission) => {
+        if (permission) keys.add(String(permission));
+      });
+    };
+
+    addKeys(user?.permissions);
+    addKeys(user?.permissionKeys);
+
+    const branchRows = Array.isArray(user?.branchPermissions)
+      ? user.branchPermissions
+      : [];
+
+    const matchedRows = branchId
+      ? branchRows.filter((row: any) => String(row?.branchId) === String(branchId))
+      : branchRows;
+
+    matchedRows.forEach((row: any) => addKeys(row?.permissionKeys));
+
+    return keys;
   }
 
-  const userBranch = this.resolveBranchIdFromUser(user);
+  private hasOrderPermission(
+    user: any,
+    permission: "orders.view" | "orders.view_own",
+    branchId?: string | null
+  ) {
+    if (this.isOwner(user)) return true;
 
-  if (!userBranch) {
+    const keys = this.getOrderPermissionKeys(user, branchId);
+
+    // ✅ RBAC mới: nếu có permissionKeys thì chỉ tin key rõ ràng.
+    // Action như orders.approve / orders.edit / orders.pay không được mở rộng phạm vi xem.
+    if (keys.size > 0) {
+      return keys.has(permission);
+    }
+
+    // ✅ Fallback cho dữ liệu legacy chưa migrate permissionKeys.
+    const branchPermission = Array.isArray(user?.branchPermissions)
+      ? user.branchPermissions.find(
+          (p: any) => !branchId || String(p?.branchId) === String(branchId)
+        )
+      : null;
+
+    if (permission === "orders.view") {
+      return Boolean(branchPermission?.canViewBranchOrders);
+    }
+
+    return Boolean(branchPermission?.canViewOwnOrders);
+  }
+
+  private noOrderAccessWhere(extraWhere?: Prisma.OrderWhereInput) {
     return {
-      ...extraWhere,
+      ...(extraWhere || {}),
       id: "__NO_ACCESS__",
     } as Prisma.OrderWhereInput;
   }
 
-  const branchPermission = user?.branchPermissions?.find(
-    (p: any) => String(p.branchId) === String(userBranch)
-  );
+  private buildOwnOrderScope(user: any): Prisma.OrderWhereInput {
+    const ownConditions: Prisma.OrderWhereInput[] = [];
 
-  const canViewBranch = !!branchPermission?.canViewBranchOrders;
-  const canViewOwn = !!branchPermission?.canViewOwnOrders;
+    if (user?.id) ownConditions.push({ createdByStaffId: String(user.id) });
 
-  // ❌ Không có quyền gì → chặn
-  if (!canViewBranch && !canViewOwn) {
-    return {
-      ...extraWhere,
-      id: "__NO_ACCESS__",
-    } as Prisma.OrderWhereInput;
+    const nameValues = [user?.name, user?.code, user?.username, user?.fullName]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+
+    nameValues.forEach((value) => {
+      ownConditions.push({ createdByStaffName: { equals: value, mode: "insensitive" } });
+      ownConditions.push({ createdByStaffName: { contains: value, mode: "insensitive" } });
+    });
+
+    if (!ownConditions.length) {
+      return { id: "__NO_ACCESS__" };
+    }
+
+    return { OR: ownConditions };
   }
 
-  // ✅ Xem toàn chi nhánh
-  if (canViewBranch) {
-    return {
-      ...extraWhere,
+  private buildOrderWhereByUser(user: any, extraWhere?: Prisma.OrderWhereInput) {
+    if (this.isOwner(user)) {
+      return extraWhere || {};
+    }
+
+    const userBranch = this.resolveBranchIdFromUser(user);
+
+    if (!userBranch) {
+      return this.noOrderAccessWhere(extraWhere);
+    }
+
+    const requestedBranch = String((extraWhere as any)?.branchId || "").trim();
+
+    if (requestedBranch && requestedBranch !== String(userBranch)) {
+      return this.noOrderAccessWhere(extraWhere);
+    }
+
+    const baseWhere: Prisma.OrderWhereInput = {
+      ...(extraWhere || {}),
       branchId: userBranch,
-    } as Prisma.OrderWhereInput;
-  }
+    };
 
-  // ✅ Chỉ xem đơn của mình
-  if (canViewOwn) {
-    return {
-      ...extraWhere,
-      branchId: userBranch,
-      createdByStaffId: user.id,
-    } as Prisma.OrderWhereInput;
-  }
+    // ✅ Chỉ quyền orders.view mới được xem toàn bộ đơn trong chi nhánh.
+    // Tuyệt đối không dùng orders.approve / orders.edit / orders.pay để mở data scope.
+    const canViewAll = this.hasOrderPermission(user, "orders.view", userBranch);
+    const canViewOwn = this.hasOrderPermission(user, "orders.view_own", userBranch);
 
-  return {
-    ...extraWhere,
-    id: "__NO_ACCESS__",
-  } as Prisma.OrderWhereInput;
-}
+    if (canViewAll) {
+      return baseWhere;
+    }
+
+    if (canViewOwn) {
+      return {
+        AND: [baseWhere, this.buildOwnOrderScope(user)],
+      } as Prisma.OrderWhereInput;
+    }
+
+    return this.noOrderAccessWhere(extraWhere);
+  }
 
   private resolveMode(body: any): CreateOrderMode {
     const mode = String(body?.mode || "draft");
@@ -1251,19 +1322,34 @@ const data = orders.map((order) => ({
     }
 
     if (!this.isOwner(user)) {
-  const branchPermission = user?.branchPermissions?.find(
-    (p: any) => String(p.branchId) === String(order.branchId)
-  );
+      const canViewAll = this.hasOrderPermission(
+        user,
+        "orders.view",
+        order.branchId || null
+      );
+      const canViewOwn = this.hasOrderPermission(
+        user,
+        "orders.view_own",
+        order.branchId || null
+      );
 
-  const canViewBranch = !!branchPermission?.canViewBranchOrders;
-  const canViewOwn = !!branchPermission?.canViewOwnOrders;
+      if (!canViewAll) {
+        const ownWhere = this.buildOwnOrderScope(user);
+        const ownOrder = await this.prisma.order.findFirst({
+          where: {
+            AND: [
+              { id: order.id, branchId: order.branchId },
+              ownWhere,
+            ],
+          },
+          select: { id: true },
+        });
 
-  if (!canViewBranch) {
-    if (!canViewOwn || order.createdByStaffId !== user.id) {
-      throw new ForbiddenException("Bạn không có quyền xem đơn này.");
+        if (!canViewOwn || !ownOrder) {
+          throw new ForbiddenException("Bạn không có quyền xem đơn này.");
+        }
+      }
     }
-  }
-}
 
     return this.mapOrderResponse(order);
   }
