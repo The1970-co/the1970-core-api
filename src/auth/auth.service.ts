@@ -50,6 +50,53 @@ export class AuthService {
     );
   }
 
+  private readonly LEGACY_BOOLEAN_PERMISSION_MAP: Record<string, string[]> = {
+    canView: ["products.view"],
+    canSell: ["orders.create", "pos.access"],
+    canViewOwnOrders: ["orders.view_own"],
+    canViewBranchOrders: ["orders.view_branch", "orders.view"],
+    canCreateOrder: ["orders.create"],
+    canApproveOrder: ["orders.approve", "orders.update_status"],
+    canCancelOrder: ["orders.cancel"],
+    canHandleReturn: ["returns.view", "returns.create", "orders.return"],
+    canViewStock: ["inventory.view"],
+    canManageStock: ["inventory.manage"],
+    canStocktake: ["stocktake.view", "stocktake.create"],
+    canTransferStock: ["stock_transfer.view", "stock_transfer.create"],
+    canReceiveStock: ["purchase_receipt.view", "purchase_receipt.receive"],
+    canViewCustomer: ["customers.view"],
+    canEditCustomer: ["customers.edit"],
+    canExportProductExcel: ["products.excel.export"],
+    canImportProductExcel: ["products.excel.import"],
+    canExportOrderExcel: ["orders.excel.export"],
+    canExportInventoryExcel: ["inventory.excel.export"],
+    canExportCustomerExcel: ["customers.excel.export"],
+    canViewReport: ["reports.view"],
+    canViewMoney: ["inventory.value.view", "finance.view"],
+  };
+
+  private buildPermissionKeys(user: any) {
+    const keys: string[] = [];
+
+    if (this.getRoleCodes(user).some((role) => role === "owner" || role === "admin")) {
+      keys.push("*");
+    }
+
+    const rows = Array.isArray(user.branchPermissions) ? user.branchPermissions : [];
+
+    for (const row of rows) {
+      if (Array.isArray(row.permissionKeys)) {
+        keys.push(...row.permissionKeys.map((key: any) => String(key || "").trim()).filter(Boolean));
+      }
+
+      for (const [field, permissionKeys] of Object.entries(this.LEGACY_BOOLEAN_PERMISSION_MAP)) {
+        if (row?.[field]) keys.push(...permissionKeys);
+      }
+    }
+
+    return Array.from(new Set(keys.filter(Boolean)));
+  }
+
   private async buildAccessToken(user: any) {
     const authUser =
       user.roles && user.branchRoles && user.branchPermissions
@@ -71,6 +118,7 @@ export class AuthService {
         type: "staff",
         branchRoles: authUser.branchRoles || [],
         branchPermissions: authUser.branchPermissions || [],
+        permissions: this.buildPermissionKeys(authUser),
       },
       this.jwtSecret,
       { expiresIn: "15m" }
@@ -125,6 +173,7 @@ export class AuthService {
       branchName: authUser.branchName,
       branchRoles: authUser.branchRoles || [],
       branchPermissions: authUser.branchPermissions || [],
+      permissions: this.buildPermissionKeys(authUser),
       type: "staff",
       status: authUser.isActive ? "active" : "inactive",
       lastLoginAt: authUser.lastLoginAt,

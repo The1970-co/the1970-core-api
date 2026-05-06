@@ -316,7 +316,7 @@ model Shipment {
   ahamoveStatus            String?
   ahamoveSubStatus         String?
   ahamoveRaw               Json?
-  ahamoveShipment AhamoveShipment?
+  ahamoveShipment          AhamoveShipment?
 
   @@index([trackingCode])
   @@index([shippingStatus])
@@ -325,36 +325,37 @@ model Shipment {
   @@index([ahamoveOrderId])
   @@index([ahamoveStatus])
 }
+
 model AhamoveShipment {
-  id             String   @id @default(cuid())
-  shipmentId     String   @unique
+  id             String  @id @default(cuid())
+  shipmentId     String  @unique
   orderId        String?
-  ahamoveOrderId String   @unique
+  ahamoveOrderId String  @unique
 
-  serviceId      String?
-  status         String?
-  subStatus      String?
-  trackingUrl    String?
-  sharedLink     String?
+  serviceId   String?
+  status      String?
+  subStatus   String?
+  trackingUrl String?
+  sharedLink  String?
 
-  codAmount      Decimal? @db.Decimal(14, 2)
-  shippingFee    Decimal? @db.Decimal(14, 2)
+  codAmount   Decimal? @db.Decimal(14, 2)
+  shippingFee Decimal? @db.Decimal(14, 2)
 
-  fromName       String?
-  fromPhone      String?
-  fromAddress    String?
-  toName         String?
-  toPhone        String?
-  toAddress      String?
+  fromName    String?
+  fromPhone   String?
+  fromAddress String?
+  toName      String?
+  toPhone     String?
+  toAddress   String?
 
-  path           Json?
-  raw            Json?
+  path Json?
+  raw  Json?
 
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  lastSyncedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  lastSyncedAt DateTime?
 
-  shipment       Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
 
   @@index([orderId])
   @@index([status])
@@ -449,6 +450,17 @@ model StaffBranchPermission {
 
   canViewCustomer Boolean @default(false)
   canEditCustomer Boolean @default(false)
+
+  // Excel/import-export legacy flags for fast branch-scoped checks
+  canExportProductExcel   Boolean @default(false)
+  canImportProductExcel   Boolean @default(false)
+  canExportOrderExcel     Boolean @default(false)
+  canExportInventoryExcel Boolean @default(false)
+  canExportCustomerExcel  Boolean @default(false)
+
+  // Dynamic RBAC keys generated from role templates in admin UI.
+  // Runtime authz reads this array first; boolean columns stay for backward compatibility.
+  permissionKeys String[] @default([])
 
   canViewReport Boolean @default(false)
   canViewMoney  Boolean @default(false)

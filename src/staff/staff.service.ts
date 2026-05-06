@@ -20,12 +20,58 @@ type BranchPermissionTemplate = {
   canReceiveStock?: boolean;
   canViewCustomer?: boolean;
   canEditCustomer?: boolean;
+  canExportProductExcel?: boolean;
+  canImportProductExcel?: boolean;
+  canExportOrderExcel?: boolean;
+  canExportInventoryExcel?: boolean;
+  canExportCustomerExcel?: boolean;
+  canViewReport?: boolean;
+  canViewMoney?: boolean;
+  permissionKeys?: string[];
 };
 
 type BranchRoleInput = {
   branchId: string;
   roleCode: string;
 };
+
+
+const UNIQUE = (values: Array<string | undefined | null>) =>
+  Array.from(new Set(values.map((v) => String(v || "").trim()).filter(Boolean)));
+
+const LEGACY_BOOLEAN_TO_PERMISSION_KEYS: Record<string, string[]> = {
+  canView: ["products.view"],
+  canSell: ["orders.create", "pos.access"],
+  canViewOwnOrders: ["orders.view_own"],
+  canViewBranchOrders: ["orders.view_branch", "orders.view"],
+  canCreateOrder: ["orders.create"],
+  canApproveOrder: ["orders.approve", "orders.update_status"],
+  canCancelOrder: ["orders.cancel"],
+  canHandleReturn: ["returns.view", "returns.create", "orders.return"],
+  canViewStock: ["inventory.view"],
+  canManageStock: ["inventory.manage"],
+  canStocktake: ["stocktake.view", "stocktake.create"],
+  canTransferStock: ["stock_transfer.view", "stock_transfer.create"],
+  canReceiveStock: ["purchase_receipt.view", "purchase_receipt.receive"],
+  canViewCustomer: ["customers.view"],
+  canEditCustomer: ["customers.edit"],
+  canExportProductExcel: ["products.excel.export"],
+  canImportProductExcel: ["products.excel.import"],
+  canExportOrderExcel: ["orders.excel.export"],
+  canExportInventoryExcel: ["inventory.excel.export"],
+  canExportCustomerExcel: ["customers.excel.export"],
+  canViewReport: ["reports.view"],
+  canViewMoney: ["inventory.value.view", "finance.view"],
+};
+
+function permissionKeysFromLegacyBooleans(row: Record<string, any>) {
+  const keys: string[] = [];
+  for (const [field, permissionKeys] of Object.entries(LEGACY_BOOLEAN_TO_PERMISSION_KEYS)) {
+    if (row[field]) keys.push(...permissionKeys);
+  }
+  if (Array.isArray(row.permissionKeys)) keys.push(...row.permissionKeys);
+  return UNIQUE(keys);
+}
 
 const ROLE_TEMPLATES: Record<string, BranchPermissionTemplate> = {
   owner: {
@@ -146,7 +192,7 @@ export class StaffService {
 
   private permissionsForRole(roleCode: string) {
     const normalized = this.validateRole(roleCode);
-    return {
+    const row = {
       canView: false,
       canSell: false,
       canViewOwnOrders: false,
@@ -162,9 +208,19 @@ export class StaffService {
       canReceiveStock: false,
       canViewCustomer: false,
       canEditCustomer: false,
-      ...ROLE_TEMPLATES[normalized],
+      canExportProductExcel: false,
+      canImportProductExcel: false,
+      canExportOrderExcel: false,
+      canExportInventoryExcel: false,
+      canExportCustomerExcel: false,
       canViewReport: false,
       canViewMoney: false,
+      ...ROLE_TEMPLATES[normalized],
+    };
+
+    return {
+      ...row,
+      permissionKeys: permissionKeysFromLegacyBooleans(row),
     };
   }
 
@@ -456,18 +512,90 @@ export class StaffService {
     return this.findOne(staffId);
   }
 
+  private sanitizeBranchPermissionInput(row: any) {
+    const clean: any = this.permissionsForRole(row.roleCode || row.role || "retail-staff");
+
+    const booleanFields = [
+      "canView",
+      "canSell",
+      "canViewOwnOrders",
+      "canViewBranchOrders",
+      "canCreateOrder",
+      "canApproveOrder",
+      "canCancelOrder",
+      "canHandleReturn",
+      "canViewStock",
+      "canManageStock",
+      "canStocktake",
+      "canTransferStock",
+      "canReceiveStock",
+      "canViewCustomer",
+      "canEditCustomer",
+      "canExportProductExcel",
+      "canImportProductExcel",
+      "canExportOrderExcel",
+      "canExportInventoryExcel",
+      "canExportCustomerExcel",
+      "canViewReport",
+      "canViewMoney",
+    ];
+
+    for (const field of booleanFields) {
+      if (row[field] !== undefined) clean[field] = Boolean(row[field]);
+    }
+
+    clean.permissionKeys = permissionKeysFromLegacyBooleans({
+      ...clean,
+      permissionKeys: Array.isArray(row.permissionKeys) ? row.permissionKeys : [],
+    });
+
+    return clean;
+  }
+
   async updatePermissions(staffId: string, dto: any) {
-    if (Array.isArray(dto.branchRoles)) {
+    if (Array.isArray(dto.branchRoles) && !Array.isArray(dto.branchPermissions)) {
       return this.updateBranchRoles(staffId, dto);
     }
 
-    const branchPermissions = Array.isArray(dto.branchPermissions) ? dto.branchPermissions : [];
-    const branchRoles = branchPermissions.map((row: any) => ({
-      branchId: String(row.branchId || "").trim(),
-      roleCode: this.normalizeRole(row.roleCode || row.role || dto.roles?.[0] || "retail-staff"),
-    }));
+    const staff = await this.prisma.staffUser.findUnique({ where: { id: staffId } });
+    if (!staff) throw new BadRequestException("Nhân viên không tồn tại");
 
-    return this.updateBranchRoles(staffId, { branchRoles });
+    const branchPermissions = Array.isArray(dto.branchPermissions)
+      ? dto.branchPermissions
+      : [];
+
+    if (!branchPermissions.length) {
+      return this.findOne(staffId);
+    }
+
+    const branchIds = branchPermissions
+      .map((row: any) => String(row.branchId || "").trim())
+      .filter(Boolean);
+
+    await this.assertBranchesExist(branchIds);
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.staffBranchPermission.deleteMany({ where: { staffId } });
+
+      await tx.staffBranchPermission.createMany({
+        data: branchPermissions
+          .map((row: any) => {
+            const branchId = String(row.branchId || "").trim();
+            if (!branchId) return null;
+            const clean = this.sanitizeBranchPermissionInput(row);
+            return {
+              staffId,
+              branchId,
+              ...clean,
+              note: row.note || "Saved from permission UI",
+            };
+          })
+          .filter(Boolean),
+        skipDuplicates: true,
+      });
+    });
+
+    return this.findOne(staffId);
   }
 
   async updateStatus(id: string, dto: UpdateStaffStatusDto) {
