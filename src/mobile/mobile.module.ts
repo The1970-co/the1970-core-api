@@ -11,6 +11,8 @@ import { MobileReportsModule } from "./reports/mobile.module";
 import { MobileBranchesController } from "./branches/mobile-branches.controller";
 import { MobileBranchesService } from "./branches/mobile-branches.service";
 import { Controller, Get, Query, UseGuards } from "@nestjs/common";
+import { MobileProductsController } from "./products/mobile-products.controller";
+import { MobileProductsService } from "./products/mobile-products.service";
 @Module({
   imports: [MobileReportsModule],
   controllers: [
@@ -19,6 +21,7 @@ import { Controller, Get, Query, UseGuards } from "@nestjs/common";
     MobileProfileController,
     MobileHomeController,
     MobileBranchesController,
+    MobileProductsController,
   ],
   providers: [
     MobileDashboardService,
@@ -26,6 +29,7 @@ import { Controller, Get, Query, UseGuards } from "@nestjs/common";
     MobileProfileService,
     MobileHomeService,
     MobileBranchesService,
+    MobileProductsService,
   ],
 })
 export class MobileModule {}
