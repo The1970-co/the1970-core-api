@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  NotFoundException,
 } from "@nestjs/common";
 import {
   FulfillmentStatus,
@@ -785,9 +786,7 @@ export class OrderService {
             0
         );
 
-        const shippingFeeNumber = isPickupOrder || isPosSale
-          ? 0
-          : requestedShippingFeeNumber;
+        const shippingFeeNumber = requestedShippingFeeNumber;
 
         const finalAmountNumber = Math.max(
           0,
@@ -798,15 +797,17 @@ export class OrderService {
         const shippingFee = new Prisma.Decimal(shippingFeeNumber);
         const finalAmount = new Prisma.Decimal(finalAmountNumber);
 
+        const requestedPaidAmountNumber = this.toNumber(body.paidAmount || 0);
+
         const rawPayments = Array.isArray(body.payments)
           ? body.payments
-          : body.paymentSourceId || body.paidAmount
+          : body.paymentSourceId || requestedPaidAmountNumber > 0
             ? [
               {
                 paymentSourceId: body.paymentSourceId
                   ? String(body.paymentSourceId)
                   : null,
-                amount: Number(body.paidAmount || finalAmountNumber),
+                amount: requestedPaidAmountNumber,
                 note: body.paymentNote || null,
               },
             ]
@@ -832,7 +833,17 @@ export class OrderService {
             ),
             note: paymentInput?.note || body.paymentNote || null,
           }))
-          .filter((payment: any) => payment.paymentSourceId && payment.amount > 0);
+          .filter((payment: any) => payment.amount > 0);
+
+        const missingPaymentSource = cleanedPayments.find(
+          (payment: any) => !payment.paymentSourceId
+        );
+
+        if (missingPaymentSource) {
+          throw new BadRequestException(
+            "Đã nhập tiền khách đã trả nhưng chưa chọn nguồn tiền."
+          );
+        }
 
         const paymentSourceIds: string[] = Array.from(
           new Set(cleanedPayments.map((payment: any) => String(payment.paymentSourceId)))
@@ -952,14 +963,10 @@ export class OrderService {
               : body?.shippingSnapshot?.shippingPostalCode || null,
             shippingGhnDistrictId: isInstantCounterSale
               ? null
-              : body?.shippingSnapshot?.ghnDistrictId ||
-                body?.shippingSnapshot?.shippingGhnDistrictId ||
-                null,
+              : body?.shippingSnapshot?.ghnDistrictId || null,
             shippingGhnWardCode: isInstantCounterSale
               ? null
-              : body?.shippingSnapshot?.ghnWardCode ||
-                body?.shippingSnapshot?.shippingGhnWardCode ||
-                null,
+              : body?.shippingSnapshot?.ghnWardCode || null,
           },
         });
 
@@ -1695,6 +1702,74 @@ const data = orders.map((order) => ({
       trackingCode,
       shippingFee,
       weight: Number(body?.weight || 0),
+    };
+  }
+
+
+
+  async deleteOrder(orderId: string, user?: any) {
+    const order = await this.prisma.order.findFirst({
+      where: this.buildOrderWhereByUser(user, {
+        id: orderId,
+      }),
+      include: {
+        items: true,
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException("Không tìm thấy đơn hàng");
+    }
+
+    if (
+      order.status === OrderStatus.SHIPPED ||
+      order.status === OrderStatus.COMPLETED
+    ) {
+      throw new BadRequestException(
+        "Không thể xoá đơn đã giao hoặc hoàn thành"
+      );
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      if (
+        order.status === OrderStatus.APPROVED ||
+        order.status === OrderStatus.PACKING
+      ) {
+        await this.restoreStockForOrder(
+          tx,
+          order.id,
+          order.branchId || null
+        );
+      }
+
+      await tx.payment.deleteMany({
+        where: {
+          orderId: order.id,
+        },
+      });
+
+      await tx.shipment.deleteMany({
+        where: {
+          orderId: order.id,
+        },
+      });
+
+      await tx.orderItem.deleteMany({
+        where: {
+          orderId: order.id,
+        },
+      });
+
+      await tx.order.delete({
+        where: {
+          id: order.id,
+        },
+      });
+    });
+
+    return {
+      success: true,
+      message: "Đã xoá đơn hàng",
     };
   }
 

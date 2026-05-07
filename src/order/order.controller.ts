@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -71,6 +72,16 @@ export class OrderController {
     @Req() req: Request & { user?: any }
   ) {
     return this.orderService.updateOrder(id, body, req.user);
+  }
+
+
+
+  @Delete(":id")
+  async deleteOrder(
+    @Param("id") id: string,
+    @Req() req: Request & { user?: any }
+  ) {
+    return this.orderService.deleteOrder(id, req.user);
   }
 
   @Patch(":id/status")

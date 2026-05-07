@@ -368,7 +368,7 @@ export class ShipmentService {
     return this.prisma.$transaction(async (tx) => {
       const order = await tx.order.findUnique({
         where: { id: orderId },
-        include: { items: true },
+        include: { items: true, payments: true },
       });
 
       if (!order) {
@@ -412,6 +412,20 @@ export class ShipmentService {
       const serviceId = Number(selected.service_id);
       const serviceTypeId = Number(selected.service_type_id);
 
+      const paidAmount = (order.payments || []).reduce(
+        (sum: number, payment: any) => sum + Number(payment.amount || 0),
+        0
+      );
+      const remainingCodAmount = Math.max(
+        0,
+        Math.round(Number(order.finalAmount || 0) - paidAmount)
+      );
+      const requestedCodAmount = Math.max(
+        0,
+        Math.round(Number(dto.codAmount || 0))
+      );
+      const codAmount = Math.min(requestedCodAmount, remainingCodAmount);
+
       const created = await this.ghnClient.createOrder({
         payment_type_id: 1,
         note: dto.note || "",
@@ -431,7 +445,7 @@ export class ShipmentService {
         to_address: dto.toAddress,
         to_ward_code: dto.toWardCode,
         to_district_id: dto.toDistrictId,
-        cod_amount: dto.codAmount,
+        cod_amount: codAmount,
         content: `Đơn ${dto.clientOrderCode}`,
         weight: dto.weight,
         length: dto.length,
@@ -458,7 +472,7 @@ export class ShipmentService {
           trackingCode: created.order_code,
           shippingStatus: this.mapShippingStatus(created.status || "CREATED"),
           partnerStatus: created.status || "CREATED",
-          codAmount: dto.codAmount,
+          codAmount,
           shippingFee: created.total_fee ?? null,
           weight: dto.weight,
           fromName: this.returnName,
@@ -475,7 +489,7 @@ export class ShipmentService {
           trackingCode: created.order_code,
           shippingStatus: this.mapShippingStatus(created.status || "CREATED"),
           partnerStatus: created.status || "CREATED",
-          codAmount: dto.codAmount,
+          codAmount,
           shippingFee: created.total_fee ?? null,
           weight: dto.weight,
           fromName: this.returnName,
@@ -510,6 +524,7 @@ export class ShipmentService {
       include: {
         items: true,
         shipment: true,
+        payments: true,
       },
     });
 
@@ -550,6 +565,15 @@ export class ShipmentService {
     const itemCount = Math.max((order.items || []).length, 1);
     const itemWeight = Math.max(50, Math.floor(weight / itemCount));
 
+    const paidAmount = (order.payments || []).reduce(
+      (sum: number, payment: any) => sum + Number(payment.amount || 0),
+      0
+    );
+    const remainingCodAmount = Math.max(
+      0,
+      Math.round(Number(order.finalAmount || 0) - paidAmount)
+    );
+
     const dto: CreateGhnShipmentDto = {
       toName: order.shippingRecipientName || order.customerName || "",
       toPhone: order.shippingPhone || order.customerPhone || "",
@@ -567,7 +591,7 @@ export class ShipmentService {
       codAmount:
         order.paymentStatus === "PAID" || order.paymentStatus === "REFUNDED"
           ? 0
-          : Number(order.finalAmount || 0),
+          : remainingCodAmount,
       insuranceValue: Number(order.finalAmount || 0),
       note: "",
       clientOrderCode: order.orderCode,
