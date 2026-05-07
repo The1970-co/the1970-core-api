@@ -774,9 +774,21 @@ export class OrderService {
               .join(", ")
           : "";
         const discountAmountNumber = manualDiscountAmountNumber + autoDiscountAmountNumber;
-        const shippingFeeNumber = isInstantCounterSale
+        const requestedShippingFeeNumber = this.toNumber(
+          body.shippingFee ??
+            body.shipFee ??
+            body.deliveryFee ??
+            body.shippingSnapshot?.shippingFee ??
+            body.shippingSnapshot?.shipFee ??
+            body.shippingSnapshot?.fee ??
+            body.shippingSnapshot?.serviceFee ??
+            0
+        );
+
+        const shippingFeeNumber = isPickupOrder || isPosSale
           ? 0
-          : this.toNumber(body.shippingFee || 0);
+          : requestedShippingFeeNumber;
+
         const finalAmountNumber = Math.max(
           0,
           totalAmount - discountAmountNumber + shippingFeeNumber
@@ -940,10 +952,14 @@ export class OrderService {
               : body?.shippingSnapshot?.shippingPostalCode || null,
             shippingGhnDistrictId: isInstantCounterSale
               ? null
-              : body?.shippingSnapshot?.ghnDistrictId || null,
+              : body?.shippingSnapshot?.ghnDistrictId ||
+                body?.shippingSnapshot?.shippingGhnDistrictId ||
+                null,
             shippingGhnWardCode: isInstantCounterSale
               ? null
-              : body?.shippingSnapshot?.ghnWardCode || null,
+              : body?.shippingSnapshot?.ghnWardCode ||
+                body?.shippingSnapshot?.shippingGhnWardCode ||
+                null,
           },
         });
 
