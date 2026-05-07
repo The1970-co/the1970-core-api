@@ -37,7 +37,8 @@ export class ShipmentService {
     if (value.includes("transit") || value.includes("sorting")) return "IN_TRANSIT";
     if (value.includes("complete") || value.includes("success")) return "DELIVERED";
     if (value.includes("fail") || value.includes("return")) return "FAILED";
-    if (value.includes("create") || value.includes("ready")) return "CREATED";
+    if (value.includes("ready")) return "READY_TO_PICK";
+    if (value.includes("create")) return "READY_TO_PICK";
 
     return value.toUpperCase();
   }
@@ -380,10 +381,31 @@ export class ShipmentService {
       });
 
       if (existingShipment?.trackingCode) {
+        const normalizedShipment =
+          !existingShipment.shippingStatus ||
+          existingShipment.shippingStatus === "CREATED" ||
+          existingShipment.shippingStatus === "PENDING"
+            ? await tx.shipment.update({
+                where: { id: existingShipment.id },
+                data: {
+                  shippingStatus: "READY_TO_PICK",
+                  partnerStatus: existingShipment.partnerStatus || "READY_TO_PICK",
+                },
+              })
+            : existingShipment;
+
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            fulfillmentStatus: "PROCESSING",
+            status: "SHIPPED",
+          },
+        });
+
         return {
           duplicated: true,
-          ghn: existingShipment.metadata || null,
-          shipment: existingShipment,
+          ghn: normalizedShipment.metadata || null,
+          shipment: normalizedShipment,
         };
       }
 
@@ -470,8 +492,8 @@ export class ShipmentService {
         update: {
           carrier: "GHN",
           trackingCode: created.order_code,
-          shippingStatus: this.mapShippingStatus(created.status || "CREATED"),
-          partnerStatus: created.status || "CREATED",
+          shippingStatus: this.mapShippingStatus(created.status || "READY_TO_PICK"),
+          partnerStatus: created.status || "READY_TO_PICK",
           codAmount,
           shippingFee: created.total_fee ?? null,
           weight: dto.weight,
@@ -487,8 +509,8 @@ export class ShipmentService {
           orderId,
           carrier: "GHN",
           trackingCode: created.order_code,
-          shippingStatus: this.mapShippingStatus(created.status || "CREATED"),
-          partnerStatus: created.status || "CREATED",
+          shippingStatus: this.mapShippingStatus(created.status || "READY_TO_PICK"),
+          partnerStatus: created.status || "READY_TO_PICK",
           codAmount,
           shippingFee: created.total_fee ?? null,
           weight: dto.weight,
@@ -822,8 +844,9 @@ this.logger.warn(
       process.env.AHAMOVE_FROM_ADDRESS ||
       this.returnAddress;
 
-    const serviceId =
-      body?.serviceId || process.env.AHAMOVE_DEFAULT_SERVICE_ID || "HAN-BIKE";
+    const serviceId = String(
+      body?.serviceId || process.env.AHAMOVE_DEFAULT_SERVICE_ID || "HAN-BIKE"
+    );
 
     if (!fromPhone || !fromAddress) {
       throw new BadRequestException("Thiếu cấu hình AhaMove đầu gửi");
@@ -886,8 +909,9 @@ this.logger.warn(
         process.env.AHAMOVE_FROM_ADDRESS ||
         this.returnAddress;
 
-      const serviceId =
-        dto?.serviceId || process.env.AHAMOVE_DEFAULT_SERVICE_ID || "HAN-BIKE";
+      const serviceId = String(
+        dto?.serviceId || process.env.AHAMOVE_DEFAULT_SERVICE_ID || "HAN-BIKE"
+      );
 
       if (!fromPhone || !fromAddress) {
         throw new BadRequestException("Thiếu cấu hình AhaMove đầu gửi");
@@ -1096,6 +1120,176 @@ this.logger.warn(
         fulfillmentStatus: "UNFULFILLED",
       },
     });
+  }
+
+
+
+  async handleAhamoveWebhook(body: any, headers?: any) {
+    const ahamoveOrderId =
+      body?.order_id ||
+      body?.id ||
+      body?.data?.order_id ||
+      body?.data?.id ||
+      body?.order?.order_id ||
+      body?.order?.id ||
+      body?.trackingCode ||
+      "";
+
+    if (!ahamoveOrderId) {
+      this.logger.warn(
+        `[AHAMOVE_WEBHOOK] missing order id body=${JSON.stringify(body || {})}`
+      );
+
+      return {
+        ok: true,
+        ignored: true,
+        reason: "missing_ahamove_order_id",
+      };
+    }
+
+    const ahamoveStatus = this.getAhamoveStatus(body);
+    const trackingUrl = this.getAhamoveTrackingUrl(body);
+    const shippingStatus = this.mapAhamoveShippingStatus(ahamoveStatus);
+    const subStatus =
+      body?.sub_status ||
+      body?.subStatus ||
+      body?.data?.sub_status ||
+      body?.data?.subStatus ||
+      null;
+
+    const shipment = await this.prisma.shipment.findFirst({
+      where: {
+        OR: [
+          { ahamoveOrderId },
+          { trackingCode: ahamoveOrderId },
+        ],
+      },
+      include: {
+        order: true,
+      },
+    });
+
+    if (!shipment) {
+      this.logger.warn(
+        `[AHAMOVE_WEBHOOK] shipment not found ahamoveOrderId=${ahamoveOrderId}`
+      );
+
+      return {
+        ok: true,
+        ignored: true,
+        reason: "shipment_not_found",
+        ahamoveOrderId,
+      };
+    }
+
+    const updatedShipment = await this.prisma.shipment.update({
+      where: { id: shipment.id },
+      data: {
+        carrier: "AHAMOVE",
+        shippingStatus,
+        partnerStatus: ahamoveStatus,
+        ahamoveOrderId,
+        ahamoveTrackingUrl: trackingUrl,
+        ahamoveStatus,
+        ahamoveSubStatus: subStatus,
+        ahamoveRaw: body,
+        metadata: body,
+        lastSyncedAt: new Date(),
+      },
+    });
+
+    let nextOrderData: any = {};
+
+    if (shippingStatus === "DELIVERED") {
+      nextOrderData = {
+        status: "COMPLETED",
+        fulfillmentStatus: "FULFILLED",
+      };
+    } else if (shippingStatus === "CANCELLED") {
+      nextOrderData = {
+        fulfillmentStatus: "UNFULFILLED",
+      };
+    } else if (
+      shippingStatus === "PICKING" ||
+      shippingStatus === "DELIVERING" ||
+      shippingStatus === "CREATED"
+    ) {
+      nextOrderData = {
+        status: "SHIPPED",
+        fulfillmentStatus: "PROCESSING",
+      };
+    }
+
+    if (Object.keys(nextOrderData).length > 0) {
+      await this.prisma.order.update({
+        where: { id: shipment.orderId },
+        data: nextOrderData,
+      });
+    }
+
+    try {
+      await this.prisma.ahamoveShipment.upsert({
+        where: { shipmentId: shipment.id },
+        update: {
+          ahamoveOrderId,
+          serviceId: String(
+            body?.service_id ||
+              body?.serviceId ||
+              body?.data?.service_id ||
+              body?.data?.serviceId ||
+              ""
+          ) || null,
+          status: ahamoveStatus,
+          subStatus,
+          trackingUrl,
+          sharedLink:
+            body?.shared_link ||
+            body?.sharedLink ||
+            body?.data?.shared_link ||
+            body?.data?.sharedLink ||
+            null,
+          raw: body,
+          lastSyncedAt: new Date(),
+        },
+        create: {
+          shipmentId: shipment.id,
+          orderId: shipment.orderId,
+          ahamoveOrderId,
+          serviceId: String(
+            body?.service_id ||
+              body?.serviceId ||
+              body?.data?.service_id ||
+              body?.data?.serviceId ||
+              ""
+          ) || null,
+          status: ahamoveStatus,
+          subStatus,
+          trackingUrl,
+          sharedLink:
+            body?.shared_link ||
+            body?.sharedLink ||
+            body?.data?.shared_link ||
+            body?.data?.sharedLink ||
+            null,
+          raw: body,
+          lastSyncedAt: new Date(),
+        },
+      });
+    } catch (error) {
+      this.logger.warn(
+        `[AHAMOVE_WEBHOOK] cannot sync AhamoveShipment table: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+
+    return {
+      ok: true,
+      ahamoveOrderId,
+      status: ahamoveStatus,
+      shippingStatus,
+      shipment: updatedShipment,
+    };
   }
 
 

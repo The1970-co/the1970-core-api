@@ -480,6 +480,12 @@ export class OrderService {
       soldAt: order.soldAt ? new Date(order.soldAt).toLocaleString("vi-VN") : null,
       customerName: order.customerName || order.customer?.fullName || "Khách lẻ",
       customerPhone: order.customerPhone || order.customer?.phone || "—",
+      itemCount: Array.isArray(order.items)
+        ? order.items.reduce(
+            (sum: number, item: any) => sum + Number(item.qty || item.quantity || 1),
+            0
+          )
+        : Number(order.itemCount || 0),
       items: Array.isArray(order.items)
         ? order.items.map((item: any) => ({
           ...item,
@@ -1142,11 +1148,40 @@ export class OrderService {
       }
     );
 
+    let finalOrder = createdOrder;
+
     if (mode === "ship" && !this.isPickupLikeOrder(body, body?.salesChannel)) {
       await this.createShipmentIfNeeded(createdOrder, body);
+
+      // createShipmentIfNeeded gọi ShipmentService để tạo vận đơn và service đã set:
+      // order.status = SHIPPED, order.fulfillmentStatus = PROCESSING,
+      // shipment.shippingStatus = READY_TO_PICK nếu GHN chưa trả trạng thái rõ ràng.
+      const reloadedOrder = await this.prisma.order.findUnique({
+        where: { id: createdOrder.id },
+        include: {
+          items: true,
+          shipment: true,
+          payments: {
+            include: {
+              paymentSource: true,
+            },
+          },
+          customer: {
+            select: {
+              id: true,
+              fullName: true,
+              phone: true,
+            },
+          },
+        },
+      });
+
+      if (reloadedOrder) {
+        finalOrder = reloadedOrder;
+      }
     }
 
-    return this.mapOrderResponse(createdOrder);
+    return this.mapOrderResponse(finalOrder);
   }
 
   async getOrders(params: GetOrdersParams = {}, user?: any) {
@@ -1236,6 +1271,7 @@ export class OrderService {
           items: {
             select: {
               id: true,
+              qty: true,
             },
           },
 
@@ -1283,7 +1319,18 @@ const data = orders.map((order) => ({
   createdAt: new Date(order.createdAt).toLocaleString("vi-VN"),
   updatedAt: new Date(order.updatedAt).toLocaleString("vi-VN"),
   soldAt: order.soldAt ? new Date(order.soldAt).toLocaleString("vi-VN") : null,
-  items: [],
+  items: Array.isArray(order.items)
+    ? order.items.map((item: any) => ({
+        ...item,
+        qty: Number(item.qty || 0),
+      }))
+    : [],
+  itemCount: Array.isArray(order.items)
+    ? order.items.reduce(
+        (sum: number, item: any) => sum + Number(item.qty || 0),
+        0
+      )
+    : 0,
   payments: Array.isArray(order.payments)
     ? order.payments.map((payment: any) => ({
         ...payment,
@@ -1719,15 +1766,6 @@ const data = orders.map((order) => ({
 
     if (!order) {
       throw new NotFoundException("Không tìm thấy đơn hàng");
-    }
-
-    if (
-      order.status === OrderStatus.SHIPPED ||
-      order.status === OrderStatus.COMPLETED
-    ) {
-      throw new BadRequestException(
-        "Không thể xoá đơn đã giao hoặc hoàn thành"
-      );
     }
 
     await this.prisma.$transaction(async (tx) => {

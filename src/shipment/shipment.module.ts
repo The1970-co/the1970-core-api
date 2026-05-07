@@ -4,12 +4,13 @@ import { ShipmentService } from "./shipment.service";
 import { GhnClient } from "./ghn.client";
 import { AhamoveClient } from "./ahamove.client";
 import { AuthTotpModule } from "../auth-totp/auth-totp.module";
+import { AhamoveWebhookController } from "./ahamove-webhook.controller";
 
 @Module({
   imports: [
   AuthTotpModule, // 👈 inject TOTP đúng cách
   ],
-  controllers: [ShipmentController],
+  controllers: [ShipmentController, AhamoveWebhookController],
   providers: [ShipmentService, GhnClient, AhamoveClient],
   exports: [ShipmentService],
 })
