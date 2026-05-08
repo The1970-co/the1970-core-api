@@ -515,6 +515,40 @@ export class OrderService {
     };
   }
 
+  private async attachAssignedStaffFields<T extends any>(orders: T[]): Promise<T[]> {
+    if (!orders.length) return orders;
+
+    const ids = orders
+      .map((order: any) => String(order?.id || "").replace(/'/g, "''"))
+      .filter(Boolean);
+
+    if (!ids.length) return orders;
+
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<
+        Array<{
+          id: string;
+          assignedStaffId: string | null;
+          assignedStaffName: string | null;
+        }>
+      >(
+        `SELECT id, "assignedStaffId", "assignedStaffName" FROM "Order" WHERE id IN (${ids
+          .map((id) => `'${id}'`)
+          .join(",")})`
+      );
+
+      const map = new Map(rows.map((row) => [String(row.id), row]));
+
+      return orders.map((order: any) => ({
+        ...order,
+        assignedStaffId: map.get(String(order.id))?.assignedStaffId || null,
+        assignedStaffName: map.get(String(order.id))?.assignedStaffName || null,
+      }));
+    } catch {
+      return orders;
+    }
+  }
+
   private async createShipmentIfNeeded(order: any, body: any) {
     const mode = this.resolveMode(body);
     if (mode !== "ship") return null;
@@ -929,10 +963,7 @@ export class OrderService {
             paymentStatus: initialPaymentStatus,
             fulfillmentStatus: initialFulfillmentStatus,
             status: initialOrderStatus,
-            note:
-              autoDiscountAmountNumber > 0
-                ? `${body.note ? body.note + " | " : ""}Tự áp dụng khuyến mại: ${autoDiscountAmountNumber.toLocaleString("vi-VN")}đ${autoPromotionNote ? ` (${autoPromotionNote})` : ""}`
-                : body.note || null,
+            note: body.note || null,
 
             customerAddressId: isInstantCounterSale
               ? null
@@ -1310,7 +1341,9 @@ export class OrderService {
       this.prisma.order.count({ where }),
     ]);
 
-const data = orders.map((order) => ({
+const ordersWithAssignedStaff = await this.attachAssignedStaffFields(orders);
+
+const data = ordersWithAssignedStaff.map((order) => ({
   ...order,
   totalAmount: this.toNumber(order.totalAmount),
   discountAmount: this.toNumber(order.discountAmount),
@@ -1421,7 +1454,8 @@ const data = orders.map((order) => ({
       }
     }
 
-    return this.mapOrderResponse(order);
+    const [orderWithAssignedStaff] = await this.attachAssignedStaffFields([order]);
+    return this.mapOrderResponse(orderWithAssignedStaff);
   }
 
   async updateOrder(orderId: string, body: any, user?: any) {
@@ -1579,6 +1613,62 @@ const data = orders.map((order) => ({
 
     return this.mapOrderResponse(updated);
   }
+  async assignStaffToOrder(
+    orderId: string,
+    assignedStaffId: string | null,
+    user?: any
+  ) {
+    const existing = await this.prisma.order.findFirst({
+      where: this.buildOrderWhereByUser(user, { id: orderId }),
+      select: {
+        id: true,
+        branchId: true,
+      },
+    });
+
+    if (!existing) {
+      throw new BadRequestException("Không tìm thấy đơn hàng");
+    }
+
+    if (!this.isOwner(user) && !this.hasOrderPermission(user, "orders.view", existing.branchId || null)) {
+      throw new ForbiddenException("Bạn không có quyền gán đơn cho nhân viên khác.");
+    }
+
+    let assignedStaffName: string | null = null;
+
+    if (assignedStaffId) {
+      const staff = await this.prisma.staffUser.findUnique({
+        where: { id: assignedStaffId },
+        select: {
+          id: true,
+          code: true,
+          name: true,
+          branchId: true,
+          isActive: true,
+        },
+      });
+
+      if (!staff || staff.isActive === false) {
+        throw new BadRequestException("Nhân viên nhận đơn không tồn tại hoặc đã ngừng hoạt động.");
+      }
+
+      if (staff.branchId && existing.branchId && staff.branchId !== existing.branchId && !this.isOwner(user)) {
+        throw new BadRequestException("Nhân viên nhận đơn không cùng chi nhánh với đơn hàng.");
+      }
+
+      assignedStaffName = staff.name || staff.code || staff.id;
+    }
+
+    await this.prisma.$executeRawUnsafe(
+      `UPDATE "Order" SET "assignedStaffId" = $1, "assignedStaffName" = $2, "updatedAt" = NOW() WHERE id = $3`,
+      assignedStaffId,
+      assignedStaffName,
+      orderId
+    );
+
+    return this.getOrderById(orderId, user);
+  }
+
   async updateOrderStatus(orderId: string, status: OrderStatus, user?: any) {
     return this.prisma.$transaction(
       async (tx) => {

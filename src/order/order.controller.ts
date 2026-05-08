@@ -65,6 +65,20 @@ export class OrderController {
     return this.orderService.getOrderById(id, req.user);
   }
 
+
+  @Patch(":id/assign-staff")
+  async assignStaffToOrder(
+    @Param("id") id: string,
+    @Body() body: { assignedStaffId?: string | null },
+    @Req() req: Request & { user?: any }
+  ) {
+    return this.orderService.assignStaffToOrder(
+      id,
+      body.assignedStaffId || null,
+      req.user
+    );
+  }
+
   @Patch(":id")
   async updateOrder(
     @Param("id") id: string,

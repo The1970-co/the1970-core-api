@@ -222,6 +222,8 @@ model Order {
   updatedAt             DateTime                @updatedAt
   createdByStaffId      String?
   createdByStaffName    String?
+  assignedStaffId       String?
+  assignedStaffName     String?
   soldAt                DateTime                @default(now())
   isPartialDelivery     Boolean                 @default(false)
   partialReason         String?
