@@ -21,6 +21,16 @@ import { Roles } from "../auth/roles.decorator";
 export class StaffController {
   constructor(private readonly staffService: StaffService) {}
 
+  @Get("role-templates")
+  async getRoleTemplates() {
+    return this.staffService.getRoleTemplates();
+  }
+
+  @Patch("role-templates")
+  async saveRoleTemplates(@Body() dto: any) {
+    return this.staffService.saveRoleTemplates(dto);
+  }
+
   @Get()
   async findAll() {
     return this.staffService.findAll();

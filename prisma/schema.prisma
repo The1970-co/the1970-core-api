@@ -307,6 +307,7 @@ model Shipment {
   weight                   Int?
   order                    Order                   @relation(fields: [orderId], references: [id], onDelete: Cascade)
   trackingCaches           ShipmentTrackingCache[]
+  trackingEvents           ShipmentTimelineEvent[]
   codReconciliationStatus  String?                 @default("NOT_RECONCILED")
   codReconciledAt          DateTime?
   codReconciliationBatchId String?
@@ -326,6 +327,35 @@ model Shipment {
   @@index([lastSyncedAt])
   @@index([ahamoveOrderId])
   @@index([ahamoveStatus])
+}
+
+model ShipmentTimelineEvent {
+  id            String   @id @default(cuid())
+  shipmentId    String
+  orderId       String?
+  carrier       String?
+  trackingCode  String?
+  status        String
+  partnerStatus String?
+  title         String
+  description   String?
+  driverName    String?
+  driverPhone   String?
+  driverPlate   String?
+  eta           String?
+  locationText  String?
+  raw           Json?
+  source        String   @default("system")
+  eventTime     DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+
+  @@index([shipmentId])
+  @@index([orderId])
+  @@index([carrier])
+  @@index([status])
+  @@index([eventTime])
 }
 
 model AhamoveShipment {
@@ -427,6 +457,20 @@ model StaffUserRole {
   staff StaffUser @relation(fields: [staffId], references: [id], onDelete: Cascade)
 
   @@unique([staffId, roleCode])
+  @@index([roleCode])
+}
+
+model StaffRoleTemplate {
+  id          String   @id @default(cuid())
+  roleCode    String   @unique
+  name        String
+  scope       String   @default("ONE_BRANCH")
+  description String   @default("")
+  note        String   @default("")
+  permissions Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
   @@index([roleCode])
 }
 

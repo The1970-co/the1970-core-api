@@ -37,10 +37,130 @@ export class ShipmentService {
     if (value.includes("transit") || value.includes("sorting")) return "IN_TRANSIT";
     if (value.includes("complete") || value.includes("success")) return "DELIVERED";
     if (value.includes("fail") || value.includes("return")) return "FAILED";
-    if (value.includes("ready")) return "READY_TO_PICK";
-    if (value.includes("create")) return "READY_TO_PICK";
+    if (value.includes("create") || value.includes("ready")) return "CREATED";
 
     return value.toUpperCase();
+  }
+
+  private normalizeTimelineStatus(status?: string | null) {
+    const s = String(status || "").toUpperCase();
+
+    if (!s) return "UNKNOWN";
+    if (s.includes("DELIVERED") || s.includes("COMPLETED") || s.includes("SUCCESS")) return "DELIVERED";
+    if (s.includes("DELIVERING") || s.includes("IN_PROCESS") || s.includes("IN PROCESS")) return "DELIVERING";
+    if (s.includes("PICKING") || s.includes("ACCEPTED") || s.includes("PICKED")) return "PICKING";
+    if (s.includes("CREATED") || s.includes("READY") || s.includes("ASSIGNING") || s.includes("IDLE")) return "CREATED";
+    if (s.includes("CANCEL")) return "CANCELLED";
+    if (s.includes("FAIL")) return "FAILED";
+    if (s.includes("RETURN")) return "RETURNING";
+    if (s.includes("TRANSIT") || s.includes("SORT")) return "IN_TRANSIT";
+
+    return s;
+  }
+
+  private timelineTitle(status?: string | null, carrier?: string | null) {
+    const s = this.normalizeTimelineStatus(status);
+    const c = String(carrier || "").toUpperCase();
+
+    if (s === "DELIVERED") return "Giao hàng thành công";
+    if (s === "DELIVERING") return "Đang giao hàng";
+    if (s === "PICKING") return c.includes("AHAMOVE") ? "Tài xế đã nhận / đang lấy hàng" : "Đang lấy hàng";
+    if (s === "CREATED") return c.includes("AHAMOVE") ? "Đã tạo đơn / đang tìm tài xế" : "Đã tạo vận đơn";
+    if (s === "CANCELLED") return "Đã huỷ vận đơn";
+    if (s === "FAILED") return "Giao hàng thất bại";
+    if (s === "RETURNING") return "Đang hoàn hàng";
+    if (s === "IN_TRANSIT") return "Đang trung chuyển";
+
+    return status || "Cập nhật vận chuyển";
+  }
+
+  private extractAhamoveDriver(raw: any) {
+    const data = raw?.data || raw?.order || raw || {};
+    const supplier = data?.supplier || data?.driver || data?.shared_link_data?.supplier || {};
+
+    return {
+      driverName:
+        supplier?.name ||
+        supplier?.display_name ||
+        data?.driver_name ||
+        data?.driverName ||
+        null,
+      driverPhone:
+        supplier?.mobile ||
+        supplier?.phone ||
+        data?.driver_phone ||
+        data?.driverPhone ||
+        null,
+      driverPlate:
+        supplier?.vehicle_plate ||
+        supplier?.plate ||
+        data?.vehicle_plate ||
+        data?.driver_plate ||
+        null,
+      eta:
+        data?.eta ||
+        data?.duration ||
+        data?.estimated_time ||
+        null,
+      locationText:
+        data?.location?.address ||
+        data?.supplier?.location?.address ||
+        data?.path?.[1]?.address ||
+        null,
+    };
+  }
+
+  private async appendShipmentTimelineEvent(client: any, input: {
+    shipmentId: string;
+    orderId?: string | null;
+    carrier?: string | null;
+    trackingCode?: string | null;
+    status: string;
+    partnerStatus?: string | null;
+    title?: string;
+    description?: string | null;
+    raw?: any;
+    source?: string;
+    driverName?: string | null;
+    driverPhone?: string | null;
+    driverPlate?: string | null;
+    eta?: string | null;
+    locationText?: string | null;
+  }) {
+    const status = this.normalizeTimelineStatus(input.status);
+    const latest = await (client as any).shipmentTimelineEvent.findFirst({
+      where: { shipmentId: input.shipmentId },
+      orderBy: { eventTime: "desc" },
+    });
+
+    const sameStatus = latest?.status === status;
+    const samePartnerStatus =
+      String(latest?.partnerStatus || "") === String(input.partnerStatus || "");
+
+    if (sameStatus && samePartnerStatus) {
+      return latest;
+    }
+
+    return (client as any).shipmentTimelineEvent.create({
+      data: {
+        shipmentId: input.shipmentId,
+        orderId: input.orderId || null,
+        carrier: input.carrier || null,
+        trackingCode: input.trackingCode || null,
+        status,
+        partnerStatus: input.partnerStatus || null,
+        title: input.title || this.timelineTitle(status, input.carrier),
+        description: input.description || null,
+        raw: input.raw || undefined,
+        source: input.source || "system",
+        driverName: input.driverName || null,
+        driverPhone: input.driverPhone || null,
+        driverPlate: input.driverPlate || null,
+        eta: input.eta ? String(input.eta) : null,
+        locationText: input.locationText || null,
+        eventTime: new Date(),
+      },
+    });
   }
 
   private mapStatusLabel(status: string) {
@@ -205,7 +325,7 @@ export class ShipmentService {
       throw new BadRequestException("Không tìm thấy phiếu giao hàng");
     }
 
-    if (!shipment.trackingCode) {
+    if (!shipment.trackingCode && !shipment.ahamoveOrderId) {
       throw new BadRequestException("Phiếu giao hàng chưa có mã vận đơn");
     }
 
@@ -229,12 +349,109 @@ export class ShipmentService {
           carrier: shipment.carrier,
           shippingStatus: shipment.shippingStatus,
           partnerStatus: shipment.partnerStatus,
+          ahamoveTrackingUrl: shipment.ahamoveTrackingUrl,
         },
         tracking: latestCache.normalizedJson,
+        timeline: [],
       };
     }
 
-    const raw = await this.ghnClient.getOrderDetail(shipment.trackingCode);
+    const isAhamove = String(shipment.carrier || "").toUpperCase().includes("AHAMOVE");
+
+    if (isAhamove) {
+      const ahamoveOrderId = shipment.ahamoveOrderId || shipment.trackingCode || "";
+      const raw = await this.ahamoveClient.getOrderDetail(ahamoveOrderId);
+      const ahamoveStatus = this.getAhamoveStatus(raw);
+      const trackingUrl = this.getAhamoveTrackingUrl(raw);
+      const shippingStatus = this.mapAhamoveShippingStatus(ahamoveStatus);
+      const driver = this.extractAhamoveDriver(raw);
+
+      const expiresAt = new Date(
+        now.getTime() + this.trackingCacheMinutes * 60 * 1000
+      );
+
+      await this.prisma.$transaction(async (tx) => {
+        await tx.shipmentTrackingCache.create({
+          data: {
+            shipmentId: shipment.id,
+            carrier: "AHAMOVE",
+            trackingCode: ahamoveOrderId,
+            payloadJson: raw,
+            normalizedJson: {
+              carrier: "AHAMOVE",
+              trackingCode: ahamoveOrderId,
+              shippingStatus,
+              partnerStatus: ahamoveStatus,
+              trackingUrl,
+              driver,
+            },
+            fetchedAt: now,
+            expiresAt,
+          },
+        });
+
+        await tx.shipment.update({
+          where: { id: shipment.id },
+          data: {
+            shippingStatus,
+            partnerStatus: ahamoveStatus,
+            ahamoveStatus,
+            ahamoveSubStatus: raw?.sub_status || raw?.data?.sub_status || null,
+            ahamoveTrackingUrl: trackingUrl,
+            ahamoveRaw: raw,
+            metadata: raw,
+            lastSyncedAt: now,
+          },
+        });
+
+        await this.appendShipmentTimelineEvent(tx, {
+          shipmentId: shipment.id,
+          orderId: shipment.orderId,
+          carrier: "AHAMOVE",
+          trackingCode: ahamoveOrderId,
+          status: shippingStatus,
+          partnerStatus: ahamoveStatus,
+          title: this.timelineTitle(shippingStatus, "AHAMOVE"),
+          description: trackingUrl ? `Tracking: ${trackingUrl}` : null,
+          raw,
+          source: force ? "manual_refresh" : "polling",
+          ...driver,
+        });
+      });
+
+      const timeline = await (this.prisma as any).shipmentTimelineEvent.findMany({
+        where: { shipmentId: shipment.id },
+        orderBy: { eventTime: "desc" },
+        take: 50,
+      });
+
+      return {
+        source: "ahamove_live",
+        cached: false,
+        fetchedAt: now,
+        expiresAt,
+        shipment: {
+          id: shipment.id,
+          trackingCode: ahamoveOrderId,
+          carrier: "AHAMOVE",
+          shippingStatus,
+          partnerStatus: ahamoveStatus,
+          ahamoveTrackingUrl: trackingUrl,
+        },
+        tracking: {
+          carrier: "AHAMOVE",
+          trackingCode: ahamoveOrderId,
+          shippingStatus,
+          partnerStatus: ahamoveStatus,
+          trackingUrl,
+          driver,
+          raw,
+        },
+        timeline,
+      };
+    }
+
+    const raw = await this.ghnClient.getOrderDetail(shipment.trackingCode || "");
     const normalized = this.normalizeTracking(raw, shipment);
 
     const expiresAt = new Date(
@@ -271,6 +488,24 @@ export class ShipmentService {
           metadata: raw,
         },
       });
+
+      await this.appendShipmentTimelineEvent(tx, {
+        shipmentId: shipment.id,
+        orderId: shipment.orderId,
+        carrier: shipment.carrier,
+        trackingCode: shipment.trackingCode || "",
+        status: normalized.shippingStatus,
+        partnerStatus: normalized.partnerStatus,
+        title: this.timelineTitle(normalized.shippingStatus, shipment.carrier),
+        raw,
+        source: force ? "manual_refresh" : "polling",
+      });
+    });
+
+    const timeline = await (this.prisma as any).shipmentTimelineEvent.findMany({
+      where: { shipmentId: shipment.id },
+      orderBy: { eventTime: "desc" },
+      take: 50,
     });
 
     return {
@@ -286,8 +521,53 @@ export class ShipmentService {
         partnerStatus: normalized.partnerStatus,
       },
       tracking: normalized,
+      timeline,
     };
   }
+
+  async getShipmentTrackingByOrder(orderId: string, force = false) {
+    const shipment = await this.prisma.shipment.findUnique({
+      where: { orderId },
+    });
+
+    if (!shipment) {
+      throw new BadRequestException("Đơn chưa có vận đơn");
+    }
+
+    return this.getShipmentTracking(shipment.id, force);
+  }
+
+  async getShipmentTimelineByOrder(orderId: string) {
+    const shipment = await this.prisma.shipment.findUnique({
+      where: { orderId },
+    });
+
+    if (!shipment) {
+      return {
+        shipment: null,
+        timeline: [],
+      };
+    }
+
+    const timeline = await (this.prisma as any).shipmentTimelineEvent.findMany({
+      where: { shipmentId: shipment.id },
+      orderBy: { eventTime: "desc" },
+      take: 50,
+    });
+
+    return {
+      shipment: {
+        id: shipment.id,
+        carrier: shipment.carrier,
+        trackingCode: shipment.trackingCode,
+        shippingStatus: shipment.shippingStatus,
+        partnerStatus: shipment.partnerStatus,
+        ahamoveTrackingUrl: shipment.ahamoveTrackingUrl,
+      },
+      timeline,
+    };
+  }
+
 
   async quote(dto: QuoteShipmentDto) {
     if (!this.fromDistrictId) {
@@ -381,31 +661,10 @@ export class ShipmentService {
       });
 
       if (existingShipment?.trackingCode) {
-        const normalizedShipment =
-          !existingShipment.shippingStatus ||
-          existingShipment.shippingStatus === "CREATED" ||
-          existingShipment.shippingStatus === "PENDING"
-            ? await tx.shipment.update({
-                where: { id: existingShipment.id },
-                data: {
-                  shippingStatus: "READY_TO_PICK",
-                  partnerStatus: existingShipment.partnerStatus || "READY_TO_PICK",
-                },
-              })
-            : existingShipment;
-
-        await tx.order.update({
-          where: { id: orderId },
-          data: {
-            fulfillmentStatus: "PROCESSING",
-            status: "SHIPPED",
-          },
-        });
-
         return {
           duplicated: true,
-          ghn: normalizedShipment.metadata || null,
-          shipment: normalizedShipment,
+          ghn: existingShipment.metadata || null,
+          shipment: existingShipment,
         };
       }
 
@@ -492,8 +751,8 @@ export class ShipmentService {
         update: {
           carrier: "GHN",
           trackingCode: created.order_code,
-          shippingStatus: this.mapShippingStatus(created.status || "READY_TO_PICK"),
-          partnerStatus: created.status || "READY_TO_PICK",
+          shippingStatus: this.mapShippingStatus(created.status || "CREATED"),
+          partnerStatus: created.status || "CREATED",
           codAmount,
           shippingFee: created.total_fee ?? null,
           weight: dto.weight,
@@ -509,8 +768,8 @@ export class ShipmentService {
           orderId,
           carrier: "GHN",
           trackingCode: created.order_code,
-          shippingStatus: this.mapShippingStatus(created.status || "READY_TO_PICK"),
-          partnerStatus: created.status || "READY_TO_PICK",
+          shippingStatus: this.mapShippingStatus(created.status || "CREATED"),
+          partnerStatus: created.status || "CREATED",
           codAmount,
           shippingFee: created.total_fee ?? null,
           weight: dto.weight,
@@ -856,27 +1115,62 @@ this.logger.warn(
       throw new BadRequestException("Thiếu thông tin người nhận AhaMove");
     }
 
+    const codAmount = Math.max(0, Math.round(Number(body?.codAmount || 0)));
+    const itemValue = Math.max(0, Math.round(Number(body?.itemValue || codAmount || 0)));
+
     const payload = {
-      service_id: serviceId,
+      order_time: Number(body?.order_time ?? body?.orderTime ?? 0),
       path: [
         {
           address: fromAddress,
           name: fromName,
           mobile: fromPhone,
+          remarks: body?.fromNote || "",
         },
         {
           address: body.toAddress,
           name: body.toName,
           mobile: body.toPhone,
-          cod: Math.max(0, Math.round(Number(body?.codAmount || 0))),
+          cod: codAmount,
+          item_value: itemValue,
+          tracking_number: body?.clientOrderCode || body?.orderCode || "",
+          remarks: body?.note || "",
         },
       ],
+      services: [
+        {
+          _id: serviceId,
+          requests: Array.isArray(body?.requests) ? body.requests : [],
+        },
+      ],
+      payment_method:
+        body?.payment_method ||
+        body?.paymentMethod ||
+        process.env.AHAMOVE_PAYMENT_METHOD ||
+        "BALANCE",
       remarks: body?.note || "",
-      items: Array.isArray(body?.items) ? body.items : [],
+      items: Array.isArray(body?.items)
+        ? body.items.map((item: any, index: number) => ({
+            _id: String(item?._id || item?.id || index + 1),
+            name: item?.name || "Sản phẩm",
+            num: Number(item?.num || item?.quantity || 1),
+            price: Number(item?.price || 0),
+          }))
+        : [],
+      package_detail: [
+        {
+          weight: Math.max(0.1, Number(body?.weightKg || body?.weight || 200) / 1000),
+          length: Math.max(0.01, Number(body?.lengthM || body?.length || 10) / 100),
+          width: Math.max(0.01, Number(body?.widthM || body?.width || 10) / 100),
+          height: Math.max(0.01, Number(body?.heightM || body?.height || 10) / 100),
+          description: "Thời trang",
+        },
+      ],
     };
 
     return this.ahamoveClient.estimate(payload);
   }
+
 
   async createAhamoveShipment(orderId: string, dto: any) {
     return this.prisma.$transaction(async (tx) => {
@@ -925,8 +1219,14 @@ this.logger.warn(
 
       const items =
         Array.isArray(dto?.items) && dto.items.length
-          ? dto.items
-          : (order.items || []).map((item: any) => ({
+          ? dto.items.map((item: any, index: number) => ({
+              _id: String(item?._id || item?.id || index + 1),
+              name: item?.name || "Sản phẩm",
+              num: Number(item?.num || item?.quantity || 1),
+              price: Number(item?.price || 0),
+            }))
+          : (order.items || []).map((item: any, index: number) => ({
+              _id: String(item?.sku || item?.variantId || index + 1),
               name: item.productName || item.sku || "Sản phẩm",
               num: Number(item.qty || 1),
               price: Number(item.unitPrice || 0),
@@ -934,7 +1234,13 @@ this.logger.warn(
 
       const payload = {
         service_id: serviceId,
-        order_time: new Date().toISOString(),
+        requests: Array.isArray(dto?.requests) ? dto.requests : [],
+        payment_method:
+          dto?.payment_method ||
+          dto?.paymentMethod ||
+          process.env.AHAMOVE_PAYMENT_METHOD ||
+          "BALANCE",
+        order_time: Number(dto?.order_time ?? dto?.orderTime ?? 0),
         path: [
           {
             address: fromAddress,
@@ -1018,6 +1324,19 @@ this.logger.warn(
         },
       });
 
+      await this.appendShipmentTimelineEvent(tx, {
+        shipmentId: shipment.id,
+        orderId,
+        carrier: "AHAMOVE",
+        trackingCode: ahamoveOrderId,
+        status: this.mapAhamoveShippingStatus(ahamoveStatus) || "CREATED",
+        partnerStatus: ahamoveStatus,
+        title: this.timelineTitle(this.mapAhamoveShippingStatus(ahamoveStatus) || "CREATED", "AHAMOVE"),
+        description: trackingUrl ? `Tracking: ${trackingUrl}` : null,
+        raw: created,
+        source: "create",
+      });
+
       await tx.order.update({
         where: { id: orderId },
         data: {
@@ -1053,10 +1372,13 @@ this.logger.warn(
     const ahamoveStatus = this.getAhamoveStatus(raw);
     const trackingUrl = this.getAhamoveTrackingUrl(raw);
 
+    const shippingStatus = this.mapAhamoveShippingStatus(ahamoveStatus);
+    const driver = this.extractAhamoveDriver(raw);
+
     const updated = await this.prisma.shipment.update({
       where: { id: shipment.id },
       data: {
-        shippingStatus: this.mapAhamoveShippingStatus(ahamoveStatus),
+        shippingStatus,
         partnerStatus: ahamoveStatus,
         ahamoveStatus,
         ahamoveSubStatus: raw?.sub_status || raw?.data?.sub_status || null,
@@ -1065,6 +1387,20 @@ this.logger.warn(
         metadata: raw,
         lastSyncedAt: new Date(),
       },
+    });
+
+    await this.appendShipmentTimelineEvent(this.prisma, {
+      shipmentId: shipment.id,
+      orderId: shipment.orderId,
+      carrier: "AHAMOVE",
+      trackingCode: ahamoveOrderId,
+      status: shippingStatus,
+      partnerStatus: ahamoveStatus,
+      title: this.timelineTitle(shippingStatus, "AHAMOVE"),
+      description: trackingUrl ? `Tracking: ${trackingUrl}` : null,
+      raw,
+      source: "manual_refresh",
+      ...driver,
     });
 
     return {
@@ -1196,6 +1532,22 @@ this.logger.warn(
         metadata: body,
         lastSyncedAt: new Date(),
       },
+    });
+
+    const driver = this.extractAhamoveDriver(body);
+
+    await this.appendShipmentTimelineEvent(this.prisma, {
+      shipmentId: shipment.id,
+      orderId: shipment.orderId,
+      carrier: "AHAMOVE",
+      trackingCode: ahamoveOrderId,
+      status: shippingStatus,
+      partnerStatus: ahamoveStatus,
+      title: this.timelineTitle(shippingStatus, "AHAMOVE"),
+      description: trackingUrl ? `Tracking: ${trackingUrl}` : null,
+      raw: body,
+      source: "webhook",
+      ...driver,
     });
 
     let nextOrderData: any = {};

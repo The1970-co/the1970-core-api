@@ -247,36 +247,42 @@ export class OrderService {
     );
   }
 
-  private ensureShipModePayload(body: any, branchId?: string | null) {
-    const snapshot = body?.shippingSnapshot;
+private ensureShipModePayload(body: any, branchId?: string | null) {
+  const snapshot = body?.shippingSnapshot;
 
-    if (!branchId) {
-      throw new BadRequestException("Thiếu chi nhánh xuất kho.");
-    }
+  if (!branchId) {
+    throw new BadRequestException("Thiếu chi nhánh xuất kho.");
+  }
 
-    if (!snapshot) {
-      throw new BadRequestException("Thiếu shippingSnapshot để xuất kho.");
-    }
+  if (!snapshot) {
+    throw new BadRequestException("Thiếu shippingSnapshot để xuất kho.");
+  }
 
-    if (!snapshot.shippingAddressLine1) {
-      throw new BadRequestException("Thiếu địa chỉ giao hàng.");
-    }
+  if (!snapshot.shippingAddressLine1) {
+    throw new BadRequestException("Thiếu địa chỉ giao hàng.");
+  }
 
-    if (!snapshot.shippingRecipientName) {
-      throw new BadRequestException("Thiếu tên người nhận.");
-    }
+  if (!snapshot.shippingRecipientName) {
+    throw new BadRequestException("Thiếu tên người nhận.");
+  }
 
-    if (!snapshot.shippingPhone) {
-      throw new BadRequestException("Thiếu số điện thoại người nhận.");
-    }
+  if (!snapshot.shippingPhone) {
+    throw new BadRequestException("Thiếu số điện thoại người nhận.");
+  }
 
+  const shippingPartner = String(
+    snapshot.shippingPartner || "GHN"
+  ).toUpperCase();
+
+  // ✅ Chỉ GHN mới bắt district + ward code
+  if (shippingPartner === "GHN") {
     if (!snapshot.ghnDistrictId || !snapshot.ghnWardCode) {
       throw new BadRequestException(
         "Địa chỉ chưa có mã GHN (ghnDistrictId / ghnWardCode)."
       );
     }
   }
-
+}
   private async logInventoryMovement(
     tx: TxClient,
     input: {

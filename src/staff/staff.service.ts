@@ -64,6 +64,229 @@ const LEGACY_BOOLEAN_TO_PERMISSION_KEYS: Record<string, string[]> = {
   canViewMoney: ["inventory.value.view", "finance.view"],
 };
 
+
+const PERMISSION_LABEL_TO_KEY: Record<string, string> = {
+  "Tổng quan": "menu.dashboard",
+  "Đơn hàng": "menu.orders",
+  "Tạo đơn": "menu.create_order",
+  "POS bán tại quầy": "menu.pos",
+  "Đơn trả hàng": "menu.returns",
+  "Sản phẩm": "menu.products",
+  "Khuyến mại": "menu.promotions",
+  "Danh mục sản phẩm": "menu.product_categories",
+  "Nhà cung cấp": "menu.suppliers",
+  "Khách hàng": "menu.customers",
+  "Kho hàng": "menu.inventory",
+  "Lịch sử kho": "menu.inventory_logs",
+  "Phiếu nhập": "menu.purchase_receipt",
+  "Phiếu chuyển kho": "menu.stock_transfer",
+  "Kiểm kho": "menu.stocktake",
+  "Sơ đồ kho 3D": "menu.warehouse_map",
+  "Tài chính": "menu.finance",
+  "Đối soát vận chuyển": "menu.shipping_reconcile",
+  "Thanh toán nhà cung cấp": "menu.supplier_payments",
+  "Báo cáo": "menu.reports",
+  "Autopilot": "menu.autopilot",
+  "AI Content": "menu.ai_content",
+  "Phân quyền": "menu.permissions",
+  "Cấu hình": "menu.settings",
+
+  "Xem sản phẩm": "products.view",
+  "Tạo sản phẩm": "products.create",
+  "Sửa sản phẩm": "products.edit",
+  "Xóa sản phẩm": "products.delete",
+  "Sửa giá bán": "products.price.edit",
+  "Xuất file sản phẩm": "products.excel.export",
+  "Nhập file sản phẩm": "products.excel.import",
+
+  "Xem tồn kho": "inventory.view",
+  "Quản kho": "inventory.manage",
+  "Xem lịch sử kho": "inventory.logs.view",
+  "Xem giá trị tồn kho": "inventory.value.view",
+
+  "Xem đơn nhập": "purchase_receipt.view",
+  "Tạo đơn nhập": "purchase_receipt.create",
+  "Sửa đơn nhập": "purchase_receipt.edit",
+  "Thanh toán đơn nhập": "purchase_receipt.pay",
+  "Hoàn trả đơn nhập": "purchase_receipt.return",
+  "Nhận hàng vào kho": "purchase_receipt.receive",
+  "Kết thúc đơn nhập": "purchase_receipt.close",
+  "Hủy đơn nhập": "purchase_receipt.cancel",
+  "Xuất file đơn nhập": "purchase_receipt.excel.export",
+  "Nhập file đơn nhập": "purchase_receipt.excel.import",
+
+  "Xem phiếu chuyển": "stock_transfer.view",
+  "Tạo phiếu chuyển": "stock_transfer.create",
+  "Sửa phiếu chuyển": "stock_transfer.edit",
+  "Xác nhận chuyển": "stock_transfer.confirm",
+  "Hủy phiếu chuyển": "stock_transfer.cancel",
+  "Xuất file phiếu chuyển": "stock_transfer.excel.export",
+  "Nhập file phiếu chuyển": "stock_transfer.excel.import",
+
+  "Xem phiếu kiểm hàng": "stocktake.view",
+  "Tạo phiếu kiểm hàng": "stocktake.create",
+  "Sửa phiếu kiểm hàng": "stocktake.edit",
+  "Xác nhận phiếu kiểm hàng": "stocktake.confirm",
+  "Hủy phiếu kiểm hàng": "stocktake.cancel",
+  "Xóa phiếu kiểm hàng": "stocktake.delete",
+  "Cân bằng kho": "stocktake.apply",
+  "Xuất file phiếu kiểm hàng": "stocktake.excel.export",
+  "Nhập file phiếu kiểm hàng": "stocktake.excel.import",
+
+  "Bán hàng / POS": "pos.access",
+  "Xem đơn hàng được phụ trách": "orders.view_own",
+  "Xem tất cả đơn hàng": "orders.view",
+  "Tạo đơn hàng": "orders.create",
+  "Sửa đơn hàng": "orders.edit",
+  "Duyệt đơn hàng": "orders.approve",
+  "Hủy đơn hàng": "orders.cancel",
+  "Đóng gói và giao hàng": "orders.pack_ship",
+  "Thanh toán đơn hàng": "orders.pay",
+  "Xuất file đơn hàng": "orders.excel.export",
+  "Nhập file đơn hàng": "orders.excel.import",
+
+  "Xem đơn trả hàng": "returns.view",
+  "Tạo đơn trả hàng": "returns.create",
+  "Hủy đơn trả hàng": "returns.cancel",
+  "Thanh toán đơn trả": "returns.pay",
+  "Xuất file đơn trả hàng": "returns.excel.export",
+
+  "Xem khách hàng được phụ trách": "customers.view_own",
+  "Xem tất cả khách hàng": "customers.view",
+  "Tạo khách hàng": "customers.create",
+  "Sửa khách hàng": "customers.edit",
+  "Xóa khách hàng": "customers.delete",
+  "Xuất file khách hàng": "customers.excel.export",
+  "Nhập file khách hàng": "customers.excel.import",
+
+  "Xem phiếu thu": "payment_receipt.view",
+  "Tạo phiếu thu": "payment_receipt.create",
+  "Sửa phiếu thu": "payment_receipt.edit",
+  "Hủy phiếu thu": "payment_receipt.cancel",
+  "Xem phiếu chi": "payment_expense.view",
+  "Tạo phiếu chi": "payment_expense.create",
+  "Sửa phiếu chi": "payment_expense.edit",
+  "Hủy phiếu chi": "payment_expense.cancel",
+
+  "Báo cáo bán hàng": "reports.sales.view",
+  "Báo cáo nhập hàng": "reports.purchase.view",
+  "Báo cáo kho": "reports.inventory.view",
+  "Báo cáo lãi lỗ": "reports.profit.view",
+  "Báo cáo khách hàng": "reports.customers.view",
+  "Báo cáo công nợ khách hàng/nhà cung cấp": "reports.debt.view",
+  "Sổ quỹ": "reports.cashbook.view",
+
+  "Xem khuyến mãi": "promotions.view",
+  "Tạo khuyến mãi": "promotions.create",
+  "Sửa khuyến mãi": "promotions.edit",
+  "Kích hoạt khuyến mãi": "promotions.activate",
+  "Tạm dừng khuyến mãi": "promotions.pause",
+  "Xóa khuyến mãi": "promotions.delete",
+
+  "Tải Excel sản phẩm": "products.excel.export",
+  "Nhập Excel sản phẩm": "products.excel.import",
+  "Tải Excel đơn hàng": "orders.excel.export",
+  "Tải Excel tồn kho": "inventory.excel.export",
+  "Tải Excel khách hàng": "customers.excel.export",
+  "Quản lý phân quyền": "permissions.view",
+  "Cấu hình hệ thống": "system.manage",
+};
+
+const PERMISSION_LABEL_TO_LEGACY_FIELD: Record<string, keyof BranchPermissionTemplate> = {
+  "Xem sản phẩm": "canView",
+  "Bán hàng / POS": "canSell",
+  "Xem đơn hàng được phụ trách": "canViewOwnOrders",
+  "Xem tất cả đơn hàng": "canViewBranchOrders",
+  "Tạo đơn hàng": "canCreateOrder",
+  "Duyệt đơn hàng": "canApproveOrder",
+  "Hủy đơn hàng": "canCancelOrder",
+  "Xem đơn trả hàng": "canHandleReturn",
+  "Tạo đơn trả hàng": "canHandleReturn",
+  "Xem tồn kho": "canViewStock",
+  "Quản kho": "canManageStock",
+  "Xem phiếu kiểm hàng": "canStocktake",
+  "Tạo phiếu kiểm hàng": "canStocktake",
+  "Sửa phiếu kiểm hàng": "canStocktake",
+  "Xác nhận phiếu kiểm hàng": "canStocktake",
+  "Xem phiếu chuyển": "canTransferStock",
+  "Tạo phiếu chuyển": "canTransferStock",
+  "Sửa phiếu chuyển": "canTransferStock",
+  "Xác nhận chuyển": "canTransferStock",
+  "Nhận hàng vào kho": "canReceiveStock",
+  "Xem khách hàng được phụ trách": "canViewCustomer",
+  "Xem tất cả khách hàng": "canViewCustomer",
+  "Tạo khách hàng": "canEditCustomer",
+  "Sửa khách hàng": "canEditCustomer",
+  "Xuất file sản phẩm": "canExportProductExcel",
+  "Nhập file sản phẩm": "canImportProductExcel",
+  "Xuất file đơn hàng": "canExportOrderExcel",
+  "Tải Excel đơn hàng": "canExportOrderExcel",
+  "Tải Excel tồn kho": "canExportInventoryExcel",
+  "Xuất file khách hàng": "canExportCustomerExcel",
+  "Tải Excel khách hàng": "canExportCustomerExcel",
+  "Báo cáo bán hàng": "canViewReport",
+  "Báo cáo kho": "canViewReport",
+  "Xem giá trị tồn kho": "canViewMoney",
+};
+
+function permissionKeyForTemplateLabel(groupKey: string, permissionName: string) {
+  if (groupKey === "transfers" && permissionName === "Nhận hàng vào kho") return "stock_transfer.receive";
+  if (groupKey === "returns" && permissionName === "Nhận hàng vào kho") return "returns.receive";
+  if (groupKey === "purchaseReceipts" && permissionName === "Nhận hàng vào kho") return "purchase_receipt.receive";
+  return PERMISSION_LABEL_TO_KEY[permissionName] || `${groupKey}.${String(permissionName || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d")
+    .replace(/Đ/g, "D")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")}`;
+}
+
+function branchPermissionFromTemplatePermissions(permissions: any) {
+  const row: BranchPermissionTemplate = {
+    canView: false,
+    canSell: false,
+    canViewOwnOrders: false,
+    canViewBranchOrders: false,
+    canCreateOrder: false,
+    canApproveOrder: false,
+    canCancelOrder: false,
+    canHandleReturn: false,
+    canViewStock: false,
+    canManageStock: false,
+    canStocktake: false,
+    canTransferStock: false,
+    canReceiveStock: false,
+    canViewCustomer: false,
+    canEditCustomer: false,
+    canExportProductExcel: false,
+    canImportProductExcel: false,
+    canExportOrderExcel: false,
+    canExportInventoryExcel: false,
+    canExportCustomerExcel: false,
+    canViewReport: false,
+    canViewMoney: false,
+    permissionKeys: [],
+  };
+
+  const keys: string[] = [];
+  const groups = permissions && typeof permissions === "object" ? permissions : {};
+
+  for (const [groupKey, permissionNames] of Object.entries(groups)) {
+    if (!Array.isArray(permissionNames)) continue;
+    for (const permissionName of permissionNames) {
+      const label = String(permissionName || "");
+      keys.push(permissionKeyForTemplateLabel(groupKey, label));
+      const legacyField = PERMISSION_LABEL_TO_LEGACY_FIELD[label];
+      if (legacyField) (row as any)[legacyField] = true;
+    }
+  }
+
+  row.permissionKeys = UNIQUE(keys);
+  return row;
+}
+
 function permissionKeysFromLegacyBooleans(row: Record<string, any>) {
   const keys: string[] = [];
   for (const [field, permissionKeys] of Object.entries(LEGACY_BOOLEAN_TO_PERMISSION_KEYS)) {
@@ -190,7 +413,7 @@ export class StaffService {
     return normalized;
   }
 
-  private permissionsForRole(roleCode: string) {
+  private permissionsForRoleLegacy(roleCode: string) {
     const normalized = this.validateRole(roleCode);
     const row = {
       canView: false,
@@ -222,6 +445,70 @@ export class StaffService {
       ...row,
       permissionKeys: permissionKeysFromLegacyBooleans(row),
     };
+  }
+
+
+  private async permissionsForRole(roleCode: string, tx?: any) {
+    const normalized = this.validateRole(roleCode);
+    const client = tx || this.prisma;
+
+    const template = await client.staffRoleTemplate.findUnique({
+      where: { roleCode: normalized },
+    });
+
+    if (!template) return this.permissionsForRoleLegacy(normalized);
+
+    return branchPermissionFromTemplatePermissions(template.permissions);
+  }
+
+  async getRoleTemplates() {
+    const rows = await this.prisma.staffRoleTemplate.findMany({
+      orderBy: [{ roleCode: "asc" }],
+    });
+
+    return rows.map((row) => ({
+      id: row.roleCode,
+      name: row.name,
+      scope: row.scope,
+      description: row.description,
+      note: row.note,
+      permissions: row.permissions,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    }));
+  }
+
+  async saveRoleTemplates(dto: any) {
+    const roles = Array.isArray(dto?.roles) ? dto.roles : [];
+    if (!roles.length) {
+      throw new BadRequestException("Thiếu danh sách mẫu quyền role.");
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      for (const role of roles) {
+        const roleCode = this.validateRole(role?.id || role?.roleCode);
+        await tx.staffRoleTemplate.upsert({
+          where: { roleCode },
+          create: {
+            roleCode,
+            name: String(role?.name || roleCode),
+            scope: String(role?.scope || "ONE_BRANCH"),
+            description: String(role?.description || ""),
+            note: String(role?.note || ""),
+            permissions: role?.permissions || {},
+          },
+          update: {
+            name: String(role?.name || roleCode),
+            scope: String(role?.scope || "ONE_BRANCH"),
+            description: String(role?.description || ""),
+            note: String(role?.note || ""),
+            permissions: role?.permissions || {},
+          },
+        });
+      }
+    });
+
+    return this.getRoleTemplates();
   }
 
   private async assertBranchesExist(branchIds: string[]) {
@@ -278,13 +565,17 @@ export class StaffService {
       skipDuplicates: true,
     });
 
-    await tx.staffBranchPermission.createMany({
-      data: branchRoles.map((row) => ({
+    const permissionRows = await Promise.all(
+      branchRoles.map(async (row) => ({
         staffId,
         branchId: row.branchId,
-        ...this.permissionsForRole(row.roleCode),
+        ...(await this.permissionsForRole(row.roleCode, tx)),
         note: `Auto generated from role ${row.roleCode}`,
       })),
+    );
+
+    await tx.staffBranchPermission.createMany({
+      data: permissionRows,
       skipDuplicates: true,
     });
   }
@@ -513,7 +804,7 @@ export class StaffService {
   }
 
   private sanitizeBranchPermissionInput(row: any) {
-    const clean: any = this.permissionsForRole(row.roleCode || row.role || "retail-staff");
+    const clean: any = this.permissionsForRoleLegacy(row.roleCode || row.role || "retail-staff");
 
     const booleanFields = [
       "canView",

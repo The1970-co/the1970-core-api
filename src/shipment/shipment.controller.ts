@@ -34,6 +34,24 @@ export class ShipmentController {
       .replace(/^xã\s+/i, "");
   }
 
+  @Get("order/:orderId/tracking")
+  getShipmentTrackingByOrder(
+    @Param("orderId") orderId: string,
+    @Query("force") force?: string
+  ) {
+    return this.shipmentService.getShipmentTrackingByOrder(orderId, force === "1");
+  }
+
+  @Post("order/:orderId/tracking/refresh")
+  refreshShipmentTrackingByOrder(@Param("orderId") orderId: string) {
+    return this.shipmentService.getShipmentTrackingByOrder(orderId, true);
+  }
+
+  @Get("order/:orderId/timeline")
+  getShipmentTimelineByOrder(@Param("orderId") orderId: string) {
+    return this.shipmentService.getShipmentTimelineByOrder(orderId);
+  }
+
   @Get(":id")
   getShipmentDetail(@Param("id") id: string) {
     return this.shipmentService.getShipmentDetail(id);
