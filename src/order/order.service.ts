@@ -652,12 +652,12 @@ export class OrderService {
 
       const serviceCode = String(
         snapshot.viettelServiceCode ||
-          snapshot.serviceCode ||
-          snapshot.orderService ||
-          snapshot.selectedServiceCode ||
-          snapshot._viettelServiceCode ||
-          process.env.VIETTELPOST_DEFAULT_SERVICE ||
-          "VCN"
+        snapshot.serviceCode ||
+        snapshot.orderService ||
+        snapshot.selectedServiceCode ||
+        snapshot._viettelServiceCode ||
+        process.env.VIETTELPOST_DEFAULT_SERVICE ||
+        "VCN"
       ).toUpperCase();
 
       return this.shipmentService.createViettelPostShipment(order.id, {
@@ -1320,9 +1320,9 @@ export class OrderService {
 
     const snapshotPartner = String(
       body?.shippingSnapshot?.shippingPartner ||
-        body?.shippingSnapshot?.carrier ||
-        body?.shippingMethod ||
-        ""
+      body?.shippingSnapshot?.carrier ||
+      body?.shippingMethod ||
+      ""
     ).toUpperCase();
 
     const frontendWillCreateCarrierShipment = [
@@ -1509,21 +1509,26 @@ export class OrderService {
       discountAmount: this.toNumber(order.discountAmount),
       shippingFee: this.toNumber(order.shippingFee),
       finalAmount: this.toNumber(order.finalAmount),
-      createdAt: new Date(order.createdAt).toLocaleString("vi-VN"),
-      updatedAt: new Date(order.updatedAt).toLocaleString("vi-VN"),
-      soldAt: order.soldAt ? new Date(order.soldAt).toLocaleString("vi-VN") : null,
+
+      // ✅ GIỮ RAW DATE ISO
+      createdAt: order.createdAt,
+      updatedAt: order.updatedAt,
+      soldAt: order.soldAt || null,
+
       items: Array.isArray(order.items)
         ? order.items.map((item: any) => ({
           ...item,
           qty: Number(item.qty || 0),
         }))
         : [],
+
       itemCount: Array.isArray(order.items)
         ? order.items.reduce(
           (sum: number, item: any) => sum + Number(item.qty || 0),
           0
         )
         : 0,
+
       payments: Array.isArray(order.payments)
         ? order.payments.map((payment: any) => ({
           ...payment,
@@ -1531,9 +1536,9 @@ export class OrderService {
           sourceName: payment.paymentSource?.name || payment.method || null,
           sourceCode: payment.paymentSource?.code || null,
           sourceType: payment.paymentSource?.type || null,
-          paidAt: payment.paidAt
-            ? new Date(payment.paidAt).toLocaleString("vi-VN")
-            : null,
+
+          // ✅ GIỮ RAW DATE ISO
+          paidAt: payment.paidAt || null,
         }))
         : [],
 

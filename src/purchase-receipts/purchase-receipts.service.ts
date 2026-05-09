@@ -142,6 +142,41 @@ export class PurchaseReceiptsService {
     return normalizedItems;
   }
 
+
+  private async getVariantMapForReceiptItems(
+    items: { variantId: string }[],
+    prisma: Prisma.TransactionClient | PrismaService = this.prisma,
+  ) {
+    const variantIds = Array.from(new Set(items.map((item) => item.variantId)));
+
+    const variants = await prisma.productVariant.findMany({
+      where: {
+        id: {
+          in: variantIds,
+        },
+      },
+      include: {
+        product: true,
+      },
+    });
+
+    const variantMap = new Map(variants.map((variant) => [variant.id, variant]));
+
+    for (const variantId of variantIds) {
+      const variant = variantMap.get(variantId);
+
+      if (!variant) {
+        throw new BadRequestException("Có variant không tồn tại");
+      }
+
+      if (!variant.product) {
+        throw new BadRequestException(`Variant ${variant.sku} chưa có sản phẩm cha`);
+      }
+    }
+
+    return variantMap;
+  }
+
   private getReceiptTotal(receipt: { items: { lineTotal: Prisma.Decimal | number | string }[] }) {
     return receipt.items.reduce((sum, item) => sum + this.toNumber(item.lineTotal), 0);
   }
@@ -226,55 +261,55 @@ export class PurchaseReceiptsService {
     }
 
     const normalizedItems = this.normalizeItems(data.items);
+    const variantMap = await this.getVariantMapForReceiptItems(normalizedItems);
     const receiptCode = await this.generateReceiptCode();
 
-    return this.prisma.$transaction(async (tx) => {
-      const receipt = await tx.purchaseReceipt.create({
-        data: {
-          receiptCode,
-          supplierId: data.supplierId,
-          branchId: data.branchId,
-          note: data.note?.trim() || null,
-          createdById: validCreatedById,
-          status: PurchaseReceiptStatus.DRAFT,
-        },
-      });
-
-      for (const item of normalizedItems) {
-        const variant = await tx.productVariant.findUnique({
-          where: { id: item.variantId },
-          include: { product: true },
-        });
-
-        if (!variant) {
-          throw new BadRequestException("Có variant không tồn tại");
-        }
-
-        if (!variant.product) {
-          throw new BadRequestException(`Variant ${variant.sku} chưa có sản phẩm cha`);
-        }
-
-        await tx.purchaseReceiptItem.create({
+    return this.prisma.$transaction(
+      async (tx) => {
+        const receipt = await tx.purchaseReceipt.create({
           data: {
-            receiptId: receipt.id,
-            productId: variant.productId,
-            variantId: variant.id,
-            sku: variant.sku,
-            productName: variant.product.name,
-            color: variant.color,
-            size: variant.size,
-            qty: item.qty,
-            unitCost: new Prisma.Decimal(item.unitCost),
-            lineTotal: new Prisma.Decimal(item.qty * item.unitCost),
+            receiptCode,
+            supplierId: data.supplierId,
+            branchId: data.branchId,
+            note: data.note?.trim() || null,
+            createdById: validCreatedById,
+            status: PurchaseReceiptStatus.DRAFT,
           },
         });
-      }
 
-      return tx.purchaseReceipt.findUnique({
-        where: { id: receipt.id },
-        include: this.getReceiptInclude(),
-      });
-    });
+        await tx.purchaseReceiptItem.createMany({
+          data: normalizedItems.map((item) => {
+            const variant = variantMap.get(item.variantId);
+
+            if (!variant) {
+              throw new BadRequestException("Có variant không tồn tại");
+            }
+
+            return {
+              receiptId: receipt.id,
+              productId: variant.productId,
+              variantId: variant.id,
+              sku: variant.sku,
+              productName: variant.product.name,
+              color: variant.color,
+              size: variant.size,
+              qty: item.qty,
+              unitCost: new Prisma.Decimal(item.unitCost),
+              lineTotal: new Prisma.Decimal(item.qty * item.unitCost),
+            };
+          }),
+        });
+
+        return tx.purchaseReceipt.findUnique({
+          where: { id: receipt.id },
+          include: this.getReceiptInclude(),
+        });
+      },
+      {
+        timeout: 30000,
+        maxWait: 10000,
+      },
+    );
   }
 
   async updateDraft(id: string, data: UpdateReceiptInput) {
@@ -330,59 +365,62 @@ export class PurchaseReceiptsService {
       ? this.normalizeItems(data.items)
       : undefined;
 
-    return this.prisma.$transaction(async (tx) => {
-      await tx.purchaseReceipt.update({
-        where: { id },
-        data: {
-          ...(data.branchId !== undefined ? { branchId: data.branchId } : {}),
-          ...(data.supplierId !== undefined
-            ? { supplierId: data.supplierId || null }
-            : {}),
-          ...(data.note !== undefined ? { note: data.note?.trim() || null } : {}),
-        },
-      });
+    const variantMap = normalizedItems
+      ? await this.getVariantMapForReceiptItems(normalizedItems)
+      : undefined;
 
-      if (normalizedItems) {
-        await tx.purchaseReceiptItem.deleteMany({
-          where: { receiptId: id },
+    return this.prisma.$transaction(
+      async (tx) => {
+        await tx.purchaseReceipt.update({
+          where: { id },
+          data: {
+            ...(data.branchId !== undefined ? { branchId: data.branchId } : {}),
+            ...(data.supplierId !== undefined
+              ? { supplierId: data.supplierId || null }
+              : {}),
+            ...(data.note !== undefined ? { note: data.note?.trim() || null } : {}),
+          },
         });
 
-        for (const item of normalizedItems) {
-          const variant = await tx.productVariant.findUnique({
-            where: { id: item.variantId },
-            include: { product: true },
+        if (normalizedItems && variantMap) {
+          await tx.purchaseReceiptItem.deleteMany({
+            where: { receiptId: id },
           });
 
-          if (!variant) {
-            throw new BadRequestException("Có variant không tồn tại");
-          }
+          await tx.purchaseReceiptItem.createMany({
+            data: normalizedItems.map((item) => {
+              const variant = variantMap.get(item.variantId);
 
-          if (!variant.product) {
-            throw new BadRequestException(`Variant ${variant.sku} chưa có sản phẩm cha`);
-          }
+              if (!variant) {
+                throw new BadRequestException("Có variant không tồn tại");
+              }
 
-          await tx.purchaseReceiptItem.create({
-            data: {
-              receiptId: id,
-              productId: variant.productId,
-              variantId: variant.id,
-              sku: variant.sku,
-              productName: variant.product.name,
-              color: variant.color,
-              size: variant.size,
-              qty: item.qty,
-              unitCost: new Prisma.Decimal(item.unitCost),
-              lineTotal: new Prisma.Decimal(item.qty * item.unitCost),
-            },
+              return {
+                receiptId: id,
+                productId: variant.productId,
+                variantId: variant.id,
+                sku: variant.sku,
+                productName: variant.product.name,
+                color: variant.color,
+                size: variant.size,
+                qty: item.qty,
+                unitCost: new Prisma.Decimal(item.unitCost),
+                lineTotal: new Prisma.Decimal(item.qty * item.unitCost),
+              };
+            }),
           });
         }
-      }
 
-      return tx.purchaseReceipt.findUnique({
-        where: { id },
-        include: this.getReceiptInclude(),
-      });
-    });
+        return tx.purchaseReceipt.findUnique({
+          where: { id },
+          include: this.getReceiptInclude(),
+        });
+      },
+      {
+        timeout: 30000,
+        maxWait: 10000,
+      },
+    );
   }
 
 
@@ -543,8 +581,9 @@ export class PurchaseReceiptsService {
       createdById || receipt.createdById,
     );
 
-    return this.prisma.$transaction(async (tx) => {
-      for (const item of receipt.items) {
+    return this.prisma.$transaction(
+      async (tx) => {
+        for (const item of receipt.items) {
         await tx.inventoryItem.upsert({
           where: {
             variantId_branchId: {
@@ -587,15 +626,20 @@ export class PurchaseReceiptsService {
         });
       }
 
-      return tx.purchaseReceipt.update({
-        where: { id: receipt.id },
-        data: {
-          status: PurchaseReceiptStatus.STOCK_IMPORTED,
-          confirmedAt: new Date(),
-        },
-        include: this.getReceiptInclude(),
-      });
-    });
+        return tx.purchaseReceipt.update({
+          where: { id: receipt.id },
+          data: {
+            status: PurchaseReceiptStatus.STOCK_IMPORTED,
+            confirmedAt: new Date(),
+          },
+          include: this.getReceiptInclude(),
+        });
+      },
+      {
+        timeout: 30000,
+        maxWait: 10000,
+      },
+    );
   }
 
   async complete(id: string) {
