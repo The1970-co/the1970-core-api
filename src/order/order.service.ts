@@ -615,6 +615,82 @@ export class OrderService {
     }
 
     // =======================
+    // 👉 VIETTELPOST
+    // =======================
+    if (partner === "VIETTELPOST" || partner === "VIETTEL_POST" || partner === "VTP") {
+      const paidAmount = Array.isArray(order?.payments)
+        ? order.payments.reduce(
+          (sum: number, payment: any) => {
+            const sourceType = String(
+              payment?.paymentSource?.type || payment?.sourceType || ""
+            ).toUpperCase();
+
+            if (sourceType === "COD" || payment?.status === PaymentStatus.PENDING_COD) {
+              return sum;
+            }
+
+            return sum + this.toNumber(payment?.amount);
+          },
+          0
+        )
+        : 0;
+
+      const remainingCodAmount = Math.max(
+        0,
+        Math.round(this.toNumber(order.finalAmount) - paidAmount)
+      );
+
+      const viettelItems = items.map((item: any) => ({
+        name: item.productName || item.sku || "Sản phẩm",
+        quantity: Number(item.qty || 1),
+        price: this.toNumber(item.unitPrice),
+        weight: Math.max(
+          1,
+          Math.floor(Number(snapshot.weight || 200) / Math.max(items.length, 1))
+        ),
+      }));
+
+      const serviceCode = String(
+        snapshot.viettelServiceCode ||
+          snapshot.serviceCode ||
+          snapshot.orderService ||
+          snapshot.selectedServiceCode ||
+          snapshot._viettelServiceCode ||
+          process.env.VIETTELPOST_DEFAULT_SERVICE ||
+          "VCN"
+      ).toUpperCase();
+
+      return this.shipmentService.createViettelPostShipment(order.id, {
+        toName: snapshot.shippingRecipientName,
+        toPhone: snapshot.shippingPhone,
+        toAddress: snapshot.shippingAddressLine1,
+        toProvince: snapshot.shippingProvince,
+        toDistrict: snapshot.shippingDistrict,
+        toWard: snapshot.shippingWard,
+        province: snapshot.shippingProvince,
+        district: snapshot.shippingDistrict,
+        ward: snapshot.shippingWard,
+        receiverProvinceId: snapshot.viettelReceiverProvinceId,
+        receiverDistrictId: snapshot.viettelReceiverDistrictId,
+        receiverWardId: snapshot.viettelReceiverWardId,
+        senderGroupAddressId: snapshot.viettelSenderGroupAddressId,
+        codAmount: remainingCodAmount,
+        insuranceValue: this.toNumber(order.finalAmount),
+        productPrice: this.toNumber(order.finalAmount),
+        serviceCode,
+        clientOrderCode: order.orderCode,
+        orderCode: order.orderCode,
+        content: `Đơn hàng ${order.orderCode}`,
+        note: snapshot.note || body?.note || "",
+        weight: Number(snapshot.weight || 200),
+        length: Number(snapshot.length || 10),
+        width: Number(snapshot.width || 10),
+        height: Number(snapshot.height || 10),
+        items: viettelItems,
+      });
+    }
+
+    // =======================
     // 👉 GHN (GIỮ NGUYÊN)
     // =======================
     const ghnItems = items.map((item: any) => ({
@@ -1242,7 +1318,26 @@ export class OrderService {
 
     let finalOrder = createdOrder;
 
-    if (mode === "ship" && !this.isPickupLikeOrder(body, body?.salesChannel)) {
+    const snapshotPartner = String(
+      body?.shippingSnapshot?.shippingPartner ||
+        body?.shippingSnapshot?.carrier ||
+        body?.shippingMethod ||
+        ""
+    ).toUpperCase();
+
+    const frontendWillCreateCarrierShipment = [
+      "GHN",
+      "VIETTELPOST",
+      "VIETTEL_POST",
+      "VTP",
+      "AHAMOVE",
+    ].includes(snapshotPartner);
+
+    if (
+      mode === "ship" &&
+      !frontendWillCreateCarrierShipment &&
+      !this.isPickupLikeOrder(body, body?.salesChannel)
+    ) {
       await this.createShipmentIfNeeded(createdOrder, body);
 
       // createShipmentIfNeeded gọi ShipmentService để tạo vận đơn và service đã set:

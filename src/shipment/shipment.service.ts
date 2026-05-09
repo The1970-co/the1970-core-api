@@ -21,7 +21,7 @@ export class ShipmentService {
     private readonly ahamoveClient: AhamoveClient,
     private readonly viettelPostClient: ViettelPostClient,
     private readonly authTotpService: AuthTotpService
-  ) {}
+  ) { }
 
   private readonly fromDistrictId = Number(process.env.GHN_FROM_DISTRICT_ID || 0);
   private readonly fromWardCode = process.env.GHN_FROM_WARD_CODE || "";
@@ -328,7 +328,18 @@ export class ShipmentService {
     }
 
     if (!shipment.trackingCode && !shipment.ahamoveOrderId) {
-      throw new BadRequestException("Phiếu giao hàng chưa có mã vận đơn");
+      return {
+        source: "pending",
+        cached: false,
+        shipment: {
+          id: shipment.id,
+          carrier: shipment.carrier,
+          shippingStatus: "PENDING_SYNC",
+          partnerStatus: "Đang đồng bộ vận đơn",
+        },
+        tracking: null,
+        timeline: [],
+      };
     }
 
     const latestCache = shipment.trackingCaches?.[0];
@@ -362,7 +373,34 @@ export class ShipmentService {
     const isViettelPost = carrierUpper.includes("VIETTEL");
 
     if (isViettelPost) {
-      await this.trackViettelPostByShipmentId(shipment.id);
+      try {
+        await this.trackViettelPostByShipmentId(shipment.id);
+      } catch (error) {
+        this.logger.warn(
+          `[TRACKING_PENDING] ${shipment.id} | ${error instanceof Error ? error.message : error
+          }`
+        );
+
+        return {
+          source: "pending_sync",
+          cached: false,
+          shipment: {
+            id: shipment.id,
+            trackingCode: shipment.trackingCode,
+            carrier: "VIETTELPOST",
+            shippingStatus: shipment.shippingStatus || "CREATED",
+            partnerStatus: "ViettelPost đang đồng bộ hành trình",
+          },
+          tracking: {
+            carrier: "VIETTELPOST",
+            trackingCode: shipment.trackingCode,
+            shippingStatus: shipment.shippingStatus || "CREATED",
+            partnerStatus: "ViettelPost đang đồng bộ hành trình",
+            timeline: [],
+          },
+          timeline: [],
+        };
+      }
 
       const updated = await this.prisma.shipment.findUnique({ where: { id: shipment.id } });
       const timeline = await (this.prisma as any).shipmentTimelineEvent.findMany({
@@ -512,11 +550,11 @@ export class ShipmentService {
           codAmount: Number(shipment.codAmount || raw?.cod || raw?.data?.cod || 0),
           shippingFee: Number(
             shipment.shippingFee ||
-              raw?.total_fee ||
-              raw?.totalFee ||
-              raw?.data?.total_fee ||
-              raw?.data?.totalFee ||
-              0
+            raw?.total_fee ||
+            raw?.totalFee ||
+            raw?.data?.total_fee ||
+            raw?.data?.totalFee ||
+            0
           ),
           updatedAt:
             raw?.updated_at ||
@@ -703,15 +741,15 @@ export class ShipmentService {
             dto.items && dto.items.length > 0
               ? dto.items
               : [
-                  {
-                    name: "Default item",
-                    quantity: 1,
-                    length: dto.length,
-                    width: dto.width,
-                    height: dto.height,
-                    weight: dto.weight,
-                  },
-                ];
+                {
+                  name: "Default item",
+                  quantity: 1,
+                  length: dto.length,
+                  width: dto.width,
+                  height: dto.height,
+                  weight: dto.weight,
+                },
+              ];
         }
 
         const fee = await this.ghnClient.calculateFee(feePayload);
@@ -1050,71 +1088,71 @@ export class ShipmentService {
       throw new BadRequestException("COD không hợp lệ");
     }
 
-const adminActor = await this.prisma.adminUser.findUnique({
-  where: { id: user.id || user.sub },
-  select: {
-    id: true,
-    role: true,
-    fullName: true,
-  },
-});
+    const adminActor = await this.prisma.adminUser.findUnique({
+      where: { id: user.id || user.sub },
+      select: {
+        id: true,
+        role: true,
+        fullName: true,
+      },
+    });
 
-let actorRole = "";
-let actorName = "";
+    let actorRole = "";
+    let actorName = "";
 
-if (adminActor) {
-  actorRole = String(adminActor.role || "").toLowerCase();
-  actorName = adminActor.fullName || adminActor.id;
-} else {
-  const staffActor = await this.prisma.staffUser.findUnique({
-    where: { id: user.id || user.sub },
-    select: {
-      id: true,
-      role: true,
-      name: true,
-    },
-  });
+    if (adminActor) {
+      actorRole = String(adminActor.role || "").toLowerCase();
+      actorName = adminActor.fullName || adminActor.id;
+    } else {
+      const staffActor = await this.prisma.staffUser.findUnique({
+        where: { id: user.id || user.sub },
+        select: {
+          id: true,
+          role: true,
+          name: true,
+        },
+      });
 
-  actorRole = String(staffActor?.role || "").toLowerCase();
-  actorName = staffActor?.name || staffActor?.id || "";
-}
+      actorRole = String(staffActor?.role || "").toLowerCase();
+      actorName = staffActor?.name || staffActor?.id || "";
+    }
 
-console.log("verifyAndUpdateCod actorRole =", actorRole, "user =", user);
+    console.log("verifyAndUpdateCod actorRole =", actorRole, "user =", user);
 
-const canEditCod =
-  actorRole === "owner" ||
-  actorRole === "admin" ||
-  actorRole === "fulltime";
+    const canEditCod =
+      actorRole === "owner" ||
+      actorRole === "admin" ||
+      actorRole === "fulltime";
 
-if (!canEditCod) {
-  throw new BadRequestException("Bạn không có quyền sửa COD.");
-}
+    if (!canEditCod) {
+      throw new BadRequestException("Bạn không có quyền sửa COD.");
+    }
 
     let approveInfo: any;
 
-try {
-  approveInfo = await this.authTotpService.verifyOwnerCode(code);
-  console.log("verifyOwnerCode passed", approveInfo);
-} catch (error) {
-  console.error("verifyOwnerCode failed", error);
-  throw error;
-}
+    try {
+      approveInfo = await this.authTotpService.verifyOwnerCode(code);
+      console.log("verifyOwnerCode passed", approveInfo);
+    } catch (error) {
+      console.error("verifyOwnerCode failed", error);
+      throw error;
+    }
 
     const oldCod = Number(order!.shipment!.codAmount || 0);
 
     try {
-  console.log("calling ghnClient.updateCod", {
-    trackingCode: order!.shipment!.trackingCode,
-    nextCod,
-  });
+      console.log("calling ghnClient.updateCod", {
+        trackingCode: order!.shipment!.trackingCode,
+        nextCod,
+      });
 
-  await this.ghnClient.updateCod(order!.shipment!.trackingCode!, nextCod);
+      await this.ghnClient.updateCod(order!.shipment!.trackingCode!, nextCod);
 
-  console.log("ghnClient.updateCod passed");
-} catch (error) {
-  console.error("ghnClient.updateCod failed", error);
-  throw error;
-}
+      console.log("ghnClient.updateCod passed");
+    } catch (error) {
+      console.error("ghnClient.updateCod failed", error);
+      throw error;
+    }
 
     await this.prisma.shipment.update({
       where: { id: order!.shipment!.id },
@@ -1123,9 +1161,9 @@ try {
       },
     });
 
-this.logger.warn(
-  `[COD_UPDATE] actor=${actorName} approver=${approveInfo.approverName} order=${orderId} oldCod=${oldCod} newCod=${nextCod}`
-);
+    this.logger.warn(
+      `[COD_UPDATE] actor=${actorName} approver=${approveInfo.approverName} order=${orderId} oldCod=${oldCod} newCod=${nextCod}`
+    );
 
     return {
       ok: true,
@@ -1214,7 +1252,7 @@ this.logger.warn(
     }));
   }
 
-    private getAhamoveOrderId(raw: any) {
+  private getAhamoveOrderId(raw: any) {
     return (
       raw?.order_id ||
       raw?.id ||
@@ -1353,8 +1391,7 @@ this.logger.warn(
         }
       } catch (err) {
         this.logger.warn(
-          `Không lấy được ward ViettelPost districtId=${districtId}: ${
-            err instanceof Error ? err.message : String(err)
+          `Không lấy được ward ViettelPost districtId=${districtId}: ${err instanceof Error ? err.message : String(err)
           }`
         );
       }
@@ -1414,32 +1451,32 @@ this.logger.warn(
   private getViettelPostFee(raw: any) {
     return Number(
       raw?.MONEY_TOTAL ||
-        raw?.money_total ||
-        raw?.total_fee ||
-        raw?.totalFee ||
-        raw?.data?.MONEY_TOTAL ||
-        raw?.data?.money_total ||
-        raw?.data?.total_fee ||
-        raw?.data?.totalFee ||
-        raw?.price ||
-        raw?.data?.price ||
-        0
+      raw?.money_total ||
+      raw?.total_fee ||
+      raw?.totalFee ||
+      raw?.data?.MONEY_TOTAL ||
+      raw?.data?.money_total ||
+      raw?.data?.total_fee ||
+      raw?.data?.totalFee ||
+      raw?.price ||
+      raw?.data?.price ||
+      0
     );
   }
 
   private getViettelPostStatus(raw: any) {
     return String(
       raw?.ORDER_STATUS ||
-        raw?.ORDER_STATUS_NAME ||
-        raw?.STATUS_NAME ||
-        raw?.status_name ||
-        raw?.status ||
-        raw?.data?.ORDER_STATUS ||
-        raw?.data?.ORDER_STATUS_NAME ||
-        raw?.data?.STATUS_NAME ||
-        raw?.data?.status_name ||
-        raw?.data?.status ||
-        "CREATED"
+      raw?.ORDER_STATUS_NAME ||
+      raw?.STATUS_NAME ||
+      raw?.status_name ||
+      raw?.status ||
+      raw?.data?.ORDER_STATUS ||
+      raw?.data?.ORDER_STATUS_NAME ||
+      raw?.data?.STATUS_NAME ||
+      raw?.data?.status_name ||
+      raw?.data?.status ||
+      "CREATED"
     );
   }
 
@@ -1631,77 +1668,77 @@ this.logger.warn(
   private getViettelPostServiceCode(raw: any) {
     return String(
       raw?.MA_DV_CHINH ||
-        raw?.ORDER_SERVICE ||
-        raw?.SERVICE_CODE ||
-        raw?.service_code ||
-        raw?.serviceCode ||
-        raw?.code ||
-        raw?.MA_DICH_VU ||
-        raw?.SERVICE_ID ||
-        raw?.service_id ||
-        raw?.id ||
-        raw?.data?.MA_DV_CHINH ||
-        raw?.data?.ORDER_SERVICE ||
-        raw?.data?.SERVICE_CODE ||
-        ""
+      raw?.ORDER_SERVICE ||
+      raw?.SERVICE_CODE ||
+      raw?.service_code ||
+      raw?.serviceCode ||
+      raw?.code ||
+      raw?.MA_DICH_VU ||
+      raw?.SERVICE_ID ||
+      raw?.service_id ||
+      raw?.id ||
+      raw?.data?.MA_DV_CHINH ||
+      raw?.data?.ORDER_SERVICE ||
+      raw?.data?.SERVICE_CODE ||
+      ""
     ).toUpperCase();
   }
 
   private getViettelPostServiceName(raw: any) {
     return String(
       raw?.TEN_DICHVU ||
-        raw?.TEN_DICH_VU ||
-        raw?.SERVICE_NAME ||
-        raw?.service_name ||
-        raw?.serviceName ||
-        raw?.name ||
-        raw?.shortName ||
-        raw?.data?.TEN_DICHVU ||
-        raw?.data?.SERVICE_NAME ||
-        ""
+      raw?.TEN_DICH_VU ||
+      raw?.SERVICE_NAME ||
+      raw?.service_name ||
+      raw?.serviceName ||
+      raw?.name ||
+      raw?.shortName ||
+      raw?.data?.TEN_DICHVU ||
+      raw?.data?.SERVICE_NAME ||
+      ""
     );
   }
 
   private getViettelPostQuoteFee(raw: any) {
     return Number(
       raw?.GIA_CUOC ||
-        raw?.MONEY_TOTAL ||
-        raw?.money_total ||
-        raw?.MONEY_TOTAL_OLD ||
-        raw?.money_total_old ||
-        raw?.MONEY_TOTAL_FEE ||
-        raw?.money_total_fee ||
-        raw?.TOTAL_FEE ||
-        raw?.total_fee ||
-        raw?.totalFee ||
-        raw?.fee ||
-        raw?.price ||
-        raw?.data?.GIA_CUOC ||
-        raw?.data?.MONEY_TOTAL ||
-        raw?.data?.TOTAL_FEE ||
-        0
+      raw?.MONEY_TOTAL ||
+      raw?.money_total ||
+      raw?.MONEY_TOTAL_OLD ||
+      raw?.money_total_old ||
+      raw?.MONEY_TOTAL_FEE ||
+      raw?.money_total_fee ||
+      raw?.TOTAL_FEE ||
+      raw?.total_fee ||
+      raw?.totalFee ||
+      raw?.fee ||
+      raw?.price ||
+      raw?.data?.GIA_CUOC ||
+      raw?.data?.MONEY_TOTAL ||
+      raw?.data?.TOTAL_FEE ||
+      0
     );
   }
 
   private getViettelPostQuoteLeadtime(raw: any) {
     return String(
       raw?.THOI_GIAN ||
-        raw?.LEADTIME ||
-        raw?.leadtime ||
-        raw?.time ||
-        raw?.data?.THOI_GIAN ||
-        ""
+      raw?.LEADTIME ||
+      raw?.leadtime ||
+      raw?.time ||
+      raw?.data?.THOI_GIAN ||
+      ""
     );
   }
 
   private normalizeViettelPostInventory(raw: any) {
     const groupAddressId = Number(
       raw?.group_address_id ||
-        raw?.groupAddressId ||
-        raw?.GROUPADDRESS_ID ||
-        raw?.GROUP_ADDRESS_ID ||
-        raw?.id ||
-        0
+      raw?.groupAddressId ||
+      raw?.GROUPADDRESS_ID ||
+      raw?.GROUP_ADDRESS_ID ||
+      raw?.id ||
+      0
     );
 
     return {
@@ -1750,11 +1787,11 @@ this.logger.warn(
   private async getViettelSenderConfig(input?: any) {
     const senderGroupAddressId = Number(
       input?.senderGroupAddressId ||
-        input?.groupAddressId ||
-        input?.GROUPADDRESS_ID ||
-        process.env.VIETTELPOST_SENDER_GROUP_ADDRESS_ID ||
-        process.env.VIETTELPOST_GROUPADDRESS_ID ||
-        0
+      input?.groupAddressId ||
+      input?.GROUPADDRESS_ID ||
+      process.env.VIETTELPOST_SENDER_GROUP_ADDRESS_ID ||
+      process.env.VIETTELPOST_GROUPADDRESS_ID ||
+      0
     );
 
     if (senderGroupAddressId) {
@@ -1975,9 +2012,8 @@ this.logger.warn(
       rows.push({
         serviceId: 0,
         serviceTypeId: rows.length + 1,
-        shortName: `Viettel Post - ${
-          serviceName || this.viettelPostServiceLabel(serviceCode)
-        }`,
+        shortName: `Viettel Post - ${serviceName || this.viettelPostServiceLabel(serviceCode)
+          }`,
         fee: {
           total: fee,
           total_fee: fee,
@@ -2027,8 +2063,7 @@ this.logger.warn(
         sender.districtId || 0
       )}/${Number(sender.wardId || 0) || ""} receiver=${Number(
         resolvedAny.provinceId || 0
-      )}/${Number(resolvedAny.districtId || resolvedAny.districtValue || 0)}/${
-        Number(resolvedAny.wardId || 0) || ""
+      )}/${Number(resolvedAny.districtId || resolvedAny.districtValue || 0)}/${Number(resolvedAny.wardId || 0) || ""
       } text="${receiverAddressText}"`
     );
 
@@ -2207,21 +2242,21 @@ this.logger.warn(
       const resolved =
         dto?.receiverProvinceId && dto?.receiverDistrictId
           ? {
-              provinceId: Number(dto.receiverProvinceId),
-              districtId: Number(dto.receiverDistrictId),
-              wardId: Number(dto.receiverWardId || 0) || undefined,
-            }
+            provinceId: Number(dto.receiverProvinceId),
+            districtId: Number(dto.receiverDistrictId),
+            wardId: Number(dto.receiverWardId || 0) || undefined,
+          }
           : await this.resolveViettelAddress({
-              province: dto?.toProvince || order.shippingProvince,
-              district: dto?.toDistrict || order.shippingDistrict,
-              ward: dto?.toWard || order.shippingWard,
-            });
+            province: dto?.toProvince || order.shippingProvince,
+            district: dto?.toDistrict || order.shippingDistrict,
+            ward: dto?.toWard || order.shippingWard,
+          });
 
       const serviceCode = String(
         dto?.serviceCode ||
-          dto?.orderService ||
-          process.env.VIETTELPOST_DEFAULT_SERVICE ||
-          "VCN"
+        dto?.orderService ||
+        process.env.VIETTELPOST_DEFAULT_SERVICE ||
+        "VCN"
       );
 
       const codAmount = Math.max(0, Math.round(Number(dto?.codAmount || 0)));
@@ -2249,11 +2284,11 @@ this.logger.warn(
         Array.isArray(dto?.items) && dto.items.length
           ? dto.items
           : (order.items || []).map((item: any) => ({
-              name: item.productName || item.sku || "Sản phẩm",
-              quantity: Number(item.qty || 1),
-              price: Number(item.unitPrice || 0),
-              weight,
-            }));
+            name: item.productName || item.sku || "Sản phẩm",
+            quantity: Number(item.qty || 1),
+            price: Number(item.unitPrice || 0),
+            weight,
+          }));
 
       const payload = {
         ORDER_NUMBER: dto?.clientOrderCode || dto?.orderCode || order.orderCode,
@@ -2565,14 +2600,14 @@ this.logger.warn(
     const requestedServices = Array.isArray(body?.services)
       ? body.services
       : String(
-          body?.services ||
-            body?.serviceIds ||
-            body?.serviceId ||
-            this.getAhamoveDefaultServices().join(",")
-        )
-          .split(",")
-          .map((item) => item.trim())
-          .filter(Boolean);
+        body?.services ||
+        body?.serviceIds ||
+        body?.serviceId ||
+        this.getAhamoveDefaultServices().join(",")
+      )
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
 
     const services = Array.from(
       new Set(
@@ -2622,11 +2657,11 @@ this.logger.warn(
       remarks: body?.note || "",
       items: Array.isArray(body?.items)
         ? body.items.map((item: any, index: number) => ({
-            _id: String(item?._id || item?.id || index + 1),
-            name: item?.name || "Sản phẩm",
-            num: Number(item?.num || item?.quantity || 1),
-            price: Number(item?.price || 0),
-          }))
+          _id: String(item?._id || item?.id || index + 1),
+          name: item?.name || "Sản phẩm",
+          num: Number(item?.num || item?.quantity || 1),
+          price: Number(item?.price || 0),
+        }))
         : [],
       package_detail: [
         {
@@ -2748,17 +2783,17 @@ this.logger.warn(
       const items =
         Array.isArray(dto?.items) && dto.items.length
           ? dto.items.map((item: any, index: number) => ({
-              _id: String(item?._id || item?.id || index + 1),
-              name: item?.name || "Sản phẩm",
-              num: Number(item?.num || item?.quantity || 1),
-              price: Number(item?.price || 0),
-            }))
+            _id: String(item?._id || item?.id || index + 1),
+            name: item?.name || "Sản phẩm",
+            num: Number(item?.num || item?.quantity || 1),
+            price: Number(item?.price || 0),
+          }))
           : (order.items || []).map((item: any, index: number) => ({
-              _id: String(item?.sku || item?.variantId || index + 1),
-              name: item.productName || item.sku || "Sản phẩm",
-              num: Number(item.qty || 1),
-              price: Number(item.unitPrice || 0),
-            }));
+            _id: String(item?.sku || item?.variantId || index + 1),
+            name: item.productName || item.sku || "Sản phẩm",
+            num: Number(item.qty || 1),
+            price: Number(item.unitPrice || 0),
+          }));
 
       const payload = {
         service_id: serviceId,
@@ -3102,10 +3137,10 @@ this.logger.warn(
           ahamoveOrderId,
           serviceId: String(
             body?.service_id ||
-              body?.serviceId ||
-              body?.data?.service_id ||
-              body?.data?.serviceId ||
-              ""
+            body?.serviceId ||
+            body?.data?.service_id ||
+            body?.data?.serviceId ||
+            ""
           ) || null,
           status: ahamoveStatus,
           subStatus,
@@ -3125,10 +3160,10 @@ this.logger.warn(
           ahamoveOrderId,
           serviceId: String(
             body?.service_id ||
-              body?.serviceId ||
-              body?.data?.service_id ||
-              body?.data?.serviceId ||
-              ""
+            body?.serviceId ||
+            body?.data?.service_id ||
+            body?.data?.serviceId ||
+            ""
           ) || null,
           status: ahamoveStatus,
           subStatus,
@@ -3145,8 +3180,7 @@ this.logger.warn(
       });
     } catch (error) {
       this.logger.warn(
-        `[AHAMOVE_WEBHOOK] cannot sync AhamoveShipment table: ${
-          error instanceof Error ? error.message : String(error)
+        `[AHAMOVE_WEBHOOK] cannot sync AhamoveShipment table: ${error instanceof Error ? error.message : String(error)
         }`
       );
     }

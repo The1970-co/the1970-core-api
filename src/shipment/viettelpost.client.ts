@@ -18,12 +18,23 @@ export class ViettelPostClient {
   private tokenCache: {
     token: string;
     expiresAt: number;
+    source: string;
   } | null = null;
 
   private endpoint(name: string, fallback: string) {
     const key = `VIETTELPOST_${name}_PATH`;
     const raw = process.env[key] || fallback;
     return raw.startsWith("/") ? raw : `/${raw}`;
+  }
+
+  private stripBearer(raw?: string | null) {
+    return String(raw || "")
+      .replace(/^Bearer\s+/i, "")
+      .trim();
+  }
+
+  private looksLikeJwt(token: string) {
+    return token.split(".").length === 3;
   }
 
   private get username() {
@@ -34,8 +45,23 @@ export class ViettelPostClient {
     return process.env.VIETTELPOST_PASSWORD || "";
   }
 
-  private get staticToken() {
-    return process.env.VIETTELPOST_TOKEN || "";
+  private get longLivedToken() {
+    return this.stripBearer(
+      process.env.VIETTELPOST_ACCOUNT_TOKEN ||
+        process.env.VIETTELPOST_ACCESS_TOKEN ||
+        process.env.VIETTELPOST_LONG_TOKEN ||
+        ""
+    );
+  }
+
+  private get webToken() {
+    return this.stripBearer(
+      process.env.VIETTELPOST_WEB_TOKEN ||
+        process.env.VIETTELPOST_SECRET_TOKEN ||
+        process.env.VIETTELPOST_PARTNER_TOKEN ||
+        process.env.VIETTELPOST_TOKEN ||
+        ""
+    );
   }
 
   private normalizeResponse(data: any) {
@@ -50,9 +76,25 @@ export class ViettelPostClient {
     return data?.data ?? data;
   }
 
-  private async request<T = any>(
+  private extractToken(data: any) {
+    const normalized = data?.data ?? data;
+
+    return this.stripBearer(
+      normalized?.token ||
+        normalized?.TOKEN ||
+        normalized?.access_token ||
+        normalized?.accessToken ||
+        data?.token ||
+        data?.TOKEN ||
+        data?.access_token ||
+        data?.accessToken ||
+        ""
+    );
+  }
+
+  private async rawRequest<T = any>(
     path: string,
-    options: ViettelPostRequestOptions = {}
+    options: ViettelPostRequestOptions & { token?: string } = {}
   ): Promise<T> {
     const method = options.method || "GET";
     const headers: Record<string, string> = {
@@ -60,28 +102,26 @@ export class ViettelPostClient {
       "Content-Type": "application/json",
     };
 
-    if (options.auth !== false) {
-      const token = await this.getToken();
-      if (token) {
-        headers.Token = token;
-        headers.Authorization = `Bearer ${token}`;
-      }
+    const token = this.stripBearer(options.token);
+    if (token) {
+      headers.Token = token;
     }
 
     const url = `${this.baseUrl}${path}`;
+    const body =
+      method === "GET" || options.body === undefined
+        ? undefined
+        : JSON.stringify(options.body);
 
     const res = await fetch(url, {
       method,
       headers,
-      body:
-        method === "GET" || options.body === undefined
-          ? undefined
-          : JSON.stringify(options.body),
+      body,
     });
 
     const text = await res.text();
-    let data: any = null;
 
+    let data: any = null;
     try {
       data = text ? JSON.parse(text) : null;
     } catch {
@@ -90,7 +130,9 @@ export class ViettelPostClient {
 
     if (!res.ok) {
       this.logger.error(
-        `[VIETTELPOST ERROR] ${path} | status=${res.status} | response=${text}`
+        `[VIETTELPOST ERROR] ${path} | status=${res.status} | tokenTail=${
+          token ? token.slice(-6) : "none"
+        } | response=${text}`
       );
 
       throw new BadRequestException(
@@ -101,21 +143,67 @@ export class ViettelPostClient {
       );
     }
 
+    return data as T;
+  }
+
+  private async request<T = any>(
+    path: string,
+    options: ViettelPostRequestOptions = {}
+  ): Promise<T> {
+    const token = options.auth === false ? "" : await this.getToken();
+
+    const data = await this.rawRequest<any>(path, {
+      ...options,
+      token,
+    });
+
     return this.normalizeResponse(data) as T;
   }
 
-  async login() {
-    if (this.staticToken) return this.staticToken;
+  private async loginVtpWithWebToken() {
+    const tokenFromWeb = this.webToken;
 
+    if (!tokenFromWeb) {
+      throw new BadRequestException(
+        "Thiếu VIETTELPOST_WEB_TOKEN hoặc VIETTELPOST_TOKEN"
+      );
+    }
+
+    const loginVtpPath = this.endpoint("LOGIN_VTP", "/user/LoginVTP");
+
+    const data: any = await this.rawRequest(loginVtpPath, {
+      method: "POST",
+      auth: false,
+      body: {
+        token: tokenFromWeb,
+      },
+    });
+
+    const apiToken = this.extractToken(data);
+
+    if (!apiToken) {
+      throw new BadRequestException("ViettelPost LoginVTP không trả về token");
+    }
+
+    this.logger.log(
+      `[VIETTELPOST_LOGIN_VTP] ok | webTail=${tokenFromWeb.slice(
+        -6
+      )} | apiTail=${apiToken.slice(-6)}`
+    );
+
+    return apiToken;
+  }
+
+  private async loginByUsernamePassword() {
     if (!this.username || !this.password) {
       throw new BadRequestException(
-        "Thiếu VIETTELPOST_USERNAME / VIETTELPOST_PASSWORD hoặc VIETTELPOST_TOKEN"
+        "Thiếu VIETTELPOST_USERNAME / VIETTELPOST_PASSWORD"
       );
     }
 
     const loginPath = this.endpoint("LOGIN", "/user/Login");
 
-    const res: any = await this.request(loginPath, {
+    const loginData: any = await this.rawRequest(loginPath, {
       method: "POST",
       auth: false,
       body: {
@@ -126,34 +214,77 @@ export class ViettelPostClient {
       },
     });
 
-    const token =
-      res?.token ||
-      res?.TOKEN ||
-      res?.access_token ||
-      res?.data?.token ||
-      res?.data?.TOKEN ||
-      "";
+    const shortToken = this.extractToken(loginData);
 
-    if (!token) {
-      throw new BadRequestException("ViettelPost không trả về token đăng nhập");
+    if (!shortToken) {
+      throw new BadRequestException("ViettelPost Login không trả về token ngắn hạn");
     }
 
-    this.tokenCache = {
-      token,
-      expiresAt: Date.now() + 23 * 60 * 60 * 1000,
-    };
+    const ownerConnectPath = this.endpoint("OWNERCONNECT", "/user/ownerconnect");
 
-    return token;
+    const ownerData: any = await this.rawRequest(ownerConnectPath, {
+      method: "POST",
+      auth: false,
+      token: shortToken,
+      body: {
+        USERNAME: this.username,
+        PASSWORD: this.password,
+        username: this.username,
+        password: this.password,
+      },
+    });
+
+    const longToken = this.extractToken(ownerData);
+
+    if (!longToken) {
+      throw new BadRequestException(
+        "ViettelPost ownerconnect không trả về token dài hạn"
+      );
+    }
+
+    this.logger.log(
+      `[VIETTELPOST_OWNERCONNECT] ok | shortTail=${shortToken.slice(
+        -6
+      )} | longTail=${longToken.slice(-6)}`
+    );
+
+    return longToken;
+  }
+
+  async login() {
+    if (this.longLivedToken) {
+      return this.longLivedToken;
+    }
+
+    const legacyToken = this.webToken;
+
+    if (legacyToken && this.looksLikeJwt(legacyToken)) {
+      return legacyToken;
+    }
+
+    if (legacyToken) {
+      return this.loginVtpWithWebToken();
+    }
+
+    return this.loginByUsernamePassword();
   }
 
   async getToken() {
-    if (this.staticToken) return this.staticToken;
+    if (this.longLivedToken) return this.longLivedToken;
 
     if (this.tokenCache && this.tokenCache.expiresAt > Date.now()) {
       return this.tokenCache.token;
     }
 
-    return this.login();
+    const token = await this.login();
+
+    this.tokenCache = {
+      token,
+      source: this.looksLikeJwt(this.webToken) ? "env-jwt" : "login",
+      expiresAt: Date.now() + 12 * 60 * 60 * 1000,
+    };
+
+    return token;
   }
 
   listProvinces() {
