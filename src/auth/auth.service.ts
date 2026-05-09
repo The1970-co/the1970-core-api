@@ -29,7 +29,7 @@ export class AuthService {
       throw new UnauthorizedException("Tài khoản không hợp lệ.");
     }
 
-    return user;
+    return this.syncPermissionsForAuthUser(user);
   }
 
   private normalizeRole(role: any) {
@@ -48,6 +48,321 @@ export class AuthService {
     return Array.from(
       new Set([...rolesFromRelation, legacyRole].filter(Boolean))
     );
+  }
+
+
+  private shouldAutoRefreshPermissionRow(row: any) {
+    const keys = Array.isArray(row?.permissionKeys)
+      ? row.permissionKeys.map((key: any) => String(key || "").trim()).filter(Boolean)
+      : [];
+
+    const note = String(row?.note || "").toLowerCase();
+
+    // Không tự ghi đè dòng quyền đã lưu tay từ UI.
+    // Chỉ backfill dòng cũ/trống hoặc dòng sinh tự động để tránh bung menu sau deploy.
+    return keys.length === 0 || note.includes("auto generated") || note.includes("auto synced");
+  }
+
+  private legacyPermissionRowForRole(roleCode: string) {
+    const role = this.normalizeRole(roleCode || "retail-staff");
+
+    const base: Record<string, any> = {
+      canView: false,
+      canSell: false,
+      canViewOwnOrders: false,
+      canViewBranchOrders: false,
+      canCreateOrder: false,
+      canApproveOrder: false,
+      canCancelOrder: false,
+      canHandleReturn: false,
+      canViewStock: false,
+      canManageStock: false,
+      canStocktake: false,
+      canTransferStock: false,
+      canReceiveStock: false,
+      canViewCustomer: false,
+      canEditCustomer: false,
+      canExportProductExcel: false,
+      canImportProductExcel: false,
+      canExportOrderExcel: false,
+      canExportInventoryExcel: false,
+      canExportCustomerExcel: false,
+      canViewReport: false,
+      canViewMoney: false,
+    };
+
+    if (role === "owner" || role === "admin" || role === "branch-manager") {
+      Object.keys(base).forEach((key) => (base[key] = true));
+    } else if (role === "fulltime") {
+      Object.assign(base, {
+        canView: true,
+        canSell: true,
+        canViewOwnOrders: true,
+        canCreateOrder: true,
+        canHandleReturn: true,
+        canViewStock: true,
+        canStocktake: true,
+        canTransferStock: true,
+        canReceiveStock: true,
+        canViewCustomer: true,
+      });
+    } else if (role === "retail-staff") {
+      Object.assign(base, {
+        canView: true,
+        canSell: true,
+        canViewOwnOrders: true,
+        canCreateOrder: true,
+        canHandleReturn: true,
+        canViewStock: true,
+        canViewCustomer: true,
+      });
+    } else if (role === "stock-auditor") {
+      Object.assign(base, {
+        canView: true,
+        canViewStock: true,
+        canStocktake: true,
+      });
+    } else if (role === "stock-staff") {
+      Object.assign(base, {
+        canView: true,
+        canViewStock: true,
+        canManageStock: true,
+        canStocktake: true,
+        canTransferStock: true,
+        canReceiveStock: true,
+      });
+    }
+
+    return {
+      ...base,
+      permissionKeys: this.permissionKeysFromPermissionRow(base),
+    };
+  }
+
+  private permissionKeyForTemplateLabel(groupKey: string, permissionName: string) {
+    const map: Record<string, string> = {
+      "Tổng quan": "menu.dashboard",
+      "Đơn hàng": "menu.orders",
+      "Tạo đơn": "menu.create_order",
+      "POS bán tại quầy": "menu.pos",
+      "Đơn trả hàng": "menu.returns",
+      "Sản phẩm": "menu.products",
+      "Khuyến mại": "menu.promotions",
+      "Danh mục sản phẩm": "menu.product_categories",
+      "Nhà cung cấp": "menu.suppliers",
+      "Khách hàng": "menu.customers",
+      "Kho hàng": "menu.inventory",
+      "Lịch sử kho": "menu.inventory_logs",
+      "Phiếu nhập": "menu.purchase_receipt",
+      "Phiếu chuyển kho": "menu.stock_transfer",
+      "Kiểm kho": "menu.stocktake",
+      "Sơ đồ kho 3D": "menu.warehouse_map",
+      "Tài chính": "menu.finance",
+      "Đối soát vận chuyển": "menu.shipping_reconcile",
+      "Thanh toán nhà cung cấp": "menu.supplier_payments",
+      "Báo cáo": "menu.reports",
+      "Autopilot": "menu.autopilot",
+      "AI Content": "menu.ai_content",
+      "Phân quyền": "menu.permissions",
+      "Cấu hình": "menu.settings",
+      "Xem sản phẩm": "products.view",
+      "Tạo sản phẩm": "products.create",
+      "Sửa sản phẩm": "products.edit",
+      "Xóa sản phẩm": "products.delete",
+      "Sửa giá bán": "products.price.edit",
+      "Xuất file sản phẩm": "products.excel.export",
+      "Nhập file sản phẩm": "products.excel.import",
+      "Xem tồn kho": "inventory.view",
+      "Quản kho": "inventory.manage",
+      "Xem lịch sử kho": "inventory.logs.view",
+      "Xem giá trị tồn kho": "inventory.value.view",
+      "Xem đơn nhập": "purchase_receipt.view",
+      "Tạo đơn nhập": "purchase_receipt.create",
+      "Sửa đơn nhập": "purchase_receipt.edit",
+      "Thanh toán đơn nhập": "purchase_receipt.pay",
+      "Hoàn trả đơn nhập": "purchase_receipt.return",
+      "Kết thúc đơn nhập": "purchase_receipt.close",
+      "Hủy đơn nhập": "purchase_receipt.cancel",
+      "Xuất file đơn nhập": "purchase_receipt.excel.export",
+      "Nhập file đơn nhập": "purchase_receipt.excel.import",
+      "Xem phiếu chuyển": "stock_transfer.view",
+      "Tạo phiếu chuyển": "stock_transfer.create",
+      "Sửa phiếu chuyển": "stock_transfer.edit",
+      "Xác nhận chuyển": "stock_transfer.confirm",
+      "Hủy phiếu chuyển": "stock_transfer.cancel",
+      "Xuất file phiếu chuyển": "stock_transfer.excel.export",
+      "Nhập file phiếu chuyển": "stock_transfer.excel.import",
+      "Xem phiếu kiểm hàng": "stocktake.view",
+      "Tạo phiếu kiểm hàng": "stocktake.create",
+      "Sửa phiếu kiểm hàng": "stocktake.edit",
+      "Xác nhận phiếu kiểm hàng": "stocktake.confirm",
+      "Hủy phiếu kiểm hàng": "stocktake.cancel",
+      "Xóa phiếu kiểm hàng": "stocktake.delete",
+      "Cân bằng kho": "stocktake.apply",
+      "Xuất file phiếu kiểm hàng": "stocktake.excel.export",
+      "Nhập file phiếu kiểm hàng": "stocktake.excel.import",
+      "Bán hàng / POS": "pos.access",
+      "Xem đơn hàng được phụ trách": "orders.view_own",
+      "Xem tất cả đơn hàng": "orders.view",
+      "Tạo đơn hàng": "orders.create",
+      "Sửa đơn hàng": "orders.edit",
+      "Duyệt đơn hàng": "orders.approve",
+      "Hủy đơn hàng": "orders.cancel",
+      "Đóng gói và giao hàng": "orders.pack_ship",
+      "Thanh toán đơn hàng": "orders.pay",
+      "Xuất file đơn hàng": "orders.excel.export",
+      "Nhập file đơn hàng": "orders.excel.import",
+      "Xem đơn trả hàng": "returns.view",
+      "Tạo đơn trả hàng": "returns.create",
+      "Hủy đơn trả hàng": "returns.cancel",
+      "Thanh toán đơn trả": "returns.pay",
+      "Xuất file đơn trả hàng": "returns.excel.export",
+      "Xem khách hàng được phụ trách": "customers.view_own",
+      "Xem tất cả khách hàng": "customers.view",
+      "Tạo khách hàng": "customers.create",
+      "Sửa khách hàng": "customers.edit",
+      "Xóa khách hàng": "customers.delete",
+      "Xuất file khách hàng": "customers.excel.export",
+      "Nhập file khách hàng": "customers.excel.import",
+      "Xem khuyến mãi": "promotions.view",
+      "Tạo khuyến mãi": "promotions.create",
+      "Sửa khuyến mãi": "promotions.edit",
+      "Kích hoạt khuyến mãi": "promotions.activate",
+      "Tạm dừng khuyến mãi": "promotions.pause",
+      "Xóa khuyến mãi": "promotions.delete",
+    };
+
+    if (groupKey === "transfers" && permissionName === "Nhận hàng vào kho") return "stock_transfer.receive";
+    if (groupKey === "returns" && permissionName === "Nhận hàng vào kho") return "returns.receive";
+    if (groupKey === "purchaseReceipts" && permissionName === "Nhận hàng vào kho") return "purchase_receipt.receive";
+
+    return map[permissionName] || `${groupKey}.${String(permissionName || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/đ/g, "d")
+      .replace(/Đ/g, "D")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")}`;
+  }
+
+  private permissionRowFromTemplatePermissions(permissions: any) {
+    const row: any = this.legacyPermissionRowForRole("");
+    Object.keys(row).forEach((key) => {
+      if (key !== "permissionKeys") row[key] = false;
+    });
+
+    const keys: string[] = [];
+    const groups = permissions && typeof permissions === "object" ? permissions : {};
+
+    for (const [groupKey, permissionNames] of Object.entries(groups)) {
+      if (!Array.isArray(permissionNames)) continue;
+      for (const permissionName of permissionNames) {
+        const label = String(permissionName || "");
+        keys.push(this.permissionKeyForTemplateLabel(groupKey, label));
+
+        if (label === "Xem sản phẩm") row.canView = true;
+        if (label === "Bán hàng / POS") row.canSell = true;
+        if (label === "Xem đơn hàng được phụ trách") row.canViewOwnOrders = true;
+        if (label === "Xem tất cả đơn hàng") row.canViewBranchOrders = true;
+        if (label === "Tạo đơn hàng") row.canCreateOrder = true;
+        if (label === "Duyệt đơn hàng") row.canApproveOrder = true;
+        if (label === "Hủy đơn hàng") row.canCancelOrder = true;
+        if (label === "Xem đơn trả hàng" || label === "Tạo đơn trả hàng") row.canHandleReturn = true;
+        if (label === "Xem tồn kho") row.canViewStock = true;
+        if (label === "Quản kho") row.canManageStock = true;
+        if (label.includes("phiếu kiểm hàng")) row.canStocktake = true;
+        if (label.includes("phiếu chuyển") || label === "Xác nhận chuyển") row.canTransferStock = true;
+        if (label === "Nhận hàng vào kho") row.canReceiveStock = true;
+        if (label.includes("khách hàng")) row.canViewCustomer = true;
+        if (label === "Tạo khách hàng" || label === "Sửa khách hàng") row.canEditCustomer = true;
+        if (label === "Xuất file sản phẩm" || label === "Tải Excel sản phẩm") row.canExportProductExcel = true;
+        if (label === "Nhập file sản phẩm") row.canImportProductExcel = true;
+        if (label === "Xuất file đơn hàng" || label === "Tải Excel đơn hàng") row.canExportOrderExcel = true;
+        if (label === "Tải Excel tồn kho") row.canExportInventoryExcel = true;
+        if (label === "Xuất file khách hàng" || label === "Tải Excel khách hàng") row.canExportCustomerExcel = true;
+        if (label.includes("Báo cáo")) row.canViewReport = true;
+        if (label === "Xem giá trị tồn kho") row.canViewMoney = true;
+      }
+    }
+
+    row.permissionKeys = Array.from(new Set(keys.filter(Boolean)));
+    return row;
+  }
+
+  private permissionKeysFromPermissionRow(row: Record<string, any>) {
+    const keys: string[] = [];
+
+    for (const [field, permissionKeys] of Object.entries(this.LEGACY_BOOLEAN_PERMISSION_MAP)) {
+      if (row?.[field]) keys.push(...permissionKeys);
+    }
+
+    if (Array.isArray(row?.permissionKeys)) {
+      keys.push(...row.permissionKeys.map((key: any) => String(key || "").trim()).filter(Boolean));
+    }
+
+    return Array.from(new Set(keys.filter(Boolean)));
+  }
+
+  private async permissionRowForRole(roleCode: string) {
+    const normalized = this.normalizeRole(roleCode || "retail-staff");
+    const template = await this.prisma.staffRoleTemplate.findUnique({
+      where: { roleCode: normalized },
+    });
+
+    if (!template) return this.legacyPermissionRowForRole(normalized);
+    return this.permissionRowFromTemplatePermissions(template.permissions);
+  }
+
+  private async syncPermissionsForAuthUser(user: any) {
+    const branchRoles = Array.isArray(user?.branchRoles) ? user.branchRoles : [];
+    if (!branchRoles.length) return user;
+
+    let changed = false;
+    const existingRows = Array.isArray(user?.branchPermissions) ? user.branchPermissions : [];
+
+    for (const branchRole of branchRoles) {
+      const staffId = String(user.id || "").trim();
+      const branchId = String(branchRole.branchId || "").trim();
+      const roleCode = this.normalizeRole(branchRole.roleCode || user.role || "retail-staff");
+      if (!staffId || !branchId) continue;
+
+      const existing = existingRows.find((row: any) => String(row.branchId) === branchId);
+      if (existing && !this.shouldAutoRefreshPermissionRow(existing)) continue;
+
+      const permissionRow = await this.permissionRowForRole(roleCode);
+
+      await this.prisma.staffBranchPermission.upsert({
+        where: {
+          staffId_branchId: {
+            staffId,
+            branchId,
+          },
+        },
+        create: {
+          staffId,
+          branchId,
+          ...permissionRow,
+          note: `Auto synced from role ${roleCode}`,
+        },
+        update: {
+          ...permissionRow,
+          note: `Auto synced from role ${roleCode}`,
+        },
+      });
+
+      changed = true;
+    }
+
+    if (!changed) return user;
+    return this.prisma.staffUser.findUnique({
+      where: { id: user.id },
+      include: {
+        roles: true,
+        branchRoles: { include: { branch: true } },
+        branchPermissions: true,
+      },
+    });
   }
 
   private readonly LEGACY_BOOLEAN_PERMISSION_MAP: Record<string, string[]> = {

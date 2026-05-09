@@ -193,6 +193,38 @@ export class ShipmentController {
     return this.shipmentService.ghnWards(Number(districtId));
   }
 
+
+  @Post("viettelpost/resolve-address")
+  resolveViettelPostAddress(@Body() body: any) {
+    return this.shipmentService.resolveViettelPostAddress(body);
+  }
+
+  @Post("viettelpost/quote")
+  quoteViettelPost(@Body() body: any) {
+    return this.shipmentService.quoteViettelPost(body);
+  }
+
+  @Post(":orderId/viettelpost/create")
+  createViettelPostShipment(
+    @Param("orderId") orderId: string,
+    @Body() body: any
+  ) {
+    return this.shipmentService.createViettelPostShipment(orderId, body);
+  }
+
+  @Post(":orderId/viettelpost/cancel")
+  cancelViettelPostShipmentByOrderId(
+    @Param("orderId") orderId: string,
+    @Req() req: any
+  ) {
+    return this.shipmentService.cancelViettelPostShipmentByOrderId(orderId, req.user);
+  }
+
+  @Get(":id/viettelpost/tracking")
+  trackViettelPostByShipmentId(@Param("id") id: string) {
+    return this.shipmentService.trackViettelPostByShipmentId(id);
+  }
+
   @Post("ahamove/quote")
   quoteAhamove(@Body() body: any) {
     return this.shipmentService.quoteAhamove(body);

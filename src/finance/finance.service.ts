@@ -572,4 +572,19 @@ export class FinanceService {
       };
     });
   }
+
+  async markLocalDeliveryCodReceived(
+    orderId: string,
+    body: {
+      paymentSourceId?: string;
+      amount?: number;
+      note?: string;
+    } = {}
+  ) {
+    return this.markLocalDeliveryDelivered(orderId, {
+      ...body,
+      collectCod: true,
+    });
+  }
+
 }

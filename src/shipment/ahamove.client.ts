@@ -4,10 +4,10 @@ import { BadRequestException, Injectable, Logger } from "@nestjs/common";
 export class AhamoveClient {
   private readonly logger = new Logger(AhamoveClient.name);
 
-  private readonly apiKey = process.env.AHAMOVE_API_KEY || "";
+  private readonly apiKey = (process.env.AHAMOVE_API_KEY || process.env.AHAMOVE_TOKEN) || "";
 
   private readonly accountPhone =
-    process.env.AHAMOVE_ACCOUNT_PHONE || "";
+    (process.env.AHAMOVE_ACCOUNT_PHONE || process.env.AHAMOVE_PHONE) || "";
 
   private readonly baseUrl =
     process.env.AHAMOVE_BASE_URL ||
@@ -21,7 +21,7 @@ export class AhamoveClient {
     }
 
     if (!this.apiKey) {
-      throw new BadRequestException("Thiếu AHAMOVE_API_KEY");
+      throw new BadRequestException("Thiếu AHAMOVE_API_KEY hoặc AHAMOVE_TOKEN");
     }
 
     if (!this.accountPhone) {

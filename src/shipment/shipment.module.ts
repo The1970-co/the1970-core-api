@@ -3,6 +3,7 @@ import { ShipmentController } from "./shipment.controller";
 import { ShipmentService } from "./shipment.service";
 import { GhnClient } from "./ghn.client";
 import { AhamoveClient } from "./ahamove.client";
+import { ViettelPostClient } from "./viettelpost.client";
 import { AuthTotpModule } from "../auth-totp/auth-totp.module";
 import { AhamoveWebhookController } from "./ahamove-webhook.controller";
 
@@ -11,7 +12,7 @@ import { AhamoveWebhookController } from "./ahamove-webhook.controller";
   AuthTotpModule, // 👈 inject TOTP đúng cách
   ],
   controllers: [ShipmentController, AhamoveWebhookController],
-  providers: [ShipmentService, GhnClient, AhamoveClient],
+  providers: [ShipmentService, GhnClient, AhamoveClient, ViettelPostClient],
   exports: [ShipmentService],
 })
 export class ShipmentModule {}

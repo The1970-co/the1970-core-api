@@ -21,16 +21,6 @@ import { Roles } from "../auth/roles.decorator";
 export class StaffController {
   constructor(private readonly staffService: StaffService) {}
 
-  @Get("role-templates")
-  async getRoleTemplates() {
-    return this.staffService.getRoleTemplates();
-  }
-
-  @Patch("role-templates")
-  async saveRoleTemplates(@Body() dto: any) {
-    return this.staffService.saveRoleTemplates(dto);
-  }
-
   @Get()
   async findAll() {
     return this.staffService.findAll();
@@ -56,6 +46,20 @@ export class StaffController {
   @Patch(":id/branch-roles")
   async updateBranchRoles(@Param("id") id: string, @Body() dto: any) {
     return this.staffService.updateBranchRoles(id, dto);
+  }
+
+  @Post("sync-permissions")
+  async syncPermissions(@Body() dto: { force?: boolean }) {
+    return this.staffService.syncAllPermissionsFromRoleTemplates({
+      force: dto?.force !== false,
+    });
+  }
+
+  @Post(":id/sync-permissions")
+  async syncStaffPermissions(@Param("id") id: string, @Body() dto: { force?: boolean }) {
+    return this.staffService.syncPermissionsForStaff(id, {
+      force: dto?.force !== false,
+    });
   }
 
   @Patch(":id/status")

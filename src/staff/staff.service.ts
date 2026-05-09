@@ -508,6 +508,10 @@ export class StaffService {
       }
     });
 
+    // Sau khi lưu mẫu role vào DB, đồng bộ lại nhân viên đang dùng role đó.
+    // Việc này tránh lỗi deploy/update xong nhân viên cũ vẫn giữ permissionKeys cũ và bung menu.
+    await this.syncAllPermissionsFromRoleTemplates({ force: true });
+
     return this.getRoleTemplates();
   }
 
@@ -887,6 +891,100 @@ export class StaffService {
     });
 
     return this.findOne(staffId);
+  }
+
+
+  private shouldAutoRefreshPermissionRow(row: any, force = false) {
+    if (force) return true;
+
+    const keys = Array.isArray(row?.permissionKeys)
+      ? row.permissionKeys.map((key: any) => String(key || "").trim()).filter(Boolean)
+      : [];
+
+    const note = String(row?.note || "").toLowerCase();
+
+    // Chỉ tự sửa các dòng quyền sinh tự động hoặc dòng cũ chưa có permissionKeys.
+    // Dòng user chỉnh tay từ UI vẫn được giữ nguyên, trừ khi gọi force=true từ lưu mẫu role.
+    return keys.length === 0 || note.includes("auto generated") || note.includes("auto synced");
+  }
+
+  async syncPermissionsForStaff(staffId: string, options: { force?: boolean } = {}) {
+    const staff = await this.prisma.staffUser.findUnique({
+      where: { id: staffId },
+      include: {
+        branchRoles: true,
+        branchPermissions: true,
+      },
+    });
+
+    if (!staff) throw new BadRequestException("Nhân viên không tồn tại");
+
+    const branchRoles = Array.isArray(staff.branchRoles) ? staff.branchRoles : [];
+
+    // Không có branchRoles thì không tự mở quyền gì. Đây là nguyên tắc an toàn:
+    // permission rỗng = không hiện menu, không fallback theo role legacy.
+    if (!branchRoles.length) return this.findOne(staffId);
+
+    await this.assertBranchesExist(branchRoles.map((row: any) => row.branchId));
+
+    await this.prisma.$transaction(async (tx) => {
+      for (const branchRole of branchRoles) {
+        const branchId = String(branchRole.branchId || "").trim();
+        const roleCode = this.validateRole(branchRole.roleCode || staff.role || "retail-staff");
+        if (!branchId) continue;
+
+        const existing = staff.branchPermissions.find(
+          (row: any) => String(row.branchId) === branchId,
+        );
+
+        if (existing && !this.shouldAutoRefreshPermissionRow(existing, Boolean(options.force))) {
+          continue;
+        }
+
+        const permissionRow = await this.permissionsForRole(roleCode, tx);
+
+        await tx.staffBranchPermission.upsert({
+          where: {
+            staffId_branchId: {
+              staffId,
+              branchId,
+            },
+          },
+          create: {
+            staffId,
+            branchId,
+            ...permissionRow,
+            note: `Auto synced from role ${roleCode}`,
+          },
+          update: {
+            ...permissionRow,
+            note: `Auto synced from role ${roleCode}`,
+          },
+        });
+      }
+    });
+
+    return this.findOne(staffId);
+  }
+
+  async syncAllPermissionsFromRoleTemplates(options: { force?: boolean } = {}) {
+    const staffList = await this.prisma.staffUser.findMany({
+      where: { isActive: true },
+      select: { id: true },
+    });
+
+    let synced = 0;
+
+    for (const staff of staffList) {
+      await this.syncPermissionsForStaff(staff.id, options);
+      synced += 1;
+    }
+
+    return {
+      success: true,
+      synced,
+      force: Boolean(options.force),
+    };
   }
 
   async updateStatus(id: string, dto: UpdateStaffStatusDto) {

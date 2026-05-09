@@ -463,20 +463,57 @@ export class ProductService {
     };
   }
 
-  async getProductById(id: string) {
-    return this.prisma.product.findUnique({
-      where: { id },
-      include: {
-        categoryRel: true,
-        variants: {
-          include: {
-            inventoryItems: true,
-          },
-          orderBy: { createdAt: "asc" },
+async getProductById(id: string) {
+  const product = await this.prisma.product.findUnique({
+    where: { id },
+    include: {
+      categoryRel: true,
+      variants: {
+        include: {
+          inventoryItems: true,
         },
+        orderBy: { createdAt: "asc" },
       },
-    });
+    },
+  });
+
+  if (!product) {
+    return null;
   }
+
+  return {
+    ...product,
+    category: product.categoryRel?.name || product.category,
+    variants: product.variants.map((variant) => {
+      const inventoryByBranch = this.buildInventoryByBranch(
+        variant.inventoryItems.map((item) => ({
+          branchId: item.branchId,
+          availableQty: Number(item.availableQty || 0),
+          reservedQty: Number(item.reservedQty || 0),
+          incomingQty: Number(item.incomingQty || 0),
+        })),
+      );
+
+      const stock = variant.inventoryItems.reduce(
+        (sum, item) => sum + Number(item.availableQty || 0),
+        0,
+      );
+
+      const price = Number(variant.price || 0);
+      const costPrice = Number(variant.costPrice || 0);
+
+      return {
+        ...variant,
+        price,
+        costPrice,
+        stock,
+        inventoryByBranch,
+        inventorySaleValue: price * stock,
+        inventoryCostValue: costPrice * stock,
+      };
+    }),
+  };
+}
 async getMissingCostProducts() {
   const variants = await this.prisma.productVariant.findMany({
     where: {

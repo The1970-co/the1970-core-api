@@ -122,8 +122,8 @@ export class OrderService {
     // ✅ Fallback cho dữ liệu legacy chưa migrate permissionKeys.
     const branchPermission = Array.isArray(user?.branchPermissions)
       ? user.branchPermissions.find(
-          (p: any) => !branchId || String(p?.branchId) === String(branchId)
-        )
+        (p: any) => !branchId || String(p?.branchId) === String(branchId)
+      )
       : null;
 
     if (permission === "orders.view") {
@@ -247,42 +247,43 @@ export class OrderService {
     );
   }
 
-private ensureShipModePayload(body: any, branchId?: string | null) {
-  const snapshot = body?.shippingSnapshot;
+  private ensureShipModePayload(body: any, branchId?: string | null) {
+    const snapshot = body?.shippingSnapshot;
 
-  if (!branchId) {
-    throw new BadRequestException("Thiếu chi nhánh xuất kho.");
-  }
+    if (!branchId) {
+      throw new BadRequestException("Thiếu chi nhánh xuất kho.");
+    }
 
-  if (!snapshot) {
-    throw new BadRequestException("Thiếu shippingSnapshot để xuất kho.");
-  }
+    if (!snapshot) {
+      throw new BadRequestException("Thiếu shippingSnapshot để xuất kho.");
+    }
 
-  if (!snapshot.shippingAddressLine1) {
-    throw new BadRequestException("Thiếu địa chỉ giao hàng.");
-  }
+    if (!snapshot.shippingAddressLine1) {
+      throw new BadRequestException("Thiếu địa chỉ giao hàng.");
+    }
 
-  if (!snapshot.shippingRecipientName) {
-    throw new BadRequestException("Thiếu tên người nhận.");
-  }
+    if (!snapshot.shippingRecipientName) {
+      throw new BadRequestException("Thiếu tên người nhận.");
+    }
 
-  if (!snapshot.shippingPhone) {
-    throw new BadRequestException("Thiếu số điện thoại người nhận.");
-  }
+    if (!snapshot.shippingPhone) {
+      throw new BadRequestException("Thiếu số điện thoại người nhận.");
+    }
 
-  const shippingPartner = String(
-    snapshot.shippingPartner || "GHN"
-  ).toUpperCase();
+    const shippingPartner = String(
+      snapshot.shippingPartner || "GHN"
+    ).toUpperCase();
 
-  // ✅ Chỉ GHN mới bắt district + ward code
-  if (shippingPartner === "GHN") {
-    if (!snapshot.ghnDistrictId || !snapshot.ghnWardCode) {
-      throw new BadRequestException(
-        "Địa chỉ chưa có mã GHN (ghnDistrictId / ghnWardCode)."
-      );
+    // ✅ Chỉ GHN mới bắt district + ward code
+    if (shippingPartner === "GHN") {
+      if (!snapshot.ghnDistrictId || !snapshot.ghnWardCode) {
+        throw new BadRequestException(
+          "Địa chỉ chưa có mã GHN (ghnDistrictId / ghnWardCode)."
+        );
+      }
     }
   }
-}
+
   private async logInventoryMovement(
     tx: TxClient,
     input: {
@@ -379,9 +380,12 @@ private ensureShipModePayload(body: any, branchId?: string | null) {
         throw new BadRequestException(`Số lượng không hợp lệ cho ${variant.sku}`);
       }
 
+      // ✅ CHO PHÉP XUẤT ÂM
+      // chỉ cảnh báo log, không block
+
       if (availableQty < neededQty) {
-        throw new BadRequestException(
-          `Không đủ tồn kho cho ${variant.sku}. Còn ${availableQty}, cần ${neededQty}`
+        console.warn(
+          `[ALLOW_NEGATIVE_STOCK] ${variant.sku} | available=${availableQty} | needed=${neededQty}`
         );
       }
 
@@ -488,9 +492,9 @@ private ensureShipModePayload(body: any, branchId?: string | null) {
       customerPhone: order.customerPhone || order.customer?.phone || "—",
       itemCount: Array.isArray(order.items)
         ? order.items.reduce(
-            (sum: number, item: any) => sum + Number(item.qty || item.quantity || 1),
-            0
-          )
+          (sum: number, item: any) => sum + Number(item.qty || item.quantity || 1),
+          0
+        )
         : Number(order.itemCount || 0),
       items: Array.isArray(order.items)
         ? order.items.map((item: any) => ({
@@ -575,6 +579,28 @@ private ensureShipModePayload(body: any, branchId?: string | null) {
         price: this.toNumber(item.unitPrice),
       }));
 
+      const paidAmount = Array.isArray(order?.payments)
+        ? order.payments.reduce(
+          (sum: number, payment: any) => {
+            const sourceType = String(
+              payment?.paymentSource?.type || payment?.sourceType || ""
+            ).toUpperCase();
+
+            if (sourceType === "COD" || payment?.status === PaymentStatus.PENDING_COD) {
+              return sum;
+            }
+
+            return sum + this.toNumber(payment?.amount);
+          },
+          0
+        )
+        : 0;
+
+      const remainingCodAmount = Math.max(
+        0,
+        Math.round(this.toNumber(order.finalAmount) - paidAmount)
+      );
+
       return this.shipmentService.createAhamoveShipment(order.id, {
         fromName: process.env.AHAMOVE_FROM_NAME || "The 1970",
         fromPhone: process.env.AHAMOVE_FROM_PHONE || "",
@@ -584,7 +610,7 @@ private ensureShipModePayload(body: any, branchId?: string | null) {
         toPhone: snapshot.shippingPhone,
         toAddress: snapshot.shippingAddressLine1,
 
-        codAmount: this.toNumber(order.finalAmount),
+        codAmount: remainingCodAmount,
         items: ahamoveItems,
       });
     }
@@ -817,19 +843,19 @@ private ensureShipModePayload(body: any, branchId?: string | null) {
         );
         const autoPromotionNote = Array.isArray(promotionResult.appliedPromotions)
           ? promotionResult.appliedPromotions
-              .map((promotion: any) => `${promotion.name}: ${Number(promotion.discountAmount || 0).toLocaleString("vi-VN")}đ`)
-              .join(", ")
+            .map((promotion: any) => `${promotion.name}: ${Number(promotion.discountAmount || 0).toLocaleString("vi-VN")}đ`)
+            .join(", ")
           : "";
         const discountAmountNumber = manualDiscountAmountNumber + autoDiscountAmountNumber;
         const requestedShippingFeeNumber = this.toNumber(
           body.shippingFee ??
-            body.shipFee ??
-            body.deliveryFee ??
-            body.shippingSnapshot?.shippingFee ??
-            body.shippingSnapshot?.shipFee ??
-            body.shippingSnapshot?.fee ??
-            body.shippingSnapshot?.serviceFee ??
-            0
+          body.shipFee ??
+          body.deliveryFee ??
+          body.shippingSnapshot?.shippingFee ??
+          body.shippingSnapshot?.shipFee ??
+          body.shippingSnapshot?.fee ??
+          body.shippingSnapshot?.serviceFee ??
+          0
         );
 
         const shippingFeeNumber = requestedShippingFeeNumber;
@@ -863,19 +889,19 @@ private ensureShipModePayload(body: any, branchId?: string | null) {
           .map((paymentInput: any) => ({
             paymentSourceId:
               paymentInput?.paymentSourceId ||
-              paymentInput?.sourceId ||
-              paymentInput?.id
+                paymentInput?.sourceId ||
+                paymentInput?.id
                 ? String(
-                    paymentInput?.paymentSourceId ||
-                      paymentInput?.sourceId ||
-                      paymentInput?.id
-                  )
+                  paymentInput?.paymentSourceId ||
+                  paymentInput?.sourceId ||
+                  paymentInput?.id
+                )
                 : null,
             amount: Number(
               paymentInput?.amount ??
-                paymentInput?.value ??
-                paymentInput?.paidAmount ??
-                0
+              paymentInput?.value ??
+              paymentInput?.paidAmount ??
+              0
             ),
             note: paymentInput?.note || body.paymentNote || null,
           }))
@@ -897,8 +923,8 @@ private ensureShipModePayload(body: any, branchId?: string | null) {
 
         const paymentSources = paymentSourceIds.length
           ? await tx.paymentSource.findMany({
-              where: { id: { in: paymentSourceIds } },
-            })
+            where: { id: { in: paymentSourceIds } },
+          })
           : [];
 
         const paymentSourceMap = new Map<string, any>(
@@ -1149,10 +1175,10 @@ private ensureShipModePayload(body: any, branchId?: string | null) {
             }),
             customer: customerId
               ? {
-                  id: customerId,
-                  fullName: customerName || null,
-                  phone: customerPhone || null,
-                }
+                id: customerId,
+                fullName: customerName || null,
+                phone: customerPhone || null,
+              }
               : null,
           };
         }
@@ -1347,50 +1373,50 @@ private ensureShipModePayload(body: any, branchId?: string | null) {
       this.prisma.order.count({ where }),
     ]);
 
-const ordersWithAssignedStaff = await this.attachAssignedStaffFields(orders);
+    const ordersWithAssignedStaff = await this.attachAssignedStaffFields(orders);
 
-const data = ordersWithAssignedStaff.map((order) => ({
-  ...order,
-  totalAmount: this.toNumber(order.totalAmount),
-  discountAmount: this.toNumber(order.discountAmount),
-  shippingFee: this.toNumber(order.shippingFee),
-  finalAmount: this.toNumber(order.finalAmount),
-  createdAt: new Date(order.createdAt).toLocaleString("vi-VN"),
-  updatedAt: new Date(order.updatedAt).toLocaleString("vi-VN"),
-  soldAt: order.soldAt ? new Date(order.soldAt).toLocaleString("vi-VN") : null,
-  items: Array.isArray(order.items)
-    ? order.items.map((item: any) => ({
-        ...item,
-        qty: Number(item.qty || 0),
-      }))
-    : [],
-  itemCount: Array.isArray(order.items)
-    ? order.items.reduce(
-        (sum: number, item: any) => sum + Number(item.qty || 0),
-        0
-      )
-    : 0,
-  payments: Array.isArray(order.payments)
-    ? order.payments.map((payment: any) => ({
-        ...payment,
-        amount: this.toNumber(payment.amount),
-        sourceName: payment.paymentSource?.name || payment.method || null,
-        sourceCode: payment.paymentSource?.code || null,
-        sourceType: payment.paymentSource?.type || null,
-        paidAt: payment.paidAt
-          ? new Date(payment.paidAt).toLocaleString("vi-VN")
-          : null,
-      }))
-    : [],
+    const data = ordersWithAssignedStaff.map((order) => ({
+      ...order,
+      totalAmount: this.toNumber(order.totalAmount),
+      discountAmount: this.toNumber(order.discountAmount),
+      shippingFee: this.toNumber(order.shippingFee),
+      finalAmount: this.toNumber(order.finalAmount),
+      createdAt: new Date(order.createdAt).toLocaleString("vi-VN"),
+      updatedAt: new Date(order.updatedAt).toLocaleString("vi-VN"),
+      soldAt: order.soldAt ? new Date(order.soldAt).toLocaleString("vi-VN") : null,
+      items: Array.isArray(order.items)
+        ? order.items.map((item: any) => ({
+          ...item,
+          qty: Number(item.qty || 0),
+        }))
+        : [],
+      itemCount: Array.isArray(order.items)
+        ? order.items.reduce(
+          (sum: number, item: any) => sum + Number(item.qty || 0),
+          0
+        )
+        : 0,
+      payments: Array.isArray(order.payments)
+        ? order.payments.map((payment: any) => ({
+          ...payment,
+          amount: this.toNumber(payment.amount),
+          sourceName: payment.paymentSource?.name || payment.method || null,
+          sourceCode: payment.paymentSource?.code || null,
+          sourceType: payment.paymentSource?.type || null,
+          paidAt: payment.paidAt
+            ? new Date(payment.paidAt).toLocaleString("vi-VN")
+            : null,
+        }))
+        : [],
 
-  shipment: order.shipment
-    ? {
-        ...order.shipment,
-        shippingFee: this.toNumber(order.shipment.shippingFee),
-        codAmount: this.toNumber(order.shipment.codAmount),
-      }
-    : null,
-}));
+      shipment: order.shipment
+        ? {
+          ...order.shipment,
+          shippingFee: this.toNumber(order.shipment.shippingFee),
+          codAmount: this.toNumber(order.shipment.codAmount),
+        }
+        : null,
+    }));
 
     return {
       data,

@@ -58,4 +58,20 @@ export class FinanceController {
   ) {
     return this.financeService.markLocalDeliveryDelivered(orderId, body);
   }
+
+  @Patch("local-delivery-reconciliation/:orderId/cod-received")
+  markLocalDeliveryCodReceived(
+    @Param("orderId") orderId: string,
+    @Body()
+    body: {
+      paymentSourceId?: string;
+      amount?: number;
+      note?: string;
+    }
+  ) {
+    return this.financeService.markLocalDeliveryDelivered(orderId, {
+      ...body,
+      collectCod: true,
+    });
+  }
 }
