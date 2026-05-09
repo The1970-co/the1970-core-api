@@ -194,6 +194,11 @@ export class ShipmentController {
   }
 
 
+  @Get("viettelpost/inventories")
+  getViettelPostInventories() {
+    return this.shipmentService.listViettelPostInventories();
+  }
+
   @Post("viettelpost/resolve-address")
   resolveViettelPostAddress(@Body() body: any) {
     return this.shipmentService.resolveViettelPostAddress(body);

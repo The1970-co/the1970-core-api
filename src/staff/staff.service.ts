@@ -35,9 +35,10 @@ type BranchRoleInput = {
   roleCode: string;
 };
 
-
 const UNIQUE = (values: Array<string | undefined | null>) =>
-  Array.from(new Set(values.map((v) => String(v || "").trim()).filter(Boolean)));
+  Array.from(
+    new Set(values.map((v) => String(v || "").trim()).filter(Boolean)),
+  );
 
 const LEGACY_BOOLEAN_TO_PERMISSION_KEYS: Record<string, string[]> = {
   canView: ["products.view"],
@@ -64,7 +65,6 @@ const LEGACY_BOOLEAN_TO_PERMISSION_KEYS: Record<string, string[]> = {
   canViewMoney: ["inventory.value.view", "finance.view"],
 };
 
-
 const PERMISSION_LABEL_TO_KEY: Record<string, string> = {
   "Tổng quan": "menu.dashboard",
   "Đơn hàng": "menu.orders",
@@ -86,7 +86,7 @@ const PERMISSION_LABEL_TO_KEY: Record<string, string> = {
   "Đối soát vận chuyển": "menu.shipping_reconcile",
   "Thanh toán nhà cung cấp": "menu.supplier_payments",
   "Báo cáo": "menu.reports",
-  "Autopilot": "menu.autopilot",
+  Autopilot: "menu.autopilot",
   "AI Content": "menu.ai_content",
   "Phân quyền": "menu.permissions",
   "Cấu hình": "menu.settings",
@@ -192,7 +192,10 @@ const PERMISSION_LABEL_TO_KEY: Record<string, string> = {
   "Cấu hình hệ thống": "system.manage",
 };
 
-const PERMISSION_LABEL_TO_LEGACY_FIELD: Record<string, keyof BranchPermissionTemplate> = {
+const PERMISSION_LABEL_TO_LEGACY_FIELD: Record<
+  string,
+  keyof BranchPermissionTemplate
+> = {
   "Xem sản phẩm": "canView",
   "Bán hàng / POS": "canSell",
   "Xem đơn hàng được phụ trách": "canViewOwnOrders",
@@ -229,18 +232,27 @@ const PERMISSION_LABEL_TO_LEGACY_FIELD: Record<string, keyof BranchPermissionTem
   "Xem giá trị tồn kho": "canViewMoney",
 };
 
-function permissionKeyForTemplateLabel(groupKey: string, permissionName: string) {
-  if (groupKey === "transfers" && permissionName === "Nhận hàng vào kho") return "stock_transfer.receive";
-  if (groupKey === "returns" && permissionName === "Nhận hàng vào kho") return "returns.receive";
-  if (groupKey === "purchaseReceipts" && permissionName === "Nhận hàng vào kho") return "purchase_receipt.receive";
-  return PERMISSION_LABEL_TO_KEY[permissionName] || `${groupKey}.${String(permissionName || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/đ/g, "d")
-    .replace(/Đ/g, "D")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")}`;
+function permissionKeyForTemplateLabel(
+  groupKey: string,
+  permissionName: string,
+) {
+  if (groupKey === "transfers" && permissionName === "Nhận hàng vào kho")
+    return "stock_transfer.receive";
+  if (groupKey === "returns" && permissionName === "Nhận hàng vào kho")
+    return "returns.receive";
+  if (groupKey === "purchaseReceipts" && permissionName === "Nhận hàng vào kho")
+    return "purchase_receipt.receive";
+  return (
+    PERMISSION_LABEL_TO_KEY[permissionName] ||
+    `${groupKey}.${String(permissionName || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/đ/g, "d")
+      .replace(/Đ/g, "D")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")}`
+  );
 }
 
 function branchPermissionFromTemplatePermissions(permissions: any) {
@@ -271,7 +283,8 @@ function branchPermissionFromTemplatePermissions(permissions: any) {
   };
 
   const keys: string[] = [];
-  const groups = permissions && typeof permissions === "object" ? permissions : {};
+  const groups =
+    permissions && typeof permissions === "object" ? permissions : {};
 
   for (const [groupKey, permissionNames] of Object.entries(groups)) {
     if (!Array.isArray(permissionNames)) continue;
@@ -289,7 +302,9 @@ function branchPermissionFromTemplatePermissions(permissions: any) {
 
 function permissionKeysFromLegacyBooleans(row: Record<string, any>) {
   const keys: string[] = [];
-  for (const [field, permissionKeys] of Object.entries(LEGACY_BOOLEAN_TO_PERMISSION_KEYS)) {
+  for (const [field, permissionKeys] of Object.entries(
+    LEGACY_BOOLEAN_TO_PERMISSION_KEYS,
+  )) {
     if (row[field]) keys.push(...permissionKeys);
   }
   if (Array.isArray(row.permissionKeys)) keys.push(...row.permissionKeys);
@@ -390,15 +405,13 @@ export class StaffService {
   constructor(private readonly prisma: PrismaService) {}
 
   private normalizeRole(role: any) {
-    return String(role || "").trim().toLowerCase();
+    return String(role || "")
+      .trim()
+      .toLowerCase();
   }
 
   private normalizeRoles(input: any): string[] {
-    const raw = Array.isArray(input)
-      ? input
-      : input
-        ? [input]
-        : [];
+    const raw = Array.isArray(input) ? input : input ? [input] : [];
 
     return Array.from(
       new Set(raw.map((role) => this.normalizeRole(role)).filter(Boolean)),
@@ -408,7 +421,9 @@ export class StaffService {
   private validateRole(roleCode: string) {
     const normalized = this.normalizeRole(roleCode);
     if (!normalized || !ROLE_TEMPLATES[normalized]) {
-      throw new BadRequestException(`Role không hợp lệ: ${roleCode || "trống"}`);
+      throw new BadRequestException(
+        `Role không hợp lệ: ${roleCode || "trống"}`,
+      );
     }
     return normalized;
   }
@@ -446,7 +461,6 @@ export class StaffService {
       permissionKeys: permissionKeysFromLegacyBooleans(row),
     };
   }
-
 
   private async permissionsForRole(roleCode: string, tx?: any) {
     const normalized = this.validateRole(roleCode);
@@ -528,7 +542,9 @@ export class StaffService {
     const missingBranch = uniqueIds.find((id) => !existingIds.has(id));
 
     if (missingBranch) {
-      throw new BadRequestException(`Chi nhánh không tồn tại: ${missingBranch}`);
+      throw new BadRequestException(
+        `Chi nhánh không tồn tại: ${missingBranch}`,
+      );
     }
   }
 
@@ -539,7 +555,9 @@ export class StaffService {
 
     input.forEach((item) => {
       const branchId = String(item?.branchId || "").trim();
-      const roleCode = this.validateRole(item?.roleCode || item?.role || item?.roleId);
+      const roleCode = this.validateRole(
+        item?.roleCode || item?.role || item?.roleId,
+      );
 
       if (!branchId) return;
       map.set(branchId, { branchId, roleCode });
@@ -548,13 +566,21 @@ export class StaffService {
     return Array.from(map.values());
   }
 
-  private deriveLegacyRolesFromBranchRoles(branchRoles: BranchRoleInput[], fallbackRole?: string) {
+  private deriveLegacyRolesFromBranchRoles(
+    branchRoles: BranchRoleInput[],
+    fallbackRole?: string,
+  ) {
     const roles = branchRoles.map((row) => row.roleCode);
-    if (!roles.length && fallbackRole) roles.push(this.normalizeRole(fallbackRole));
+    if (!roles.length && fallbackRole)
+      roles.push(this.normalizeRole(fallbackRole));
     return Array.from(new Set(roles.filter(Boolean)));
   }
 
-  private async replaceBranchRolesAndPermissions(tx: any, staffId: string, branchRoles: BranchRoleInput[]) {
+  private async replaceBranchRolesAndPermissions(
+    tx: any,
+    staffId: string,
+    branchRoles: BranchRoleInput[],
+  ) {
     await tx.staffBranchRole.deleteMany({ where: { staffId } });
     await tx.staffBranchPermission.deleteMany({ where: { staffId } });
 
@@ -597,9 +623,13 @@ export class StaffService {
       throw new BadRequestException("Thiếu tên nhân viên");
     }
 
-    const branchRoles = this.normalizeBranchRoles((dto as any).branchRoles || []);
+    const branchRoles = this.normalizeBranchRoles(
+      (dto as any).branchRoles || [],
+    );
     const rolesFromDto = this.normalizeRoles((dto as any).roles);
-    const legacyRole = this.validateRole((dto as any).role || rolesFromDto[0] || branchRoles[0]?.roleCode);
+    const legacyRole = this.validateRole(
+      (dto as any).role || rolesFromDto[0] || branchRoles[0]?.roleCode,
+    );
 
     const existingByCode = await this.prisma.staffUser.findUnique({
       where: { code: dto.code.trim() },
@@ -614,13 +644,19 @@ export class StaffService {
     const username = (usernameInput || dto.code.trim()).toLowerCase();
 
     if (email) {
-      const existingEmail = await this.prisma.staffUser.findUnique({ where: { email } });
-      if (existingEmail) throw new BadRequestException("Email nhân viên đã tồn tại");
+      const existingEmail = await this.prisma.staffUser.findUnique({
+        where: { email },
+      });
+      if (existingEmail)
+        throw new BadRequestException("Email nhân viên đã tồn tại");
     }
 
     if (username) {
-      const existingUsername = await this.prisma.staffUser.findUnique({ where: { username } });
-      if (existingUsername) throw new BadRequestException("Tên đăng nhập đã tồn tại");
+      const existingUsername = await this.prisma.staffUser.findUnique({
+        where: { username },
+      });
+      if (existingUsername)
+        throw new BadRequestException("Tên đăng nhập đã tồn tại");
     }
 
     let branchId: string | null = null;
@@ -643,7 +679,9 @@ export class StaffService {
         ? [{ branchId, roleCode: legacyRole }]
         : [];
 
-    await this.assertBranchesExist(initialBranchRoles.map((row) => row.branchId));
+    await this.assertBranchesExist(
+      initialBranchRoles.map((row) => row.branchId),
+    );
 
     const hash = await bcrypt.hash(dto.password, 10);
 
@@ -665,7 +703,10 @@ export class StaffService {
         },
       });
 
-      const finalRoles = this.deriveLegacyRolesFromBranchRoles(initialBranchRoles, legacyRole);
+      const finalRoles = this.deriveLegacyRolesFromBranchRoles(
+        initialBranchRoles,
+        legacyRole,
+      );
 
       if (finalRoles.length) {
         await tx.staffUserRole.createMany({
@@ -674,7 +715,11 @@ export class StaffService {
         });
       }
 
-      await this.replaceBranchRolesAndPermissions(tx, staff.id, initialBranchRoles);
+      await this.replaceBranchRolesAndPermissions(
+        tx,
+        staff.id,
+        initialBranchRoles,
+      );
 
       return staff;
     });
@@ -709,7 +754,9 @@ export class StaffService {
 
     if (!current) throw new BadRequestException("Nhân viên không tồn tại");
 
-    const roleInput = this.validateRole(dto.role || current.role || "retail-staff");
+    const roleInput = this.validateRole(
+      dto.role || current.role || "retail-staff",
+    );
 
     let branchId: string | null = current.branchId || null;
     let branchName: string | null = current.branchName || null;
@@ -730,17 +777,31 @@ export class StaffService {
       }
     }
 
-    const email = dto.email !== undefined ? String(dto.email || "").trim() || null : current.email;
-    const username = dto.username !== undefined ? String(dto.username || "").trim().toLowerCase() || current.username : current.username;
+    const email =
+      dto.email !== undefined
+        ? String(dto.email || "").trim() || null
+        : current.email;
+    const username =
+      dto.username !== undefined
+        ? String(dto.username || "")
+            .trim()
+            .toLowerCase() || current.username
+        : current.username;
 
     if (email && email !== current.email) {
-      const existingEmail = await this.prisma.staffUser.findUnique({ where: { email } });
-      if (existingEmail && existingEmail.id !== id) throw new BadRequestException("Email nhân viên đã tồn tại");
+      const existingEmail = await this.prisma.staffUser.findUnique({
+        where: { email },
+      });
+      if (existingEmail && existingEmail.id !== id)
+        throw new BadRequestException("Email nhân viên đã tồn tại");
     }
 
     if (username && username !== current.username) {
-      const existingUsername = await this.prisma.staffUser.findUnique({ where: { username } });
-      if (existingUsername && existingUsername.id !== id) throw new BadRequestException("Tên đăng nhập đã tồn tại");
+      const existingUsername = await this.prisma.staffUser.findUnique({
+        where: { username },
+      });
+      if (existingUsername && existingUsername.id !== id)
+        throw new BadRequestException("Tên đăng nhập đã tồn tại");
     }
 
     await this.prisma.staffUser.update({
@@ -750,9 +811,18 @@ export class StaffService {
         name: dto.name !== undefined ? String(dto.name).trim() : current.name,
         username,
         email,
-        phone: dto.phone !== undefined ? String(dto.phone || "").trim() || null : current.phone,
-        address: dto.address !== undefined ? String(dto.address || "").trim() || null : current.address,
-        note: dto.note !== undefined ? String(dto.note || "").trim() || null : current.note,
+        phone:
+          dto.phone !== undefined
+            ? String(dto.phone || "").trim() || null
+            : current.phone,
+        address:
+          dto.address !== undefined
+            ? String(dto.address || "").trim() || null
+            : current.address,
+        note:
+          dto.note !== undefined
+            ? String(dto.note || "").trim() || null
+            : current.note,
         role: roleInput,
         branchId,
         branchName,
@@ -763,13 +833,18 @@ export class StaffService {
   }
 
   async updateBranchRoles(staffId: string, dto: any) {
-    const staff = await this.prisma.staffUser.findUnique({ where: { id: staffId } });
+    const staff = await this.prisma.staffUser.findUnique({
+      where: { id: staffId },
+    });
     if (!staff) throw new BadRequestException("Nhân viên không tồn tại");
 
     const branchRoles = this.normalizeBranchRoles(dto.branchRoles || []);
     await this.assertBranchesExist(branchRoles.map((row) => row.branchId));
 
-    const legacyRoles = this.deriveLegacyRolesFromBranchRoles(branchRoles, staff.role || undefined);
+    const legacyRoles = this.deriveLegacyRolesFromBranchRoles(
+      branchRoles,
+      staff.role || undefined,
+    );
     const primaryRole = legacyRoles[0] || staff.role || null;
     const primaryBranchId = branchRoles[0]?.branchId || staff.branchId || null;
     let primaryBranchName: string | null = staff.branchName || null;
@@ -808,7 +883,9 @@ export class StaffService {
   }
 
   private sanitizeBranchPermissionInput(row: any) {
-    const clean: any = this.permissionsForRoleLegacy(row.roleCode || row.role || "retail-staff");
+    const clean: any = this.permissionsForRoleLegacy(
+      row.roleCode || row.role || "retail-staff",
+    );
 
     const booleanFields = [
       "canView",
@@ -841,18 +918,25 @@ export class StaffService {
 
     clean.permissionKeys = permissionKeysFromLegacyBooleans({
       ...clean,
-      permissionKeys: Array.isArray(row.permissionKeys) ? row.permissionKeys : [],
+      permissionKeys: Array.isArray(row.permissionKeys)
+        ? row.permissionKeys
+        : [],
     });
 
     return clean;
   }
 
   async updatePermissions(staffId: string, dto: any) {
-    if (Array.isArray(dto.branchRoles) && !Array.isArray(dto.branchPermissions)) {
+    if (
+      Array.isArray(dto.branchRoles) &&
+      !Array.isArray(dto.branchPermissions)
+    ) {
       return this.updateBranchRoles(staffId, dto);
     }
 
-    const staff = await this.prisma.staffUser.findUnique({ where: { id: staffId } });
+    const staff = await this.prisma.staffUser.findUnique({
+      where: { id: staffId },
+    });
     if (!staff) throw new BadRequestException("Nhân viên không tồn tại");
 
     const branchPermissions = Array.isArray(dto.branchPermissions)
@@ -893,22 +977,30 @@ export class StaffService {
     return this.findOne(staffId);
   }
 
-
   private shouldAutoRefreshPermissionRow(row: any, force = false) {
     if (force) return true;
 
     const keys = Array.isArray(row?.permissionKeys)
-      ? row.permissionKeys.map((key: any) => String(key || "").trim()).filter(Boolean)
+      ? row.permissionKeys
+          .map((key: any) => String(key || "").trim())
+          .filter(Boolean)
       : [];
 
     const note = String(row?.note || "").toLowerCase();
 
     // Chỉ tự sửa các dòng quyền sinh tự động hoặc dòng cũ chưa có permissionKeys.
     // Dòng user chỉnh tay từ UI vẫn được giữ nguyên, trừ khi gọi force=true từ lưu mẫu role.
-    return keys.length === 0 || note.includes("auto generated") || note.includes("auto synced");
+    return (
+      keys.length === 0 ||
+      note.includes("auto generated") ||
+      note.includes("auto synced")
+    );
   }
 
-  async syncPermissionsForStaff(staffId: string, options: { force?: boolean } = {}) {
+  async syncPermissionsForStaff(
+    staffId: string,
+    options: { force?: boolean } = {},
+  ) {
     const staff = await this.prisma.staffUser.findUnique({
       where: { id: staffId },
       include: {
@@ -917,27 +1009,38 @@ export class StaffService {
       },
     });
 
-    if (!staff) throw new BadRequestException("Nhân viên không tồn tại");
+    if (!staff) {
+      // Staff có thể đã bị xoá/nghỉ nhưng frontend/backend vẫn đang sync lại mẫu quyền.
+      // Không được để một staff stale làm fail toàn bộ PATCH /staff/role-templates.
+      return null;
+    }
 
-    const branchRoles = Array.isArray(staff.branchRoles) ? staff.branchRoles : [];
+    const branchRoles = Array.isArray(staff.branchRoles)
+      ? staff.branchRoles
+      : [];
 
     // Không có branchRoles thì không tự mở quyền gì. Đây là nguyên tắc an toàn:
     // permission rỗng = không hiện menu, không fallback theo role legacy.
-    if (!branchRoles.length) return this.findOne(staffId);
+    if (!branchRoles.length) return staff;
 
     await this.assertBranchesExist(branchRoles.map((row: any) => row.branchId));
 
     await this.prisma.$transaction(async (tx) => {
       for (const branchRole of branchRoles) {
         const branchId = String(branchRole.branchId || "").trim();
-        const roleCode = this.validateRole(branchRole.roleCode || staff.role || "retail-staff");
+        const roleCode = this.validateRole(
+          branchRole.roleCode || staff.role || "retail-staff",
+        );
         if (!branchId) continue;
 
         const existing = staff.branchPermissions.find(
           (row: any) => String(row.branchId) === branchId,
         );
 
-        if (existing && !this.shouldAutoRefreshPermissionRow(existing, Boolean(options.force))) {
+        if (
+          existing &&
+          !this.shouldAutoRefreshPermissionRow(existing, Boolean(options.force))
+        ) {
           continue;
         }
 
@@ -964,7 +1067,7 @@ export class StaffService {
       }
     });
 
-    return this.findOne(staffId);
+    return this.findOne(staffId).catch(() => null);
   }
 
   async syncAllPermissionsFromRoleTemplates(options: { force?: boolean } = {}) {
@@ -974,15 +1077,25 @@ export class StaffService {
     });
 
     let synced = 0;
+    let skipped = 0;
 
     for (const staff of staffList) {
-      await this.syncPermissionsForStaff(staff.id, options);
-      synced += 1;
+      try {
+        const result = await this.syncPermissionsForStaff(staff.id, options);
+        if (result) synced += 1;
+        else skipped += 1;
+      } catch (err: any) {
+        // Không để một nhân viên stale / branch role lỗi làm fail thao tác lưu mẫu quyền.
+        // Trang phân quyền đang lưu role template, không phải update riêng nhân viên.
+        skipped += 1;
+        console.warn("[RBAC_SYNC_SKIP_STAFF]", staff.id, err?.message || err);
+      }
     }
 
     return {
       success: true,
       synced,
+      skipped,
       force: Boolean(options.force),
     };
   }

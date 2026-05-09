@@ -1493,48 +1493,59 @@ this.logger.warn(
     const code = String(serviceCode || "").toUpperCase();
 
     if (code === "VHT") return "Chuyển phát hỏa tốc";
-    if (code === "VTK") return "Chuyển phát tiết kiệm";
-    if (code === "V60") return "Giao trong 60 phút";
-    if (code === "V90") return "Giao trong 90 phút";
-    if (code === "LCOD") return "COD tiêu chuẩn";
-    if (code === "SCOD") return "COD nhanh";
-    if (code === "PHS") return "Phát hẹn giờ";
-    if (code === "PTN") return "Phát tận nơi";
+    if (code === "VTK") return "Chuyển phát tiêu chuẩn";
     if (code === "VCN") return "Chuyển phát nhanh";
+    if (code === "PHS") return "Nội tỉnh tiết kiệm";
+    if (code === "VCBO") return "Chuyển phát nhanh";
+    if (code === "V60") return "Chuyển phát 60 giờ";
+    if (code === "V120") return "Chuyển phát 120 giờ";
+    if (code === "LCOD") return "Thương mại điện tử";
 
-    return `Dịch vụ ${code}`;
+    return serviceCode || "ViettelPost";
   }
 
   private viettelPostLeadtimeLabel(serviceCode: string) {
     const code = String(serviceCode || "").toUpperCase();
 
     if (code === "VHT") return "Hỏa tốc";
-    if (code === "V60") return "Trong 60 phút";
-    if (code === "V90") return "Trong 90 phút";
-    if (code === "VTK") return "2-5 ngày";
-    if (code === "VCN") return "1-3 ngày";
-    if (code === "SCOD") return "COD nhanh";
-    if (code === "LCOD") return "COD tiêu chuẩn";
+    if (code === "VTK") return "Tiêu chuẩn";
+    if (code === "VCN") return "Nhanh";
+    if (code === "PHS") return "Tiết kiệm";
+    if (code === "VCBO") return "Nhanh";
 
     return "Đang cập nhật";
   }
 
   private normalizeViettelServiceCodes(body: any) {
-    const raw =
-      body?.services ||
-      body?.serviceCodes ||
-      process.env.VIETTELPOST_SERVICES ||
-      process.env.VIETTELPOST_DEFAULT_SERVICE ||
-      "VHT";
+    const raw = [
+      body?.services,
+      body?.serviceCodes,
+      process.env.VIETTELPOST_SERVICES,
+      process.env.VIETTELPOST_DEFAULT_SERVICE,
+      "VHT,VTK,VCN",
+    ]
+      .filter(Boolean)
+      .join(",");
 
-    return Array.from(
+    const inputList = Array.from(
       new Set(
-        String(raw)
+        String(raw || "")
           .split(",")
           .map((item) => item.trim().toUpperCase())
           .filter(Boolean)
       )
-    );
+    ) as string[];
+
+    // Theo tài liệu VTP: getPriceAllNlp trả danh sách MA_DV_CHINH,
+    // nhưng nếu API chỉ trả 1 gói thì vẫn thử getPrice theo 3 mã chính.
+    const required = ["VHT", "VTK", "VCN"];
+    const merged = Array.from(new Set([...inputList, ...required])) as string[];
+    const order = ["VHT", "VTK", "VCN"];
+
+    return [
+      ...order.filter((code) => merged.includes(code)),
+      ...merged.filter((code) => !order.includes(code)),
+    ];
   }
 
   private shouldTryViettelPostFallbackServices(body: any) {
@@ -1571,17 +1582,47 @@ this.logger.warn(
     const candidates = [
       raw,
       raw?.data,
-      raw?.RESULT,
+      raw?.DATA,
       raw?.result,
+      raw?.RESULT,
       raw?.services,
+      raw?.SERVICES,
+      raw?.prices,
+      raw?.PRICES,
+      raw?.list,
+      raw?.LIST,
       raw?.data?.RESULT,
       raw?.data?.result,
       raw?.data?.services,
+      raw?.data?.SERVICES,
+      raw?.data?.prices,
+      raw?.data?.PRICES,
       raw?.data?.data,
+      raw?.DATA?.data,
+      raw?.Data,
+      raw?.DATA?.RESULT,
+      raw?.RESULT?.DATA,
+      raw?.RESULT?.data,
+      raw?.data?.DATA,
     ];
 
     for (const item of candidates) {
       if (Array.isArray(item)) return item;
+    }
+
+    // Một số response Viettel trả object nhưng chính nó là 1 giá.
+    if (
+      raw &&
+      typeof raw === "object" &&
+      (raw.MONEY_TOTAL ||
+        raw.money_total ||
+        raw.GIA_CUOC ||
+        raw.TOTAL_FEE ||
+        raw.total_fee ||
+        raw.MA_DV_CHINH ||
+        raw.ORDER_SERVICE)
+    ) {
+      return [raw];
     }
 
     return [];
@@ -1596,11 +1637,14 @@ this.logger.warn(
         raw?.serviceCode ||
         raw?.code ||
         raw?.MA_DICH_VU ||
+        raw?.SERVICE_ID ||
+        raw?.service_id ||
+        raw?.id ||
         raw?.data?.MA_DV_CHINH ||
         raw?.data?.ORDER_SERVICE ||
         raw?.data?.SERVICE_CODE ||
         ""
-    );
+    ).toUpperCase();
   }
 
   private getViettelPostServiceName(raw: any) {
@@ -1622,8 +1666,11 @@ this.logger.warn(
     return Number(
       raw?.GIA_CUOC ||
         raw?.MONEY_TOTAL ||
+        raw?.money_total ||
         raw?.MONEY_TOTAL_OLD ||
+        raw?.money_total_old ||
         raw?.MONEY_TOTAL_FEE ||
+        raw?.money_total_fee ||
         raw?.TOTAL_FEE ||
         raw?.total_fee ||
         raw?.totalFee ||
@@ -1645,6 +1692,109 @@ this.logger.warn(
         raw?.data?.THOI_GIAN ||
         ""
     );
+  }
+
+  private normalizeViettelPostInventory(raw: any) {
+    const groupAddressId = Number(
+      raw?.group_address_id ||
+        raw?.groupAddressId ||
+        raw?.GROUPADDRESS_ID ||
+        raw?.GROUP_ADDRESS_ID ||
+        raw?.id ||
+        0
+    );
+
+    return {
+      groupAddressId,
+      cusId: Number(raw?.cus_id || raw?.cusId || raw?.CUS_ID || 0) || undefined,
+      name: String(raw?.name || raw?.NAME || raw?.full_name || raw?.SENDER_FULLNAME || ""),
+      phone: String(raw?.phone || raw?.PHONE || raw?.tel || raw?.SENDER_PHONE || ""),
+      address: String(raw?.address || raw?.ADDRESS || raw?.SENDER_ADDRESS || ""),
+      provinceId: Number(raw?.province_id || raw?.provinceId || raw?.PROVINCE_ID || raw?.SENDER_PROVINCE || 0),
+      districtId: Number(raw?.district_id || raw?.districtId || raw?.DISTRICT_ID || raw?.SENDER_DISTRICT || 0),
+      wardId: Number(raw?.wards_id || raw?.ward_id || raw?.wardId || raw?.WARDS_ID || raw?.WARD_ID || raw?.SENDER_WARD || 0) || undefined,
+      raw,
+    };
+  }
+
+  private extractViettelPostInventories(raw: any) {
+    const candidates = [
+      raw,
+      raw?.data,
+      raw?.DATA,
+      raw?.result,
+      raw?.RESULT,
+      raw?.inventories,
+      raw?.vtp_inventories,
+      raw?.data?.data,
+      raw?.data?.result,
+      raw?.data?.RESULT,
+    ];
+
+    for (const item of candidates) {
+      if (Array.isArray(item)) return item;
+    }
+
+    return [];
+  }
+
+  async listViettelPostInventories() {
+    const raw = await this.viettelPostClient.listInventories();
+    const rows = this.extractViettelPostInventories(raw)
+      .map((item: any) => this.normalizeViettelPostInventory(item))
+      .filter((item: any) => item.groupAddressId && item.provinceId && item.districtId);
+
+    return rows;
+  }
+
+  private async getViettelSenderConfig(input?: any) {
+    const senderGroupAddressId = Number(
+      input?.senderGroupAddressId ||
+        input?.groupAddressId ||
+        input?.GROUPADDRESS_ID ||
+        process.env.VIETTELPOST_SENDER_GROUP_ADDRESS_ID ||
+        process.env.VIETTELPOST_GROUPADDRESS_ID ||
+        0
+    );
+
+    if (senderGroupAddressId) {
+      const inventories = await this.listViettelPostInventories().catch(() => [] as any[]);
+      const found = inventories.find(
+        (item: any) => Number(item.groupAddressId) === senderGroupAddressId
+      );
+
+      if (found) {
+        return {
+          groupAddressId: Number(found.groupAddressId),
+          cusId: Number(found.cusId || 0) || undefined,
+          provinceId: Number(found.provinceId),
+          districtId: Number(found.districtId),
+          wardId: Number(found.wardId || 0) || undefined,
+          name: input?.fromName || found.name || process.env.VIETTELPOST_SENDER_NAME || this.returnName,
+          phone: input?.fromPhone || found.phone || process.env.VIETTELPOST_SENDER_PHONE || this.returnPhone,
+          address: input?.fromAddress || found.address || process.env.VIETTELPOST_SENDER_ADDRESS || this.returnAddress,
+          inventory: found,
+        };
+      }
+    }
+
+    if (input?.senderProvinceId && input?.senderDistrictId) {
+      return {
+        groupAddressId: senderGroupAddressId || undefined,
+        provinceId: Number(input.senderProvinceId),
+        districtId: Number(input.senderDistrictId),
+        wardId: Number(input.senderWardId || 0) || undefined,
+        name: input?.fromName || process.env.VIETTELPOST_SENDER_NAME || this.returnName,
+        phone: input?.fromPhone || process.env.VIETTELPOST_SENDER_PHONE || this.returnPhone,
+        address: input?.fromAddress || process.env.VIETTELPOST_SENDER_ADDRESS || this.returnAddress,
+      };
+    }
+
+    const envSender = await this.getViettelSenderConfigFromEnv();
+    return {
+      ...envSender,
+      groupAddressId: senderGroupAddressId || undefined,
+    };
   }
 
   private async getViettelSenderConfigFromEnv() {
@@ -1760,15 +1910,7 @@ this.logger.warn(
   }
 
   async quoteViettelPost(body: any) {
-    const sender = await this.getViettelSenderConfigFromEnv();
-    const senderProvinceId = Number(body?.senderProvinceId || sender.provinceId || 0);
-    const senderDistrictId = Number(body?.senderDistrictId || sender.districtId || 0);
-
-    if (!senderProvinceId || !senderDistrictId) {
-      throw new BadRequestException(
-        "Thiếu VIETTELPOST_SENDER_PROVINCE_ID / VIETTELPOST_SENDER_DISTRICT_ID"
-      );
-    }
+    const sender = await this.getViettelSenderConfig(body);
 
     const receiverInput = this.normalizeViettelReceiverForOldCarrier({
       province: body?.province || body?.toProvince,
@@ -1777,9 +1919,6 @@ this.logger.warn(
       address: body?.toAddress || body?.address,
     });
 
-    // Không dùng receiverProvinceId/receiverDistrictId từ frontend cho ViettelPost.
-    // Lý do: sau sáp nhập địa giới, frontend có thể gửi sai wardId/districtId
-    // như Quốc Oai/Sài Sơn -> wardId 424. Viettel cần old-carrier address.
     const resolved = await this.resolveViettelAddress({
       province: receiverInput.province,
       district: receiverInput.district,
@@ -1788,88 +1927,205 @@ this.logger.warn(
 
     const resolvedAny = resolved as any;
 
-    const rawServices =
-      body?.services ||
-      body?.serviceCodes ||
-      process.env.VIETTELPOST_SERVICES ||
-      process.env.VIETTELPOST_DEFAULT_SERVICE ||
-      "VHT";
-
-    const services = Array.from(
-      new Set(
-        String(rawServices)
-          .split(",")
-          .map((item) => item.trim().toUpperCase())
-          .filter(Boolean)
-      )
-    );
-
     const weight = Math.max(1, Number(body?.weight || body?.PRODUCT_WEIGHT || 200));
     const productPrice = Math.max(
       0,
       Number(body?.productPrice || body?.insuranceValue || body?.PRODUCT_PRICE || 0)
     );
     const codAmount = Math.max(0, Number(body?.codAmount || body?.MONEY_COLLECTION || 0));
+    const productLength = Math.max(1, Number(body?.length || body?.PRODUCT_LENGTH || 10));
+    const productWidth = Math.max(1, Number(body?.width || body?.PRODUCT_WIDTH || 10));
+    const productHeight = Math.max(1, Number(body?.height || body?.PRODUCT_HEIGHT || 10));
+    const productType =
+      body?.productType || process.env.VIETTELPOST_PRODUCT_TYPE || "HH";
+
+    const senderAddressText = this.normalizeViettelAddressText({
+      address: sender.address,
+      ward: sender.wardId ? "" : process.env.VIETTELPOST_SENDER_WARD,
+      district: process.env.VIETTELPOST_SENDER_DISTRICT,
+      province: process.env.VIETTELPOST_SENDER_PROVINCE,
+    });
+
+    const receiverAddressText = this.normalizeViettelAddressText({
+      address: body?.toAddress || body?.address,
+      ward: receiverInput.ward,
+      district: receiverInput.district,
+      province: receiverInput.province,
+    });
 
     const rows: any[] = [];
     const failedMessages: string[] = [];
 
+    const pushQuoteRow = (raw: any, fallbackServiceCode?: string) => {
+      const fee = this.getViettelPostQuoteFee(raw) || this.getViettelPostFee(raw);
+      if (!fee) return;
+
+      const serviceCode =
+        this.getViettelPostServiceCode(raw) ||
+        String(fallbackServiceCode || "VHT").toUpperCase();
+      const serviceName = this.getViettelPostServiceName(raw);
+      const leadtime = this.getViettelPostQuoteLeadtime(raw);
+
+      const quoteKey = `viettelpost-${serviceCode || rows.length}`;
+
+      if (rows.some((item) => item._quoteKey === quoteKey)) {
+        return;
+      }
+
+      rows.push({
+        serviceId: 0,
+        serviceTypeId: rows.length + 1,
+        shortName: `Viettel Post - ${
+          serviceName || this.viettelPostServiceLabel(serviceCode)
+        }`,
+        fee: {
+          total: fee,
+          total_fee: fee,
+          service_fee: fee,
+        },
+        leadtime: {
+          label: leadtime || this.viettelPostLeadtimeLabel(serviceCode),
+        },
+        _carrier: "viettelpost",
+        _quoteKey: quoteKey,
+        _serviceName: serviceCode,
+        _viettelServiceCode: serviceCode,
+        _viettelReceiverProvinceId: Number(resolvedAny.provinceId || 0),
+        _viettelReceiverDistrictId: Number(
+          resolvedAny.districtId || resolvedAny.districtValue || 0
+        ),
+        _viettelReceiverWardId: Number(resolvedAny.wardId || 0) || undefined,
+        _viettelSenderGroupAddressId: Number(sender.groupAddressId || 0) || undefined,
+        _applyFeeToInput: true,
+        _raw: raw,
+      });
+    };
+
+    const nlpPayload = {
+      PRODUCT_WEIGHT: weight,
+      PRODUCT_PRICE: productPrice,
+      PRODUCT_LENGTH: productLength,
+      PRODUCT_WIDTH: productWidth,
+      PRODUCT_HEIGHT: productHeight,
+      PRODUCT_TYPE: productType,
+      MONEY_COLLECTION: codAmount,
+      SENDER_PROVINCE: Number(sender.provinceId || 0),
+      SENDER_DISTRICT: Number(sender.districtId || 0),
+      SENDER_WARD: Number(sender.wardId || 0) || undefined,
+      RECEIVER_PROVINCE: Number(resolvedAny.provinceId || 0),
+      RECEIVER_DISTRICT: Number(resolvedAny.districtId || resolvedAny.districtValue || 0),
+      RECEIVER_WARD: Number(resolvedAny.wardId || 0) || undefined,
+      SENDER_ADDRESS: senderAddressText || sender.address,
+      RECEIVER_ADDRESS: receiverAddressText,
+      ORDER_SERVICE_ADD:
+        body?.serviceAdd || process.env.VIETTELPOST_SERVICE_ADD || "",
+      NATIONAL_TYPE: Number(body?.nationalType || 1),
+    };
+
     this.logger.log(
-      `[VIETTELPOST_QUOTE] senderProvince=${senderProvinceId} senderDistrict=${senderDistrictId} receiverProvince=${Number(resolvedAny.provinceId || 0)} receiverDistrict=${Number(resolvedAny.districtId || resolvedAny.districtValue || 0)} receiverWard=${Number(resolvedAny.wardId || 0) || ""} receiverText=${receiverInput.province}/${receiverInput.district}/${receiverInput.ward} services=${services.join(",")}`
+      `[VIETTELPOST_QUOTE_NLP] sender=${Number(sender.provinceId || 0)}/${Number(
+        sender.districtId || 0
+      )}/${Number(sender.wardId || 0) || ""} receiver=${Number(
+        resolvedAny.provinceId || 0
+      )}/${Number(resolvedAny.districtId || resolvedAny.districtValue || 0)}/${
+        Number(resolvedAny.wardId || 0) || ""
+      } text="${receiverAddressText}"`
+    );
+
+    const priceAllPayload = {
+      PRODUCT_WEIGHT: weight,
+      PRODUCT_PRICE: productPrice,
+      PRODUCT_LENGTH: productLength,
+      PRODUCT_WIDTH: productWidth,
+      PRODUCT_HEIGHT: productHeight,
+      PRODUCT_TYPE: productType,
+      MONEY_COLLECTION: codAmount,
+      SENDER_PROVINCE: Number(sender.provinceId || 0),
+      SENDER_DISTRICT: Number(sender.districtId || 0),
+      RECEIVER_PROVINCE: Number(resolvedAny.provinceId || 0),
+      RECEIVER_DISTRICT: Number(resolvedAny.districtId || resolvedAny.districtValue || 0),
+      TYPE: Number(body?.type || body?.TYPE || 1),
+      NATIONAL_TYPE: Number(body?.nationalType || 1),
+    };
+
+    this.logger.log(
+      `[VIETTELPOST_QUOTE_PRICE_ALL] sender=${priceAllPayload.SENDER_PROVINCE}/${priceAllPayload.SENDER_DISTRICT} receiver=${priceAllPayload.RECEIVER_PROVINCE}/${priceAllPayload.RECEIVER_DISTRICT}`
+    );
+
+    try {
+      const rawPriceAll = await this.viettelPostClient.getPriceAll(priceAllPayload);
+      const priceAllRows = this.extractViettelPostQuoteRows(rawPriceAll);
+
+      for (const item of priceAllRows) {
+        pushQuoteRow(item);
+      }
+
+      if (!priceAllRows.length) {
+        pushQuoteRow(rawPriceAll);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      failedMessages.push(`getPriceAll: ${message}`);
+      this.logger.warn(`ViettelPost getPriceAll failed: ${message}`);
+    }
+
+    try {
+      const rawAll = await this.viettelPostClient.getPriceAllNlp(nlpPayload);
+      const allRows = this.extractViettelPostQuoteRows(rawAll);
+
+      for (const item of allRows) {
+        pushQuoteRow(item);
+      }
+
+      if (!rows.length) {
+        // Một số tenant trả object đơn thay vì array.
+        pushQuoteRow(rawAll);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      failedMessages.push(`getPriceAllNlp: ${message}`);
+      this.logger.warn(`ViettelPost getPriceAllNlp failed: ${message}`);
+    }
+
+    // getPriceAllNlp theo tài liệu VTP có thể trả danh sách dịch vụ.
+    // Nhưng thực tế một số tuyến/account chỉ trả gói hệ thống tự chọn.
+    // Vì vậy vẫn gọi thêm getPrice cho từng mã chính để bắt đủ gói nào khả dụng.
+    const services = this.normalizeViettelServiceCodes(body);
+
+    this.logger.log(
+      `[VIETTELPOST_QUOTE_GETPRICE] services=${services.join(",")}`
     );
 
     for (const serviceCode of services) {
+      if (rows.some((item) => item._viettelServiceCode === serviceCode)) {
+        continue;
+      }
+
       try {
         const payload = {
           PRODUCT_WEIGHT: weight,
           PRODUCT_PRICE: productPrice,
+          PRODUCT_LENGTH: productLength,
+          PRODUCT_WIDTH: productWidth,
+          PRODUCT_HEIGHT: productHeight,
           MONEY_COLLECTION: codAmount,
           ORDER_SERVICE: serviceCode,
           ORDER_SERVICE_ADD:
             body?.serviceAdd || process.env.VIETTELPOST_SERVICE_ADD || "",
-          SENDER_PROVINCE: senderProvinceId,
-          SENDER_DISTRICT: senderDistrictId,
+          SENDER_PROVINCE: Number(sender.provinceId || 0),
+          SENDER_DISTRICT: Number(sender.districtId || 0),
+          SENDER_WARD: Number(sender.wardId || 0) || undefined,
           RECEIVER_PROVINCE: Number(resolvedAny.provinceId || 0),
           RECEIVER_DISTRICT: Number(
             resolvedAny.districtId || resolvedAny.districtValue || 0
           ),
-          PRODUCT_TYPE:
-            body?.productType || process.env.VIETTELPOST_PRODUCT_TYPE || "HH",
+          RECEIVER_WARD: Number(resolvedAny.wardId || 0) || undefined,
+          PRODUCT_TYPE: productType,
           NATIONAL_TYPE: Number(body?.nationalType || 1),
         };
 
         const raw = await this.viettelPostClient.getPrice(payload);
-        const fee = this.getViettelPostFee(raw);
-
-        if (!fee) {
-          failedMessages.push(`${serviceCode}: ViettelPost trả phí = 0`);
-          continue;
-        }
-
-        rows.push({
-          serviceId: 0,
-          serviceTypeId: 0,
-          shortName: `Viettel Post - ${this.viettelPostServiceLabel(serviceCode)}`,
-          fee: {
-            total: fee,
-            total_fee: fee,
-            service_fee: fee,
-          },
-          leadtime: {
-            label: this.viettelPostLeadtimeLabel(serviceCode),
-          },
-          _carrier: "viettelpost",
-          _quoteKey: `viettelpost-${serviceCode}`,
-          _serviceName: serviceCode,
-          _viettelServiceCode: serviceCode,
-          _viettelReceiverProvinceId: Number(resolvedAny.provinceId || 0),
-          _viettelReceiverDistrictId: Number(
-            resolvedAny.districtId || resolvedAny.districtValue || 0
-          ),
-          _viettelReceiverWardId: Number(resolvedAny.wardId || 0) || undefined,
-          _applyFeeToInput: true,
-          _raw: raw,
-        });
+        pushQuoteRow(raw, serviceCode);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         failedMessages.push(`${serviceCode}: ${message}`);
@@ -1879,7 +2135,7 @@ this.logger.warn(
 
     if (!rows.length) {
       this.logger.warn(
-        `ViettelPost không trả về gói cước phù hợp. services=${services.join(",")} | ${failedMessages.join(" | ")}`
+        `ViettelPost không trả về gói cước phù hợp. ${failedMessages.join(" | ")}`
       );
 
       return [
@@ -1896,9 +2152,9 @@ this.logger.warn(
             label: "Không khả dụng",
           },
           _carrier: "viettelpost",
-          _quoteKey: `viettelpost-unavailable-${services.join("-") || "none"}`,
-          _serviceName: services[0] || "VHT",
-          _viettelServiceCode: services[0] || "VHT",
+          _quoteKey: "viettelpost-unavailable",
+          _serviceName: "VHT",
+          _viettelServiceCode: "VHT",
           _viettelReceiverProvinceId: Number(resolvedAny.provinceId || 0),
           _viettelReceiverDistrictId: Number(
             resolvedAny.districtId || resolvedAny.districtValue || 0
@@ -1913,7 +2169,7 @@ this.logger.warn(
       ];
     }
 
-    return rows;
+    return rows.sort((a, b) => Number(a.fee?.total || 0) - Number(b.fee?.total || 0));
   }
 
   async createViettelPostShipment(orderId: string, dto: any) {
@@ -1939,7 +2195,7 @@ this.logger.warn(
         };
       }
 
-      const sender = await this.getViettelSenderConfigFromEnv();
+      const sender = await this.getViettelSenderConfig(dto);
       const senderProvinceId = Number(dto?.senderProvinceId || sender.provinceId || 0);
       const senderDistrictId = Number(dto?.senderDistrictId || sender.districtId || 0);
       const senderWardId = Number(dto?.senderWardId || sender.wardId || 0);
@@ -2001,8 +2257,9 @@ this.logger.warn(
 
       const payload = {
         ORDER_NUMBER: dto?.clientOrderCode || dto?.orderCode || order.orderCode,
-        GROUPADDRESS_ID: Number(process.env.VIETTELPOST_GROUPADDRESS_ID || 0) || undefined,
-        CUS_ID: Number(process.env.VIETTELPOST_CUS_ID || 0) || undefined,
+        GROUPADDRESS_ID:
+          Number(dto?.senderGroupAddressId || dto?.groupAddressId || sender.groupAddressId || process.env.VIETTELPOST_GROUPADDRESS_ID || 0) || undefined,
+        CUS_ID: Number(sender.cusId || process.env.VIETTELPOST_CUS_ID || 0) || undefined,
         SENDER_FULLNAME: dto?.fromName || sender.name || this.returnName,
         SENDER_ADDRESS: dto?.fromAddress || sender.address || this.returnAddress,
         SENDER_PHONE: dto?.fromPhone || sender.phone || this.returnPhone,
@@ -2237,6 +2494,57 @@ this.logger.warn(
     });
   }
 
+  private getAhamoveDefaultServices() {
+    const cityPrefix = String(process.env.AHAMOVE_CITY_PREFIX || "HAN")
+      .trim()
+      .toUpperCase() || "HAN";
+
+    const raw =
+      process.env.AHAMOVE_SERVICES ||
+      [
+        `${cityPrefix}-BIKE`,
+        `${cityPrefix}-2H`,
+        `${cityPrefix}-TRUCK-1000`,
+        `${cityPrefix}-TRUCK-2000`,
+        `${cityPrefix}-TRUCK-5000`,
+      ].join(",");
+
+    return Array.from(
+      new Set(
+        String(raw)
+          .split(",")
+          .map((item) => item.trim().toUpperCase())
+          .filter(Boolean)
+      )
+    );
+  }
+
+  private ahamoveServiceLabel(serviceId: string) {
+    const code = String(serviceId || "").toUpperCase();
+
+    if (code.includes("TRUCK-1000")) return "Xe tải 1000kg";
+    if (code.includes("TRUCK-2000")) return "Xe tải 2000kg";
+    if (code.includes("TRUCK-5000")) return "Xe tải 5000kg";
+    if (code.includes("2H") || code.includes("SAVING") || code.includes("ECONOMY")) {
+      return "Siêu Tốc - Tiết Kiệm";
+    }
+    if (code.includes("BIKE") || code.includes("EXPRESS")) return "Siêu Tốc";
+
+    return serviceId || "AhaMove";
+  }
+
+  private ahamoveServiceLeadtime(serviceId: string) {
+    const code = String(serviceId || "").toUpperCase();
+
+    if (code.includes("TRUCK")) return "Xe tải";
+    if (code.includes("2H") || code.includes("SAVING") || code.includes("ECONOMY")) {
+      return "Giao trong 1 giờ";
+    }
+    if (code.includes("BIKE") || code.includes("EXPRESS")) return "Ưu tiên, giao hoả tốc";
+
+    return "Nội thành realtime";
+  }
+
   async quoteAhamove(body: any) {
     const fromName = body?.fromName || process.env.AHAMOVE_FROM_NAME || this.returnName;
     const fromPhone =
@@ -2246,10 +2554,6 @@ this.logger.warn(
       process.env.AHAMOVE_FROM_ADDRESS ||
       this.returnAddress;
 
-    const serviceId = String(
-      body?.serviceId || process.env.AHAMOVE_DEFAULT_SERVICE_ID || "HAN-BIKE"
-    );
-
     if (!fromPhone || !fromAddress) {
       throw new BadRequestException("Thiếu cấu hình AhaMove đầu gửi");
     }
@@ -2258,10 +2562,34 @@ this.logger.warn(
       throw new BadRequestException("Thiếu thông tin người nhận AhaMove");
     }
 
+    const requestedServices = Array.isArray(body?.services)
+      ? body.services
+      : String(
+          body?.services ||
+            body?.serviceIds ||
+            body?.serviceId ||
+            this.getAhamoveDefaultServices().join(",")
+        )
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean);
+
+    const services = Array.from(
+      new Set(
+        requestedServices
+          .map((item: any) => String(item || "").trim().toUpperCase())
+          .filter(Boolean)
+      )
+    ) as string[];
+
     const codAmount = Math.max(0, Math.round(Number(body?.codAmount || 0)));
     const itemValue = Math.max(0, Math.round(Number(body?.itemValue || codAmount || 0)));
+    const weightGram = Math.max(100, Number(body?.weightGram || body?.weight || 200));
+    const lengthCm = Math.max(1, Number(body?.lengthCm || body?.length || 10));
+    const widthCm = Math.max(1, Number(body?.widthCm || body?.width || 10));
+    const heightCm = Math.max(1, Number(body?.heightCm || body?.height || 10));
 
-    const payload = {
+    const buildPayload = (serviceId: string) => ({
       order_time: Number(body?.order_time ?? body?.orderTime ?? 0),
       path: [
         {
@@ -2302,16 +2630,73 @@ this.logger.warn(
         : [],
       package_detail: [
         {
-          weight: Math.max(0.1, Number(body?.weightKg || body?.weight || 200) / 1000),
-          length: Math.max(0.01, Number(body?.lengthM || body?.length || 10) / 100),
-          width: Math.max(0.01, Number(body?.widthM || body?.width || 10) / 100),
-          height: Math.max(0.01, Number(body?.heightM || body?.height || 10) / 100),
+          weight: Math.max(0.1, weightGram / 1000),
+          length: Math.max(0.01, lengthCm / 100),
+          width: Math.max(0.01, widthCm / 100),
+          height: Math.max(0.01, heightCm / 100),
           description: "Thời trang",
         },
       ],
-    };
+    });
 
-    return this.ahamoveClient.estimate(payload);
+    const rows: any[] = [];
+
+    for (const serviceId of services) {
+      try {
+        const raw = await this.ahamoveClient.estimate(buildPayload(serviceId));
+        const items = Array.isArray(raw) ? raw : [raw];
+
+        for (const item of items) {
+          const data = item?.data || item || {};
+          const rawServiceId =
+            item?.service_id ||
+            item?.serviceId ||
+            data?.service_id ||
+            data?.serviceId ||
+            serviceId;
+
+          rows.push({
+            ...(item || {}),
+            service_id: rawServiceId,
+            serviceId: rawServiceId,
+            shortName: this.ahamoveServiceLabel(String(rawServiceId)),
+            leadtime: {
+              label: this.ahamoveServiceLeadtime(String(rawServiceId)),
+            },
+            _carrier: "ahamove",
+            _quoteKey: `ahamove-${rawServiceId}`,
+            _serviceName: rawServiceId,
+            _ahamoveServiceId: rawServiceId,
+          });
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`AhaMove quote failed service=${serviceId}: ${message}`);
+
+        rows.push({
+          service_id: serviceId,
+          serviceId: serviceId,
+          shortName: this.ahamoveServiceLabel(serviceId),
+          leadtime: {
+            label: this.ahamoveServiceLeadtime(serviceId),
+          },
+          fee: {
+            total: 0,
+            total_fee: 0,
+            service_fee: 0,
+          },
+          _carrier: "ahamove",
+          _quoteKey: `ahamove-unavailable-${serviceId}`,
+          _serviceName: serviceId,
+          _ahamoveServiceId: serviceId,
+          _disabled: true,
+          _disabledReason: message || "AhaMove chưa trả về gói cước phù hợp.",
+          _applyFeeToInput: false,
+        });
+      }
+    }
+
+    return rows;
   }
 
 

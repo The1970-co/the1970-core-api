@@ -172,8 +172,19 @@ export class ViettelPostClient {
     );
   }
 
+  listInventories() {
+    return this.request<any>(this.endpoint("INVENTORIES", "/user/listInventory"));
+  }
+
   getPrice(payload: any) {
     return this.request<any>(this.endpoint("PRICE", "/order/getPrice"), {
+      method: "POST",
+      body: payload,
+    });
+  }
+
+  getPriceAll(payload: any) {
+    return this.request<any>(this.endpoint("PRICE_ALL", "/order/getPriceAll"), {
       method: "POST",
       body: payload,
     });
@@ -182,16 +193,6 @@ export class ViettelPostClient {
   getPriceAllNlp(payload: any) {
     return this.request<any>(
       this.endpoint("PRICE_ALL_NLP", "/order/getPriceAllNlp"),
-      {
-        method: "POST",
-        body: payload,
-      }
-    );
-  }
-
-  listServices(payload: any) {
-    return this.request<any>(
-      this.endpoint("SERVICES", "/categories/listService"),
       {
         method: "POST",
         body: payload,

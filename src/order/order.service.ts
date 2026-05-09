@@ -365,15 +365,9 @@ export class OrderService {
         throw new BadRequestException(`Variant không tồn tại: ${item.variantId}`);
       }
 
-      const inventory = variant.inventoryItems[0];
+      const inventory = variant.inventoryItems[0] || null;
 
-      if (!inventory) {
-        throw new BadRequestException(
-          `Variant ${variant.sku} chưa có tồn kho ở chi nhánh ${branchId}`
-        );
-      }
-
-      const availableQty = Number(inventory.availableQty || 0);
+      const availableQty = Number(inventory?.availableQty || 0);
       const neededQty = Number(item.quantity || 0);
 
       if (neededQty <= 0) {
@@ -392,14 +386,19 @@ export class OrderService {
       const beforeQty = availableQty;
       const afterQty = beforeQty - neededQty;
 
-      await tx.inventoryItem.update({
+      await tx.inventoryItem.upsert({
         where: {
           variantId_branchId: {
             variantId: item.variantId,
             branchId,
           },
         },
-        data: {
+        update: {
+          availableQty: afterQty,
+        },
+        create: {
+          variantId: item.variantId,
+          branchId,
           availableQty: afterQty,
         },
       });
@@ -650,6 +649,23 @@ export class OrderService {
   async createOrder(body: any, user?: any) {
     const mode = this.resolveMode(body);
     const modeConfig = this.getModeConfig(mode);
+    const negativeStockWarnings: string[] = [];
+    const negativeStockWarningKeys = new Set<string>();
+
+    const addNegativeStockWarning = (input: {
+      variantId: string;
+      sku?: string | null;
+      availableQty: number;
+      neededQty: number;
+    }) => {
+      const key = String(input.variantId || input.sku || "");
+      if (!key || negativeStockWarningKeys.has(key)) return;
+
+      negativeStockWarningKeys.add(key);
+      negativeStockWarnings.push(
+        `${input.sku || input.variantId} đang xuất âm kho. Tồn hiện tại ${input.availableQty}, bán ${input.neededQty}.`
+      );
+    };
 
     const items = Array.isArray(body.items) ? body.items : [];
 
@@ -774,18 +790,22 @@ export class OrderService {
             ? variant.inventoryItems[0]
             : null;
 
-          if (!inventory) {
-            throw new BadRequestException(
-              `Variant ${variant.sku} chưa có tồn kho ở chi nhánh ${branchId}`
-            );
-          }
-
-          const availableQty = Number(inventory.availableQty || 0);
+          const availableQty = Number(inventory?.availableQty || 0);
           const neededQty = Number(qtyByVariantId[String(item.variantId)] || 0);
 
+          // ✅ Cho phép tạo đơn / bán âm kho.
+          // Nếu chi nhánh chưa có dòng tồn kho thì coi như tồn = 0,
+          // đến bước trừ kho sẽ tự tạo inventoryItem và ghi âm.
           if (availableQty < neededQty) {
-            throw new BadRequestException(
-              `Không đủ tồn kho cho ${variant.sku}. Còn ${availableQty}, cần ${neededQty}`
+            addNegativeStockWarning({
+              variantId: String(item.variantId),
+              sku: variant.sku,
+              availableQty,
+              neededQty,
+            });
+
+            console.warn(
+              `[ALLOW_NEGATIVE_ORDER] ${variant.sku} | branch=${branchId} | available=${availableQty} | needed=${neededQty}`
             );
           }
         }
@@ -1092,23 +1112,32 @@ export class OrderService {
               },
             });
 
-            if (!inventory) {
-              throw new BadRequestException(
-                `Variant ${variantId} chưa có tồn kho ở chi nhánh ${branchId}`
-              );
-            }
-
-            const beforeQty = Number(inventory.availableQty || 0);
+            const beforeQty = Number(inventory?.availableQty || 0);
             const afterQty = beforeQty - deductQty;
 
-            await tx.inventoryItem.update({
+            if (beforeQty < deductQty) {
+              const variant = variantMap.get(String(variantId));
+              addNegativeStockWarning({
+                variantId: String(variantId),
+                sku: variant?.sku,
+                availableQty: beforeQty,
+                neededQty: deductQty,
+              });
+            }
+
+            await tx.inventoryItem.upsert({
               where: {
                 variantId_branchId: {
                   variantId,
                   branchId,
                 },
               },
-              data: {
+              update: {
+                availableQty: afterQty,
+              },
+              create: {
+                variantId,
+                branchId,
                 availableQty: afterQty,
               },
             });
@@ -1244,7 +1273,11 @@ export class OrderService {
       }
     }
 
-    return this.mapOrderResponse(finalOrder);
+    return {
+      ...this.mapOrderResponse(finalOrder),
+      negativeStockWarnings,
+      hasNegativeStockWarning: negativeStockWarnings.length > 0,
+    };
   }
 
   async getOrders(params: GetOrdersParams = {}, user?: any) {

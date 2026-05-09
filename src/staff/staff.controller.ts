@@ -31,6 +31,17 @@ export class StaffController {
     return this.staffService.create(dto);
   }
 
+
+  @Get("role-templates")
+  async getRoleTemplates() {
+    return this.staffService.getRoleTemplates();
+  }
+
+  @Patch("role-templates")
+  async saveRoleTemplates(@Body() dto: any) {
+    return this.staffService.saveRoleTemplates(dto);
+  }
+
   @Patch(":id")
   async update(@Param("id") id: string, @Body() dto: any) {
     return this.staffService.update(id, dto);
