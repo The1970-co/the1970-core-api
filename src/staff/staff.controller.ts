@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -72,6 +73,10 @@ export class StaffController {
       force: dto?.force !== false,
     });
   }
+@Delete(":id")
+async deleteStaff(@Param("id") id: string) {
+  return this.staffService.deleteStaff(id);
+}
 
   @Patch(":id/status")
   async updateStatus(

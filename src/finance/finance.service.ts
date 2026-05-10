@@ -587,4 +587,492 @@ export class FinanceService {
     });
   }
 
+
+private async ensureCashVoucherTable() {
+  await this.prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "CashVoucher" (
+      "id" TEXT PRIMARY KEY,
+      "voucherCode" TEXT NOT NULL UNIQUE,
+      "type" TEXT NOT NULL,
+      "status" TEXT NOT NULL DEFAULT 'DRAFT',
+      "branchId" TEXT,
+      "paymentSourceId" TEXT,
+      "amount" NUMERIC(18,2) NOT NULL DEFAULT 0,
+      "category" TEXT,
+      "title" TEXT NOT NULL,
+      "partnerName" TEXT,
+      "partnerPhone" TEXT,
+      "note" TEXT,
+      "createdById" TEXT,
+      "createdByName" TEXT,
+      "confirmedById" TEXT,
+      "confirmedByName" TEXT,
+      "cancelledById" TEXT,
+      "cancelledByName" TEXT,
+      "confirmedAt" TIMESTAMP,
+      "cancelledAt" TIMESTAMP,
+      "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
+      "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  // AUTO MIGRATE
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "type" TEXT NOT NULL DEFAULT 'RECEIPT';
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "status" TEXT NOT NULL DEFAULT 'DRAFT';
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "branchId" TEXT;
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "paymentSourceId" TEXT;
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "amount" NUMERIC(18,2) NOT NULL DEFAULT 0;
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "category" TEXT;
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "title" TEXT NOT NULL DEFAULT '';
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "partnerName" TEXT;
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "partnerPhone" TEXT;
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "note" TEXT;
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "createdById" TEXT;
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "createdByName" TEXT;
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "confirmedById" TEXT;
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "confirmedByName" TEXT;
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "cancelledById" TEXT;
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "cancelledByName" TEXT;
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "confirmedAt" TIMESTAMP;
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "cancelledAt" TIMESTAMP;
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMP NOT NULL DEFAULT NOW();
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    ALTER TABLE "CashVoucher"
+    ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW();
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS "CashVoucher_type_status_createdAt_idx"
+    ON "CashVoucher" ("type", "status", "createdAt");
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS "CashVoucher_branchId_createdAt_idx"
+    ON "CashVoucher" ("branchId", "createdAt");
+  `);
+
+  await this.prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS "CashVoucher_paymentSourceId_createdAt_idx"
+    ON "CashVoucher" ("paymentSourceId", "createdAt");
+  `);
+}
+
+  private async generateCashVoucherCode(type: "RECEIPT" | "PAYMENT") {
+    await this.ensureCashVoucherTable();
+
+    const prefix = type === "RECEIPT" ? "PT" : "PC";
+    const today = new Date();
+    const ymd = [
+      today.getFullYear(),
+      String(today.getMonth() + 1).padStart(2, "0"),
+      String(today.getDate()).padStart(2, "0"),
+    ].join("");
+
+    const rows = await this.prisma.$queryRawUnsafe<Array<{ count: bigint | number | string }>>(
+      `SELECT COUNT(*)::int AS count FROM "CashVoucher" WHERE "voucherCode" LIKE $1`,
+      `${prefix}${ymd}%`,
+    );
+
+    const count = Number(rows?.[0]?.count || 0) + 1;
+    return `${prefix}${ymd}-${String(count).padStart(4, "0")}`;
+  }
+
+  private cashVoucherPermissionForCreate(type?: string) {
+    return type === "PAYMENT"
+      ? "cash_voucher.create_payment"
+      : "cash_voucher.create_receipt";
+  }
+
+  private normalizeCashVoucherType(value: unknown): "RECEIPT" | "PAYMENT" {
+    const type = String(value || "").trim().toUpperCase();
+    return type === "PAYMENT" ? "PAYMENT" : "RECEIPT";
+  }
+
+  async getCashVouchers(params: {
+    type?: "RECEIPT" | "PAYMENT" | "ALL";
+    dateFrom?: string;
+    dateTo?: string;
+    branchId?: string;
+    paymentSourceId?: string;
+    status?: string;
+    q?: string;
+  }) {
+    await this.ensureCashVoucherTable();
+
+    const { from, to, dateFrom, dateTo } = this.makeDateRange(
+      params.dateFrom,
+      params.dateTo,
+    );
+
+    const values: any[] = [from, to];
+    const where: string[] = [`v."createdAt" BETWEEN $1 AND $2`];
+
+    if (params.type && params.type !== "ALL") {
+      values.push(params.type);
+      where.push(`v."type" = $${values.length}`);
+    }
+
+    if (params.branchId && params.branchId !== "ALL") {
+      values.push(params.branchId);
+      where.push(`v."branchId" = $${values.length}`);
+    }
+
+    if (params.paymentSourceId && params.paymentSourceId !== "ALL") {
+      values.push(params.paymentSourceId);
+      where.push(`v."paymentSourceId" = $${values.length}`);
+    }
+
+    if (params.status && params.status !== "ALL") {
+      values.push(params.status);
+      where.push(`v."status" = $${values.length}`);
+    }
+
+    if (params.q?.trim()) {
+      values.push(`%${params.q.trim()}%`);
+      where.push(`(
+        v."voucherCode" ILIKE $${values.length}
+        OR v."title" ILIKE $${values.length}
+        OR COALESCE(v."partnerName", '') ILIKE $${values.length}
+        OR COALESCE(v."partnerPhone", '') ILIKE $${values.length}
+        OR COALESCE(v."note", '') ILIKE $${values.length}
+      )`);
+    }
+
+    const rows = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+        SELECT
+          v.*,
+          b."name" AS "branchName",
+          ps."name" AS "paymentSourceName",
+          ps."code" AS "paymentSourceCode",
+          ps."type" AS "paymentSourceType"
+        FROM "CashVoucher" v
+        LEFT JOIN "Branch" b ON b."id" = v."branchId"
+        LEFT JOIN "PaymentSource" ps ON ps."id" = v."paymentSourceId"
+        WHERE ${where.join(" AND ")}
+        ORDER BY v."createdAt" DESC
+      `,
+      ...values,
+    );
+
+    let totalReceipt = 0;
+    let totalPayment = 0;
+    let confirmedReceipt = 0;
+    let confirmedPayment = 0;
+    let pendingAmount = 0;
+    let cancelledAmount = 0;
+
+    for (const row of rows) {
+      const amount = this.toNumber(row.amount);
+
+      if (row.type === "RECEIPT") totalReceipt += amount;
+      if (row.type === "PAYMENT") totalPayment += amount;
+
+      if (row.status === "CONFIRMED" && row.type === "RECEIPT") {
+        confirmedReceipt += amount;
+      }
+      if (row.status === "CONFIRMED" && row.type === "PAYMENT") {
+        confirmedPayment += amount;
+      }
+      if (row.status === "DRAFT") pendingAmount += amount;
+      if (row.status === "CANCELLED") cancelledAmount += amount;
+    }
+
+    return {
+      dateFrom,
+      dateTo,
+      summary: {
+        totalReceipt,
+        totalPayment,
+        confirmedReceipt,
+        confirmedPayment,
+        netCashFlow: confirmedReceipt - confirmedPayment,
+        pendingAmount,
+        cancelledAmount,
+        totalRows: rows.length,
+      },
+      rows: rows.map((row) => ({
+        ...row,
+        amount: this.toNumber(row.amount),
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        confirmedAt: row.confirmedAt,
+        cancelledAt: row.cancelledAt,
+      })),
+    };
+  }
+
+  async createCashVoucher(body: {
+    type: "RECEIPT" | "PAYMENT";
+    branchId?: string;
+    paymentSourceId?: string;
+    amount: number;
+    category?: string;
+    title: string;
+    partnerName?: string;
+    partnerPhone?: string;
+    note?: string;
+    createdById?: string;
+    createdByName?: string;
+  }) {
+    await this.ensureCashVoucherTable();
+
+    const type = this.normalizeCashVoucherType(body.type);
+    const amount = this.toNumber(body.amount);
+
+    if (!body.title?.trim()) {
+      throw new BadRequestException("Thiếu nội dung phiếu.");
+    }
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new BadRequestException("Số tiền phiếu phải lớn hơn 0.");
+    }
+
+    const voucherCode = await this.generateCashVoucherCode(type);
+    const id = `cv_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+
+    const rows = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+        INSERT INTO "CashVoucher" (
+          "id", "voucherCode", "type", "status", "branchId", "paymentSourceId",
+          "amount", "category", "title", "partnerName", "partnerPhone", "note",
+          "createdById", "createdByName", "createdAt", "updatedAt"
+        )
+        VALUES ($1, $2, $3, 'DRAFT', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
+        RETURNING *
+      `,
+      id,
+      voucherCode,
+      type,
+      body.branchId || null,
+      body.paymentSourceId || null,
+      amount,
+      body.category?.trim() || null,
+      body.title.trim(),
+      body.partnerName?.trim() || null,
+      body.partnerPhone?.trim() || null,
+      body.note?.trim() || null,
+      body.createdById || null,
+      body.createdByName || null,
+    );
+
+    return rows[0];
+  }
+
+  async updateCashVoucher(
+    id: string,
+    body: {
+      branchId?: string;
+      paymentSourceId?: string;
+      amount?: number;
+      category?: string;
+      title?: string;
+      partnerName?: string;
+      partnerPhone?: string;
+      note?: string;
+    },
+  ) {
+    await this.ensureCashVoucherTable();
+
+    const current = await this.prisma.$queryRawUnsafe<any[]>(
+      `SELECT * FROM "CashVoucher" WHERE "id" = $1 LIMIT 1`,
+      id,
+    );
+
+    if (!current.length) {
+      throw new NotFoundException("Không tìm thấy phiếu thu/chi.");
+    }
+
+    if (current[0].status !== "DRAFT") {
+      throw new BadRequestException("Chỉ sửa được phiếu đang nháp.");
+    }
+
+    const amount =
+      body.amount === undefined || body.amount === null
+        ? this.toNumber(current[0].amount)
+        : this.toNumber(body.amount);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new BadRequestException("Số tiền phiếu phải lớn hơn 0.");
+    }
+
+    const rows = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+        UPDATE "CashVoucher"
+        SET
+          "branchId" = $2,
+          "paymentSourceId" = $3,
+          "amount" = $4,
+          "category" = $5,
+          "title" = $6,
+          "partnerName" = $7,
+          "partnerPhone" = $8,
+          "note" = $9,
+          "updatedAt" = NOW()
+        WHERE "id" = $1
+        RETURNING *
+      `,
+      id,
+      body.branchId !== undefined ? body.branchId || null : current[0].branchId,
+      body.paymentSourceId !== undefined ? body.paymentSourceId || null : current[0].paymentSourceId,
+      amount,
+      body.category !== undefined ? body.category?.trim() || null : current[0].category,
+      body.title !== undefined ? body.title?.trim() || current[0].title : current[0].title,
+      body.partnerName !== undefined ? body.partnerName?.trim() || null : current[0].partnerName,
+      body.partnerPhone !== undefined ? body.partnerPhone?.trim() || null : current[0].partnerPhone,
+      body.note !== undefined ? body.note?.trim() || null : current[0].note,
+    );
+
+    return rows[0];
+  }
+
+  async confirmCashVoucher(
+    id: string,
+    body: {
+      confirmedById?: string;
+      confirmedByName?: string;
+      note?: string;
+    } = {},
+  ) {
+    await this.ensureCashVoucherTable();
+
+    const rows = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+        UPDATE "CashVoucher"
+        SET
+          "status" = 'CONFIRMED',
+          "confirmedAt" = NOW(),
+          "confirmedById" = $2,
+          "confirmedByName" = $3,
+          "note" = COALESCE($4, "note"),
+          "updatedAt" = NOW()
+        WHERE "id" = $1 AND "status" = 'DRAFT'
+        RETURNING *
+      `,
+      id,
+      body.confirmedById || null,
+      body.confirmedByName || null,
+      body.note?.trim() || null,
+    );
+
+    if (!rows.length) {
+      throw new BadRequestException("Không thể xác nhận phiếu. Phiếu không tồn tại hoặc không còn ở trạng thái nháp.");
+    }
+
+    return rows[0];
+  }
+
+  async cancelCashVoucher(
+    id: string,
+    body: {
+      cancelledById?: string;
+      cancelledByName?: string;
+      note?: string;
+    } = {},
+  ) {
+    await this.ensureCashVoucherTable();
+
+    const rows = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+        UPDATE "CashVoucher"
+        SET
+          "status" = 'CANCELLED',
+          "cancelledAt" = NOW(),
+          "cancelledById" = $2,
+          "cancelledByName" = $3,
+          "note" = COALESCE($4, "note"),
+          "updatedAt" = NOW()
+        WHERE "id" = $1 AND "status" != 'CANCELLED'
+        RETURNING *
+      `,
+      id,
+      body.cancelledById || null,
+      body.cancelledByName || null,
+      body.note?.trim() || null,
+    );
+
+    if (!rows.length) {
+      throw new BadRequestException("Không thể huỷ phiếu. Phiếu không tồn tại hoặc đã huỷ.");
+    }
+
+    return rows[0];
+  }
+
+
 }

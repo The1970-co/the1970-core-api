@@ -409,7 +409,46 @@ export class StaffService {
       .trim()
       .toLowerCase();
   }
+async deleteStaff(id: string) {
+  const staff = await this.prisma.staffUser.findUnique({
+    where: { id },
+  });
 
+  if (!staff) {
+    throw new BadRequestException("Nhân viên không tồn tại");
+  }
+
+  if (staff.role === "owner") {
+    throw new BadRequestException("Không thể xoá owner");
+  }
+
+  await this.prisma.$transaction(async (tx) => {
+    await tx.staffSession.deleteMany({
+      where: { staffId: id },
+    });
+
+    await tx.staffBranchPermission.deleteMany({
+      where: { staffId: id },
+    });
+
+    await tx.staffBranchRole.deleteMany({
+      where: { staffId: id },
+    });
+
+    await tx.staffUserRole.deleteMany({
+      where: { staffId: id },
+    });
+
+    await tx.staffUser.delete({
+      where: { id },
+    });
+  });
+
+  return {
+    success: true,
+    message: "Đã xoá nhân viên",
+  };
+}
   private normalizeRoles(input: any): string[] {
     const raw = Array.isArray(input) ? input : input ? [input] : [];
 
