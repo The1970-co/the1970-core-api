@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   Param,
   Patch,
@@ -11,18 +12,74 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import { Request } from "express";
-import { PaymentStatus } from "@prisma/client";
+import { OrderStatus, PaymentStatus } from "@prisma/client";
 import { JwtGuard } from "../auth/jwt.guard";
+import { PermissionGuard } from "../auth/guards/permission.guard";
+import { RequirePermissions } from "../auth/decorators/require-permissions.decorator";
 import { OrderService } from "./order.service";
 import { UpdateOrderStatusDto } from "./dto/update-order-status.dto";
 import { CreateOrderDto } from "./dto/create-order.dto";
 
-@UseGuards(JwtGuard)
+@UseGuards(JwtGuard, PermissionGuard)
 @Controller("orders")
 export class OrderController {
   constructor(private readonly orderService: OrderService) {}
 
+  private getPermissionKeys(user?: any) {
+    const keys = new Set<string>();
+
+    const addKeys = (items?: any[]) => {
+      if (!Array.isArray(items)) return;
+      items.forEach((item) => {
+        const key = String(item || "").trim();
+        if (key) keys.add(key);
+      });
+    };
+
+    addKeys(user?.permissions);
+    addKeys(user?.permissionKeys);
+
+    if (Array.isArray(user?.branchPermissions)) {
+      user.branchPermissions.forEach((row: any) => addKeys(row?.permissionKeys));
+    }
+
+    return keys;
+  }
+
+  private hasPermission(user: any, permission: string) {
+    const role = String(user?.role || "").toLowerCase();
+    const roles = Array.isArray(user?.roles)
+      ? user.roles.map((item: any) => String(item || "").toLowerCase())
+      : [];
+
+    if (role === "owner" || role === "admin" || roles.includes("owner") || roles.includes("admin")) {
+      return true;
+    }
+
+    const keys = this.getPermissionKeys(user);
+    return keys.has("*") || keys.has(permission);
+  }
+
+  private assertPermission(user: any, permission: string) {
+    if (!this.hasPermission(user, permission)) {
+      throw new ForbiddenException("Bạn không có quyền thực hiện thao tác này");
+    }
+  }
+
+  private permissionForOrderStatus(status?: OrderStatus | string | null) {
+    const next = String(status || "").trim().toUpperCase();
+
+    if (next === "CANCELLED") return "orders.cancel";
+    if (next === "APPROVED") return "orders.approve";
+    if (next === "PACKING" || next === "SHIPPED" || next === "COMPLETED") {
+      return "orders.pack_ship";
+    }
+
+    return "orders.edit";
+  }
+
   @Post()
+  @RequirePermissions("orders.create")
   async createOrder(
     @Body() body: CreateOrderDto,
     @Req() req: Request & { user?: any }
@@ -67,6 +124,7 @@ export class OrderController {
 
 
   @Patch(":id/assign-staff")
+  @RequirePermissions("orders.edit")
   async assignStaffToOrder(
     @Param("id") id: string,
     @Body() body: { assignedStaffId?: string | null },
@@ -80,6 +138,7 @@ export class OrderController {
   }
 
   @Patch(":id")
+  @RequirePermissions("orders.edit")
   async updateOrder(
     @Param("id") id: string,
     @Body() body: any,
@@ -91,6 +150,7 @@ export class OrderController {
 
 
   @Delete(":id")
+  @RequirePermissions("orders.delete")
   async deleteOrder(
     @Param("id") id: string,
     @Req() req: Request & { user?: any }
@@ -104,10 +164,12 @@ export class OrderController {
     @Body() body: UpdateOrderStatusDto,
     @Req() req: Request & { user?: any }
   ) {
+    this.assertPermission(req.user, this.permissionForOrderStatus(body.status));
     return this.orderService.updateOrderStatus(id, body.status, req.user);
   }
 
   @Patch(":id/payment-status")
+  @RequirePermissions("orders.pay")
   async updatePaymentStatus(
     @Param("id") id: string,
     @Body() body: { paymentStatus: PaymentStatus },
@@ -121,6 +183,7 @@ export class OrderController {
   }
 
   @Post(":id/ship")
+  @RequirePermissions("orders.pack_ship")
   async shipOrder(
     @Param("id") id: string,
     @Body() body: { weight: number; shippingFee?: number; note?: string },
@@ -130,6 +193,7 @@ export class OrderController {
   }
 
   @Get("inventory-movements/history")
+  @RequirePermissions("inventory.logs.view")
   async getInventoryMovements(
     @Query("limit") limit?: string,
     @Req() req?: Request & { user?: any }

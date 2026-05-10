@@ -430,10 +430,11 @@ model StaffUser {
   secondPasswordHash    String?
   secondPasswordEnabled Boolean @default(false)
 
-  isActive    Boolean   @default(true)
-  lastLoginAt DateTime?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  isActive       Boolean   @default(true)
+  sessionVersion Int       @default(1)
+  lastLoginAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   mainBranch Branch? @relation("StaffMainBranch", fields: [branchId], references: [id], onDelete: SetNull)
 
@@ -441,11 +442,31 @@ model StaffUser {
   branchPermissions StaffBranchPermission[]
   purchaseReceipts  PurchaseReceipt[]
   branchRoles       StaffBranchRole[]
+  sessions          StaffSession[]
 
   @@index([branchId])
   @@index([email])
   @@index([phone])
   @@index([isActive])
+}
+
+model StaffSession {
+  id               String    @id @default(cuid())
+  staffId          String
+  refreshTokenHash String
+  deviceInfo       String?
+  ipAddress        String?
+  sessionVersion   Int
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  staff StaffUser @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@index([staffId])
+  @@index([expiresAt])
+  @@index([revokedAt])
 }
 
 model StaffUserRole {

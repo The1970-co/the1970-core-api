@@ -104,6 +104,51 @@ export class OrderService {
     return keys;
   }
 
+  private hasOrderActionPermission(
+    user: any,
+    permission: string,
+    branchId?: string | null,
+  ) {
+    if (this.isOwner(user)) return true;
+
+    const keys = this.getOrderPermissionKeys(user, branchId);
+    if (keys.has("*") || keys.has(permission)) return true;
+
+    // Legacy fallback cho dữ liệu cũ chưa migrate permissionKeys.
+    const branchRows = Array.isArray(user?.branchPermissions)
+      ? user.branchPermissions
+      : [];
+    const row = branchRows.find((item: any) => !branchId || String(item?.branchId) === String(branchId));
+
+    if (permission === "orders.create") return Boolean(row?.canCreateOrder);
+    if (permission === "orders.approve") return Boolean(row?.canApproveOrder);
+    if (permission === "orders.cancel") return Boolean(row?.canCancelOrder);
+
+    return false;
+  }
+
+  private assertOrderActionPermission(
+    user: any,
+    permission: string,
+    branchId?: string | null,
+  ) {
+    if (!this.hasOrderActionPermission(user, permission, branchId)) {
+      throw new ForbiddenException("Bạn không có quyền thực hiện thao tác này");
+    }
+  }
+
+  private permissionForNextOrderStatus(status?: OrderStatus | string | null) {
+    const next = String(status || "").trim().toUpperCase();
+
+    if (next === "CANCELLED") return "orders.cancel";
+    if (next === "APPROVED") return "orders.approve";
+    if (next === "PACKING" || next === "SHIPPED" || next === "COMPLETED") {
+      return "orders.pack_ship";
+    }
+
+    return "orders.edit";
+  }
+
   private hasOrderPermission(
     user: any,
     permission: "orders.view" | "orders.view_own",
@@ -761,6 +806,11 @@ export class OrderService {
     if (invalidItem) {
       throw new BadRequestException("Sản phẩm hoặc số lượng không hợp lệ.");
     }
+
+    const requestedBranchId = body.branchId
+      ? String(body.branchId).trim()
+      : this.resolveBranchIdFromUser(user);
+    this.assertOrderActionPermission(user, "orders.create", requestedBranchId);
 
     const createdOrder = await this.prisma.$transaction(
       async (tx) => {
@@ -1610,7 +1660,7 @@ export class OrderService {
               ownWhere,
             ],
           },
-          select: { id: true },
+          select: { id: true, branchId: true },
         });
 
         if (!canViewOwn || !ownOrder) {
@@ -1647,6 +1697,8 @@ export class OrderService {
     if (!existing) {
       throw new BadRequestException("Không tìm thấy đơn hàng");
     }
+
+    this.assertOrderActionPermission(user, "orders.edit", existing.branchId || null);
 
     if (existing.status === OrderStatus.CANCELLED) {
       throw new BadRequestException("Đơn đã hủy, không thể sửa.");
@@ -1795,6 +1847,8 @@ export class OrderService {
       throw new BadRequestException("Không tìm thấy đơn hàng");
     }
 
+    this.assertOrderActionPermission(user, "orders.edit", existing.branchId || null);
+
     if (!this.isOwner(user) && !this.hasOrderPermission(user, "orders.view", existing.branchId || null)) {
       throw new ForbiddenException("Bạn không có quyền gán đơn cho nhân viên khác.");
     }
@@ -1856,6 +1910,12 @@ export class OrderService {
           throw new BadRequestException("Không tìm thấy đơn hàng");
         }
 
+        this.assertOrderActionPermission(
+          user,
+          this.permissionForNextOrderStatus(status),
+          order.branchId || null,
+        );
+
         const currentStatus = order.status;
         const nextStatus = status;
 
@@ -1910,12 +1970,14 @@ export class OrderService {
   ) {
     const existing = await this.prisma.order.findFirst({
       where: this.buildOrderWhereByUser(user, { id: orderId }),
-      select: { id: true },
+      select: { id: true, branchId: true },
     });
 
     if (!existing) {
       throw new BadRequestException("Không tìm thấy đơn hàng");
     }
+
+    this.assertOrderActionPermission(user, "orders.pay", existing.branchId || null);
 
     const updated = await this.prisma.order.update({
       where: { id: orderId },
@@ -1958,6 +2020,8 @@ export class OrderService {
     if (!order) {
       throw new BadRequestException("Không tìm thấy đơn hàng.");
     }
+
+    this.assertOrderActionPermission(user, "orders.pack_ship", order.branchId || null);
 
     if (order.status !== OrderStatus.PACKING) {
       throw new BadRequestException(
@@ -2022,6 +2086,8 @@ export class OrderService {
     if (!order) {
       throw new NotFoundException("Không tìm thấy đơn hàng");
     }
+
+    this.assertOrderActionPermission(user, "orders.delete", order.branchId || null);
 
     await this.prisma.$transaction(async (tx) => {
       if (

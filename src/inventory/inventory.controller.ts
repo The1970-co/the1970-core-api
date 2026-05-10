@@ -7,34 +7,38 @@ import {
   Query,
   Req,
   UploadedFile,
+  UploadedFiles,
   UseGuards,
   UseInterceptors,
-  UploadedFiles,
   BadRequestException,
-} from '@nestjs/common';
+} from "@nestjs/common";
 import {
   FileInterceptor,
   FileFieldsInterceptor,
-} from '@nestjs/platform-express';
-import { Request } from 'express';
-import { JwtGuard } from '../auth/jwt.guard';
-import { InventoryService } from './inventory.service';
+} from "@nestjs/platform-express";
+import { Request } from "express";
+import { JwtGuard } from "../auth/jwt.guard";
+import { PermissionGuard } from "../auth/guards/permission.guard";
+import { RequirePermissions } from "../auth/decorators/require-permissions.decorator";
+import { InventoryService } from "./inventory.service";
 
-@UseGuards(JwtGuard)
-@Controller('inventory')
+@UseGuards(JwtGuard, PermissionGuard)
+@Controller("inventory")
 export class InventoryController {
   constructor(private readonly inventoryService: InventoryService) {}
 
-  @Get('summary')
+  @Get("summary")
+  @RequirePermissions("inventory.view")
   async getInventorySummary(
     @Req() req: Request & { user?: any },
-    @Query('branchId') branchId?: string,
+    @Query("branchId") branchId?: string,
   ) {
     return this.inventoryService.getInventorySummary(req.user, branchId);
   }
 
-  @Post('import-stock-report')
-  @UseInterceptors(FileInterceptor('file'))
+  @Post("import-stock-report")
+  @RequirePermissions("inventory.excel.import")
+  @UseInterceptors(FileInterceptor("file"))
   async importStockReport(
     @UploadedFile() file: Express.Multer.File,
     @Req() req: Request & { user?: any },
@@ -42,8 +46,9 @@ export class InventoryController {
     return this.inventoryService.importStockReport(file, req.user);
   }
 
-  @Post('audit-sapo-file')
-  @UseInterceptors(FileInterceptor('file'))
+  @Post("audit-sapo-file")
+  @RequirePermissions("inventory.excel.audit")
+  @UseInterceptors(FileInterceptor("file"))
   async auditSapoFile(
     @UploadedFile() file: Express.Multer.File,
     @Req() req: Request & { user?: any },
@@ -52,20 +57,22 @@ export class InventoryController {
   }
 
   @Get()
+  @RequirePermissions("inventory.view")
   async getInventory(
     @Req() req: Request & { user?: any },
-    @Query('branchId') branchId?: string,
+    @Query("branchId") branchId?: string,
   ) {
     return this.inventoryService.getInventory(req.user, branchId);
   }
 
-  @Post('adjust')
+  @Post("adjust")
+  @RequirePermissions("inventory.adjust")
   async adjustInventory(
     @Body()
     body: {
       variantId: string;
       qty: number;
-      type: 'IN' | 'OUT' | 'SET';
+      type: "IN" | "OUT" | "SET";
       note?: string;
       branchId?: string;
     },
@@ -74,7 +81,8 @@ export class InventoryController {
     return this.inventoryService.adjustInventory(body, req.user);
   }
 
-  @Patch('transfer')
+  @Patch("transfer")
+  @RequirePermissions("inventory.transfer")
   async transferInventory(
     @Body()
     body: {
@@ -89,21 +97,22 @@ export class InventoryController {
     return this.inventoryService.transferInventory(body, req.user);
   }
 
-  @Get('movements/history')
+  @Get("movements/history")
+  @RequirePermissions("inventory.logs.view")
   async getInventoryMovements(
-    @Query('limit') limit?: string,
+    @Query("limit") limit?: string,
     @Req() req?: Request & { user?: any },
   ) {
     const parsedLimit = Number(limit || 100);
     return this.inventoryService.getInventoryMovements(parsedLimit, req?.user);
   }
 
-  // 🔥 FIX CHÍNH Ở ĐÂY
-  @Post('audit-two-sapo-files')
+  @Post("audit-two-sapo-files")
+  @RequirePermissions("inventory.excel.audit")
   @UseInterceptors(
     FileFieldsInterceptor([
-      { name: 'stockReportFile', maxCount: 1 }, // ⚠️ đổi tên
-      { name: 'productFile', maxCount: 1 },
+      { name: "stockReportFile", maxCount: 1 },
+      { name: "productFile", maxCount: 1 },
     ]),
   )
   async auditTwoSapoFiles(
@@ -118,9 +127,7 @@ export class InventoryController {
     const productFile = files?.productFile?.[0];
 
     if (!stockReportFile || !productFile) {
-      throw new BadRequestException(
-        'Thiếu file tồn kho hoặc file sản phẩm.',
-      );
+      throw new BadRequestException("Thiếu file tồn kho hoặc file sản phẩm.");
     }
 
     return this.inventoryService.auditTwoSapoFiles(

@@ -28,6 +28,17 @@ export class AuthController {
     };
   }
 
+  private getClearRefreshCookieOptions() {
+    const isProduction = process.env.NODE_ENV === "production";
+
+    return {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: isProduction ? ("none" as const) : ("lax" as const),
+      path: "/auth",
+    };
+  }
+
   private getCookieFromHeader(req: Request, key: string) {
     const raw = req.headers.cookie || "";
     const found = raw
@@ -39,18 +50,31 @@ export class AuthController {
     return decodeURIComponent(found.slice(key.length + 1));
   }
 
+  private getRequestMeta(req: Request) {
+    return {
+      userAgent: req.headers["user-agent"] || "",
+      ipAddress:
+        String(req.headers["x-forwarded-for"] || "")
+          .split(",")[0]
+          .trim() || req.socket.remoteAddress || "",
+    };
+  }
+
   @Post("login")
-  async login(@Body() body: any, @Res({ passthrough: true }) res: Response) {
+  async login(
+    @Body() body: any,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     const code = body.code || body.username || body.email;
-    const data: any = await this.authService.login(code, body.password);
+    const data: any = await this.authService.login(
+      code,
+      body.password,
+      this.getRequestMeta(req),
+    );
 
     if (data?.refreshToken) {
-      res.cookie(
-        "refreshToken",
-        data.refreshToken,
-        this.getRefreshCookieOptions()
-      );
-
+      res.cookie("refreshToken", data.refreshToken, this.getRefreshCookieOptions());
       const { refreshToken, ...safeData } = data;
       return safeData;
     }
@@ -61,20 +85,17 @@ export class AuthController {
   @Post("second-password/verify")
   async verifySecondPassword(
     @Body() body: { tempToken: string; secondPassword: string },
-    @Res({ passthrough: true }) res: Response
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
   ) {
     const data: any = await this.authService.verifySecondPassword(
       body.tempToken,
-      body.secondPassword
+      body.secondPassword,
+      this.getRequestMeta(req),
     );
 
     if (data?.refreshToken) {
-      res.cookie(
-        "refreshToken",
-        data.refreshToken,
-        this.getRefreshCookieOptions()
-      );
-
+      res.cookie("refreshToken", data.refreshToken, this.getRefreshCookieOptions());
       const { refreshToken, ...safeData } = data;
       return safeData;
     }
@@ -83,26 +104,27 @@ export class AuthController {
   }
 
   @Post("refresh")
-  async refresh(@Req() req: Request) {
+  async refresh(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const refreshToken = this.getCookieFromHeader(req, "refreshToken");
-    return this.authService.refresh(refreshToken);
+    const data: any = await this.authService.refresh(refreshToken);
+
+    if (data?.refreshToken) {
+      res.cookie("refreshToken", data.refreshToken, this.getRefreshCookieOptions());
+      const { refreshToken: _refreshToken, ...safeData } = data;
+      return safeData;
+    }
+
+    return data;
   }
 
   @Post("logout")
-  logout(@Res({ passthrough: true }) res: Response) {
-    const isProduction = process.env.NODE_ENV === "production";
-
-    res.clearCookie("refreshToken", {
-      httpOnly: true,
-      secure: isProduction,
-      sameSite: isProduction ? "none" : "lax",
-      path: "/auth",
-    });
-
+  async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    const refreshToken = this.getCookieFromHeader(req, "refreshToken");
+    await this.authService.logout(refreshToken);
+    res.clearCookie("refreshToken", this.getClearRefreshCookieOptions());
     return { message: "Đăng xuất thành công" };
   }
 
-  // ✅ FIX QUAN TRỌNG
   @UseGuards(JwtGuard)
   @Get("me")
   async me(@Req() req: any) {
@@ -113,12 +135,12 @@ export class AuthController {
   @Patch("me/password")
   changeMyPassword(
     @Req() req: any,
-    @Body() body: { oldPassword: string; newPassword: string }
+    @Body() body: { oldPassword: string; newPassword: string },
   ) {
     return this.authService.changeMyPassword(
       req.user.id,
       body.oldPassword,
-      body.newPassword
+      body.newPassword,
     );
   }
 }

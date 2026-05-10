@@ -875,7 +875,13 @@ export class StaffService {
           role: primaryRole,
           branchId: primaryBranchId,
           branchName: primaryBranchName,
+          sessionVersion: { increment: 1 },
         },
+      });
+
+      await tx.staffSession.updateMany({
+        where: { staffId, revokedAt: null },
+        data: { revokedAt: new Date() },
       });
     });
 
@@ -972,6 +978,16 @@ export class StaffService {
           .filter(Boolean),
         skipDuplicates: true,
       });
+
+      await tx.staffUser.update({
+        where: { id: staffId },
+        data: { sessionVersion: { increment: 1 } },
+      });
+
+      await tx.staffSession.updateMany({
+        where: { staffId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
     });
 
     return this.findOne(staffId);
@@ -1065,6 +1081,16 @@ export class StaffService {
           },
         });
       }
+
+      await tx.staffUser.update({
+        where: { id: staffId },
+        data: { sessionVersion: { increment: 1 } },
+      });
+
+      await tx.staffSession.updateMany({
+        where: { staffId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
     });
 
     return this.findOne(staffId).catch(() => null);
@@ -1100,11 +1126,36 @@ export class StaffService {
     };
   }
 
-  async updateStatus(id: string, dto: UpdateStaffStatusDto) {
-    return this.prisma.staffUser.update({
-      where: { id },
-      data: { isActive: dto.status === "ACTIVE" },
+
+  private async bumpStaffSessionVersion(staffId: string, tx?: any) {
+    const client = tx || this.prisma;
+    await client.staffUser.update({
+      where: { id: staffId },
+      data: { sessionVersion: { increment: 1 } },
     });
+    await client.staffSession.updateMany({
+      where: { staffId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+  }
+
+  async updateStatus(id: string, dto: UpdateStaffStatusDto) {
+    await this.prisma.$transaction(async (tx) => {
+      await tx.staffUser.update({
+        where: { id },
+        data: {
+          isActive: dto.status === "ACTIVE",
+          sessionVersion: { increment: 1 },
+        },
+      });
+
+      await tx.staffSession.updateMany({
+        where: { staffId: id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+    });
+
+    return this.findOne(id);
   }
 
   async updatePassword(id: string, newPassword: string) {
@@ -1114,10 +1165,22 @@ export class StaffService {
 
     const hash = await bcrypt.hash(newPassword, 10);
 
-    return this.prisma.staffUser.update({
-      where: { id },
-      data: { passwordHash: hash },
+    await this.prisma.$transaction(async (tx) => {
+      await tx.staffUser.update({
+        where: { id },
+        data: {
+          passwordHash: hash,
+          sessionVersion: { increment: 1 },
+        },
+      });
+
+      await tx.staffSession.updateMany({
+        where: { staffId: id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
     });
+
+    return this.findOne(id);
   }
 
   async updateSecondPassword(id: string, secondPassword: string) {
@@ -1127,12 +1190,20 @@ export class StaffService {
 
     const hash = await bcrypt.hash(secondPassword.trim(), 10);
 
-    await this.prisma.staffUser.update({
-      where: { id },
-      data: {
-        secondPasswordHash: hash,
-        secondPasswordEnabled: true,
-      },
+    await this.prisma.$transaction(async (tx) => {
+      await tx.staffUser.update({
+        where: { id },
+        data: {
+          secondPasswordHash: hash,
+          secondPasswordEnabled: true,
+          sessionVersion: { increment: 1 },
+        },
+      });
+
+      await tx.staffSession.updateMany({
+        where: { staffId: id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
     });
 
     return { message: "Đã cập nhật mật khẩu lớp 2." };
