@@ -272,7 +272,48 @@ function permissionKeyForTemplateLabel(
   );
 }
 
+function buildBranchPermissionRowFromPermissionKeys(keysInput: string[]) {
+  const keys = UNIQUE(keysInput);
+  const has = (key: string) => keys.includes(key) || keys.includes("*");
+
+  const row: BranchPermissionTemplate = {
+    canView: has("products.view") || has("menu.products"),
+    canSell: has("menu.pos") || has("pos.access"),
+    canViewOwnOrders: has("orders.view_own"),
+    canViewBranchOrders: has("orders.view") || has("orders.view_branch"),
+    canCreateOrder: has("orders.create"),
+    canApproveOrder: has("orders.approve") || has("orders.update_status"),
+    canCancelOrder: has("orders.cancel"),
+    canHandleReturn: has("returns.view") || has("returns.create") || has("orders.return"),
+    canViewStock: has("inventory.view"),
+    canManageStock: has("inventory.manage") || has("inventory.adjust") || has("inventory.transfer"),
+    canStocktake: has("stocktake.view") || has("stocktake.create") || has("stocktake.scan"),
+    canTransferStock: has("stock_transfer.view") || has("stock_transfer.create"),
+    canReceiveStock: has("stock_transfer.receive") || has("purchase_receipt.receive") || has("purchase_receipt.import_stock"),
+    canViewCustomer: has("customers.view") || has("customers.view_own"),
+    canEditCustomer: has("customers.edit") || has("customers.create"),
+    canExportProductExcel: has("products.excel.export"),
+    canImportProductExcel: has("products.excel.import"),
+    canExportOrderExcel: has("orders.excel.export"),
+    canExportInventoryExcel: has("inventory.excel.export") || has("inventory.excel.audit"),
+    canExportCustomerExcel: has("customers.excel.export") || has("customers.view"),
+    canViewReport: has("reports.view") || keys.some((key) => key.startsWith("reports.")),
+    canViewMoney: has("inventory.value.view") || has("finance.view"),
+    permissionKeys: keys,
+    extraPermissionKeys: [],
+    deniedPermissionKeys: [],
+  };
+
+  return row;
+}
+
 function branchPermissionFromTemplatePermissions(permissions: any) {
+  // FE mới lưu role template dạng { permissionKeys: [...] }.
+  // Nếu không đọc thẳng mảng này mà convert như group label cũ, quyền vừa tắt sẽ bị sync bật lại.
+  if (permissions && typeof permissions === "object" && Array.isArray(permissions.permissionKeys)) {
+    return buildBranchPermissionRowFromPermissionKeys(permissions.permissionKeys);
+  }
+
   const row: BranchPermissionTemplate = {
     canView: false,
     canSell: false,
