@@ -25,6 +25,47 @@ import { Roles } from "../auth/roles.decorator";
 export class StaffController {
   constructor(private readonly staffService: StaffService) {}
 
+  // ─── Static routes first: must be above /:id routes ──────────────────────
+
+  @Get("role-templates")
+  async getRoleTemplates() {
+    return this.staffService.getRoleTemplates();
+  }
+
+  @Patch("role-templates")
+  async saveRoleTemplates(@Body() dto: any) {
+    return this.staffService.saveRoleTemplates(dto);
+  }
+
+  @Post("sync-permissions")
+  async syncPermissions(@Body() dto: { force?: boolean }) {
+    return this.staffService.syncAllPermissionsFromRoleTemplates({
+      force: dto?.force !== false,
+    });
+  }
+
+  // ─── Departments ──────────────────────────────────────────────────────────
+
+  @Get("departments")
+  async getDepartments() {
+    return this.staffService.getDepartments();
+  }
+
+  @Post("departments")
+  async createDepartment(@Body() dto: any) {
+    return this.staffService.createDepartment(dto);
+  }
+
+  @Patch("departments/:id")
+  async updateDepartment(@Param("id") id: string, @Body() dto: any) {
+    return this.staffService.updateDepartment(id, dto);
+  }
+
+  @Delete("departments/:id")
+  async deleteDepartment(@Param("id") id: string) {
+    return this.staffService.deleteDepartment(id);
+  }
+
   // ─── Staff CRUD ──────────────────────────────────────────────────────────
 
   @Get()
@@ -50,22 +91,12 @@ export class StaffController {
   @Patch(":id/status")
   async updateStatus(
     @Param("id") id: string,
-    @Body() dto: UpdateStaffStatusDto
+    @Body() dto: UpdateStaffStatusDto,
   ) {
     return this.staffService.updateStatus(id, dto);
   }
 
-  // ─── Permissions & Roles ─────────────────────────────────────────────────
-
-  @Get("role-templates")
-  async getRoleTemplates() {
-    return this.staffService.getRoleTemplates();
-  }
-
-  @Patch("role-templates")
-  async saveRoleTemplates(@Body() dto: any) {
-    return this.staffService.saveRoleTemplates(dto);
-  }
+  // ─── Permissions & Branch Roles ──────────────────────────────────────────
 
   @Patch(":id/permissions")
   async updatePermissions(@Param("id") id: string, @Body() dto: any) {
@@ -77,17 +108,10 @@ export class StaffController {
     return this.staffService.updateBranchRoles(id, dto);
   }
 
-  @Post("sync-permissions")
-  async syncPermissions(@Body() dto: { force?: boolean }) {
-    return this.staffService.syncAllPermissionsFromRoleTemplates({
-      force: dto?.force !== false,
-    });
-  }
-
   @Post(":id/sync-permissions")
   async syncStaffPermissions(
     @Param("id") id: string,
-    @Body() dto: { force?: boolean }
+    @Body() dto: { force?: boolean },
   ) {
     return this.staffService.syncPermissionsForStaff(id, {
       force: dto?.force !== false,
@@ -99,7 +123,7 @@ export class StaffController {
   @Patch(":id/password")
   async updatePassword(
     @Param("id") id: string,
-    @Body() dto: UpdateStaffPasswordDto
+    @Body() dto: UpdateStaffPasswordDto,
   ) {
     return this.staffService.updatePassword(id, dto.password);
   }
@@ -107,37 +131,15 @@ export class StaffController {
   @Patch(":id/second-password")
   async updateSecondPassword(
     @Param("id") id: string,
-    @Body() body: { secondPassword: string }
+    @Body() body: { secondPassword: string },
   ) {
     return this.staffService.updateSecondPassword(id, body.secondPassword);
-  }
-
-  // ─── Departments ──────────────────────────────────────────────────────────
-
-  @Get("departments")
-  async getDepartments() {
-    return this.staffService.getDepartments();
-  }
-
-  @Post("departments")
-  async createDepartment(@Body() dto: any) {
-    return this.staffService.createDepartment(dto);
-  }
-
-  @Patch("departments/:id")
-  async updateDepartment(@Param("id") id: string, @Body() dto: any) {
-    return this.staffService.updateDepartment(id, dto);
-  }
-
-  @Delete("departments/:id")
-  async deleteDepartment(@Param("id") id: string) {
-    return this.staffService.deleteDepartment(id);
   }
 
   @Patch(":id/departments")
   async updateStaffDepartments(
     @Param("id") id: string,
-    @Body() body: { departmentIds: string[]; headOfDepartmentId?: string }
+    @Body() body: { departmentIds: string[]; headOfDepartmentId?: string },
   ) {
     return this.staffService.updateStaffDepartments(id, body);
   }
@@ -153,24 +155,24 @@ export class StaffMeController {
   @Patch("password")
   async changeMyPassword(
     @Request() req: any,
-    @Body() body: { currentPassword: string; newPassword: string }
+    @Body() body: { currentPassword: string; newPassword: string },
   ) {
     return this.staffService.changeOwnPassword(
       req.user?.id || req.user?.sub,
       body.currentPassword,
-      body.newPassword
+      body.newPassword,
     );
   }
 
   @Patch("security-pin")
   async changeMyPin(
     @Request() req: any,
-    @Body() body: { currentPassword: string; newPin: string }
+    @Body() body: { currentPassword: string; newPin: string },
   ) {
     return this.staffService.changeOwnSecurityPin(
       req.user?.id || req.user?.sub,
       body.currentPassword,
-      body.newPin
+      body.newPin,
     );
   }
 }

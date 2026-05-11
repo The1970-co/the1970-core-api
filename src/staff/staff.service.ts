@@ -1405,7 +1405,16 @@ export class StaffService {
       where: { id: staffId },
       select: { id: true },
     });
-    if (!staff) throw new BadRequestException("Nhân viên không tồn tại");
+
+    if (!staff) {
+      // Bulk save phòng ban không được chết cả lô vì 1 nhân viên stale/đã xoá.
+      return {
+        success: false,
+        skipped: true,
+        staffId,
+        message: "Nhân viên không tồn tại, đã bỏ qua dòng này.",
+      };
+    }
 
     const departmentIds = UNIQUE(Array.isArray(dto?.departmentIds) ? dto.departmentIds : []);
 
