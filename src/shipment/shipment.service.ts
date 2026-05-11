@@ -29,19 +29,109 @@ export class ShipmentService {
   private readonly returnAddress = process.env.GHN_RETURN_ADDRESS || "";
   private readonly returnName = process.env.GHN_RETURN_NAME || "The 1970";
 
+  private normalizeCarrierStatusText(input?: string | null) {
+    return String(input || "")
+      .trim()
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/đ/g, "d")
+      .replace(/Đ/g, "D")
+      .replace(/[_-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
   private mapShippingStatus(input?: string | null) {
-    const value = String(input || "").toLowerCase();
+    const value = this.normalizeCarrierStatusText(input);
 
     if (!value) return "NOT_CREATED";
-    if (value.includes("cancel")) return "CANCELLED";
-    if (value.includes("deliver")) return "DELIVERING";
-    if (value.includes("pick")) return "PICKING";
-    if (value.includes("transit") || value.includes("sorting")) return "IN_TRANSIT";
-    if (value.includes("complete") || value.includes("success")) return "DELIVERED";
-    if (value.includes("fail") || value.includes("return")) return "FAILED";
-    if (value.includes("create") || value.includes("ready")) return "CREATED";
 
-    return value.toUpperCase();
+    // Final states must be checked before generic words like "deliver".
+    // GHN may return Vietnamese labels such as "Giao hàng thành công".
+    if (
+      value.includes("giao hang thanh cong") ||
+      value.includes("da giao hang") ||
+      value.includes("da giao") ||
+      value.includes("thanh cong") ||
+      value.includes("delivered") ||
+      value.includes("delivery success") ||
+      value.includes("delivery successful") ||
+      value.includes("completed") ||
+      value.includes("complete") ||
+      value.includes("success")
+    ) {
+      return "DELIVERED";
+    }
+
+    if (
+      value.includes("huy") ||
+      value.includes("cancel")
+    ) {
+      return "CANCELLED";
+    }
+
+    if (
+      value.includes("hoan hang") ||
+      value.includes("tra hang") ||
+      value.includes("return")
+    ) {
+      return "RETURNING";
+    }
+
+    if (
+      value.includes("that bai") ||
+      value.includes("khong thanh cong") ||
+      value.includes("fail") ||
+      value.includes("exception") ||
+      value.includes("lost") ||
+      value.includes("damage")
+    ) {
+      return "FAILED";
+    }
+
+    if (
+      value.includes("dang giao") ||
+      value.includes("dang phat") ||
+      value.includes("delivering") ||
+      value.includes("delivery") ||
+      value.includes("in process")
+    ) {
+      return "DELIVERING";
+    }
+
+    if (
+      value.includes("lay hang") ||
+      value.includes("picking") ||
+      value.includes("picked") ||
+      value.includes("accepted")
+    ) {
+      return "PICKING";
+    }
+
+    if (
+      value.includes("trung chuyen") ||
+      value.includes("phan loai") ||
+      value.includes("transit") ||
+      value.includes("sorting") ||
+      value.includes("storing")
+    ) {
+      return "IN_TRANSIT";
+    }
+
+    if (
+      value.includes("tao don") ||
+      value.includes("cho lay") ||
+      value.includes("san sang") ||
+      value.includes("create") ||
+      value.includes("created") ||
+      value.includes("ready") ||
+      value.includes("pending")
+    ) {
+      return "CREATED";
+    }
+
+    return value.toUpperCase().replace(/\s+/g, "_");
   }
 
   private normalizeGhnRequiredNote(input?: string | null) {
@@ -65,14 +155,8 @@ export class ShipmentService {
     const s = String(status || "").toUpperCase();
 
     if (!s) return "UNKNOWN";
-    if (s.includes("DELIVERED") || s.includes("COMPLETED") || s.includes("SUCCESS")) return "DELIVERED";
-    if (s.includes("DELIVERING") || s.includes("IN_PROCESS") || s.includes("IN PROCESS")) return "DELIVERING";
-    if (s.includes("PICKING") || s.includes("ACCEPTED") || s.includes("PICKED")) return "PICKING";
-    if (s.includes("CREATED") || s.includes("READY") || s.includes("ASSIGNING") || s.includes("IDLE")) return "CREATED";
-    if (s.includes("CANCEL")) return "CANCELLED";
-    if (s.includes("FAIL")) return "FAILED";
-    if (s.includes("RETURN")) return "RETURNING";
-    if (s.includes("TRANSIT") || s.includes("SORT")) return "IN_TRANSIT";
+    const normalized = this.mapShippingStatus(status);
+    if (normalized !== "NOT_CREATED") return normalized;
 
     return s;
   }
@@ -183,39 +267,16 @@ export class ShipmentService {
   }
 
   private mapStatusLabel(status: string) {
-    const s = String(status || "").toUpperCase();
+    const s = this.mapShippingStatus(status);
 
-    if (s.includes("DELIVERED") || s.includes("SUCCESS")) {
-      return "Giao hàng thành công";
-    }
-
-    if (s.includes("DELIVERING")) {
-      return "Đang giao hàng";
-    }
-
-    if (s.includes("TRANSIT") || s.includes("SORT")) {
-      return "Đang trung chuyển";
-    }
-
-    if (s.includes("PICKING")) {
-      return "Đang lấy hàng";
-    }
-
-    if (s.includes("READY")) {
-      return "Chờ lấy hàng";
-    }
-
-    if (s.includes("CANCEL")) {
-      return "Đã hủy đơn";
-    }
-
-    if (s.includes("RETURN")) {
-      return "Đang hoàn hàng";
-    }
-
-    if (s.includes("FAIL")) {
-      return "Giao thất bại";
-    }
+    if (s === "DELIVERED") return "Giao hàng thành công";
+    if (s === "DELIVERING") return "Đang giao hàng";
+    if (s === "IN_TRANSIT") return "Đang trung chuyển";
+    if (s === "PICKING") return "Đang lấy hàng";
+    if (s === "CREATED") return "Chờ lấy hàng";
+    if (s === "CANCELLED") return "Đã hủy đơn";
+    if (s === "RETURNING") return "Đang hoàn hàng";
+    if (s === "FAILED") return "Giao thất bại";
 
     return "Cập nhật vận đơn";
   }
@@ -250,10 +311,18 @@ export class ShipmentService {
   private normalizeTracking(raw: any, shipment: any) {
     const timeline = this.normalizeTimeline(raw);
 
+    const latestTimelineStatus =
+      timeline.find((item: any) => this.mapShippingStatus(item?.title) === "DELIVERED")?.title ||
+      timeline.find((item: any) => this.mapShippingStatus(item?.status) === "DELIVERED")?.status ||
+      timeline[0]?.title ||
+      timeline[0]?.status ||
+      "";
+
     const partnerStatus =
-      raw?.status ||
       raw?.status_name ||
       raw?.current_status ||
+      raw?.status ||
+      latestTimelineStatus ||
       shipment?.shippingStatus ||
       "UNKNOWN";
 
@@ -647,6 +716,14 @@ export class ShipmentService {
         raw,
         source: force ? "manual_refresh" : "polling",
       });
+
+      const orderSyncData = this.buildCarrierOrderSyncData(normalized.shippingStatus);
+      if (Object.keys(orderSyncData).length > 0) {
+        await tx.order.update({
+          where: { id: shipment.orderId },
+          data: orderSyncData as any,
+        });
+      }
     });
 
     const timeline = await (this.prisma as any).shipmentTimelineEvent.findMany({
@@ -1227,30 +1304,37 @@ export class ShipmentService {
   }
 
   private buildAhamoveOrderSyncData(shippingStatus: string) {
-    if (shippingStatus === "DELIVERED") {
+    return this.buildCarrierOrderSyncData(shippingStatus);
+  }
+
+  private buildCarrierOrderSyncData(shippingStatus: string) {
+    const status = String(shippingStatus || "").toUpperCase();
+
+    if (status === "DELIVERED") {
       return {
         status: "COMPLETED",
         fulfillmentStatus: "FULFILLED",
       };
     }
 
-    if (shippingStatus === "CANCELLED") {
+    if (status === "CANCELLED") {
       return {
         status: "CANCELLED",
         fulfillmentStatus: "UNFULFILLED",
       };
     }
 
-    if (shippingStatus === "FAILED" || shippingStatus === "RETURNING") {
+    if (status === "FAILED" || status === "RETURNING") {
       return {
         fulfillmentStatus: "RETURNED",
       };
     }
 
     if (
-      shippingStatus === "PICKING" ||
-      shippingStatus === "DELIVERING" ||
-      shippingStatus === "CREATED"
+      status === "CREATED" ||
+      status === "PICKING" ||
+      status === "DELIVERING" ||
+      status === "IN_TRANSIT"
     ) {
       return {
         status: "SHIPPED",
@@ -1442,20 +1526,8 @@ export class ShipmentService {
   }
 
   private mapViettelPostShippingStatus(input?: string | null) {
-    const s = String(input || "").toUpperCase();
-
-    if (!s) return "CREATED";
-    if (s.includes("HUY") || s.includes("CANCEL")) return "CANCELLED";
-    if (s.includes("THANH CONG") || s.includes("DELIVERED") || s.includes("SUCCESS")) {
-      return "DELIVERED";
-    }
-    if (s.includes("DANG PHAT") || s.includes("DELIVERING")) return "DELIVERING";
-    if (s.includes("DANG LAY") || s.includes("PICK")) return "PICKING";
-    if (s.includes("HOAN") || s.includes("RETURN")) return "RETURNING";
-    if (s.includes("FAIL") || s.includes("THAT BAI")) return "FAILED";
-    if (s.includes("TRUNG CHUYEN") || s.includes("TRANSIT")) return "IN_TRANSIT";
-
-    return "CREATED";
+    const status = this.mapShippingStatus(input);
+    return status === "NOT_CREATED" ? "CREATED" : status;
   }
 
   private getViettelPostOrderNumber(raw: any) {
@@ -2493,6 +2565,14 @@ export class ShipmentService {
       raw,
       source: "manual_refresh",
     });
+
+    const orderSyncData = this.buildCarrierOrderSyncData(shippingStatus);
+    if (Object.keys(orderSyncData).length > 0) {
+      await this.prisma.order.update({
+        where: { id: shipment.orderId },
+        data: orderSyncData as any,
+      });
+    }
 
     return {
       source: "viettelpost_live",
