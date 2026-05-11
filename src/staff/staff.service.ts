@@ -28,6 +28,8 @@ type BranchPermissionTemplate = {
   canViewReport?: boolean;
   canViewMoney?: boolean;
   permissionKeys?: string[];
+  extraPermissionKeys?: string[];
+  deniedPermissionKeys?: string[];
 };
 
 type BranchRoleInput = {
@@ -295,6 +297,8 @@ function branchPermissionFromTemplatePermissions(permissions: any) {
     canViewReport: false,
     canViewMoney: false,
     permissionKeys: [],
+    extraPermissionKeys: [],
+    deniedPermissionKeys: [],
   };
 
   const keys: string[] = [];
@@ -480,6 +484,8 @@ export class StaffService {
     return {
       ...row,
       permissionKeys: permissionKeysFromLegacyBooleans(row),
+      extraPermissionKeys: [],
+      deniedPermissionKeys: [],
     };
   }
 
@@ -963,10 +969,31 @@ export class StaffService {
         : [],
     });
 
+    clean.extraPermissionKeys = UNIQUE(
+      Array.isArray(row.extraPermissionKeys) ? row.extraPermissionKeys : [],
+    );
+    clean.deniedPermissionKeys = UNIQUE(
+      Array.isArray(row.deniedPermissionKeys) ? row.deniedPermissionKeys : [],
+    );
+
     return clean;
   }
 
+
+  private async ensureStaffBranchPermissionOverrideColumns() {
+    await this.prisma.$executeRawUnsafe(`
+      ALTER TABLE "StaffBranchPermission"
+      ADD COLUMN IF NOT EXISTS "extraPermissionKeys" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+    `);
+
+    await this.prisma.$executeRawUnsafe(`
+      ALTER TABLE "StaffBranchPermission"
+      ADD COLUMN IF NOT EXISTS "deniedPermissionKeys" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+    `);
+  }
+
   async updatePermissions(staffId: string, dto: any) {
+    await this.ensureStaffBranchPermissionOverrideColumns();
     if (
       Array.isArray(dto.branchRoles) &&
       !Array.isArray(dto.branchPermissions)
@@ -1051,6 +1078,7 @@ export class StaffService {
     staffId: string,
     options: { force?: boolean } = {},
   ) {
+    await this.ensureStaffBranchPermissionOverrideColumns();
     const staff = await this.prisma.staffUser.findUnique({
       where: { id: staffId },
       include: {
@@ -1095,6 +1123,14 @@ export class StaffService {
         }
 
         const permissionRow = await this.permissionsForRole(roleCode, tx);
+        const existingExtraPermissionKeys = Array.isArray((existing as any)?.extraPermissionKeys)
+          ? (existing as any).extraPermissionKeys
+          : [];
+        const existingDeniedPermissionKeys = Array.isArray((existing as any)?.deniedPermissionKeys)
+          ? (existing as any).deniedPermissionKeys
+          : [];
+        (permissionRow as any).extraPermissionKeys = existingExtraPermissionKeys;
+        (permissionRow as any).deniedPermissionKeys = existingDeniedPermissionKeys;
 
         await tx.staffBranchPermission.upsert({
           where: {

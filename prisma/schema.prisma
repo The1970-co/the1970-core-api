@@ -528,7 +528,9 @@ model StaffBranchPermission {
 
   // Dynamic RBAC keys generated from role templates in admin UI.
   // Runtime authz reads this array first; boolean columns stay for backward compatibility.
-  permissionKeys String[] @default([])
+  permissionKeys       String[] @default([])
+  extraPermissionKeys  String[] @default([])
+  deniedPermissionKeys String[] @default([])
 
   canViewReport Boolean @default(false)
   canViewMoney  Boolean @default(false)
