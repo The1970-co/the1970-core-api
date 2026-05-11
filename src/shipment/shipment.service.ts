@@ -47,10 +47,27 @@ export class ShipmentService {
 
     if (!value) return "NOT_CREATED";
 
+    // Các trạng thái lỗi phải đứng trước "thanh cong" để tránh
+    // "giao khong thanh cong" bị nhận nhầm là DELIVERED.
+    if (
+      value.includes("khong thanh cong") ||
+      value.includes("that bai") ||
+      value.includes("giao that bai") ||
+      value.includes("delivery fail") ||
+      value.includes("delivery failed") ||
+      value.includes("fail") ||
+      value.includes("exception") ||
+      value.includes("lost") ||
+      value.includes("damage")
+    ) {
+      return "FAILED";
+    }
+
     // Final states must be checked before generic words like "deliver".
     // GHN may return Vietnamese labels such as "Giao hàng thành công".
     if (
       value.includes("giao hang thanh cong") ||
+      value.includes("phat thanh cong") ||
       value.includes("da giao hang") ||
       value.includes("da giao") ||
       value.includes("thanh cong") ||
@@ -77,17 +94,6 @@ export class ShipmentService {
       value.includes("return")
     ) {
       return "RETURNING";
-    }
-
-    if (
-      value.includes("that bai") ||
-      value.includes("khong thanh cong") ||
-      value.includes("fail") ||
-      value.includes("exception") ||
-      value.includes("lost") ||
-      value.includes("damage")
-    ) {
-      return "FAILED";
     }
 
     if (
@@ -311,14 +317,44 @@ export class ShipmentService {
   private normalizeTracking(raw: any, shipment: any) {
     const timeline = this.normalizeTimeline(raw);
 
-    const latestTimelineStatus =
+    const rawStatusText = [
+      raw?.status_name,
+      raw?.current_status,
+      raw?.status,
+      raw?.status_code,
+      raw?.order_status,
+      raw?.data?.status_name,
+      raw?.data?.current_status,
+      raw?.data?.status,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+
+    const deliveredTimelineStatus =
       timeline.find((item: any) => this.mapShippingStatus(item?.title) === "DELIVERED")?.title ||
+      timeline.find((item: any) => this.mapShippingStatus(item?.description) === "DELIVERED")?.description ||
       timeline.find((item: any) => this.mapShippingStatus(item?.status) === "DELIVERED")?.status ||
+      "";
+
+    const latestTimelineStatus =
+      deliveredTimelineStatus ||
       timeline[0]?.title ||
       timeline[0]?.status ||
       "";
 
+    const rawShippingStatus = this.mapShippingStatus(rawStatusText);
+    const timelineShippingStatus = this.mapShippingStatus(latestTimelineStatus);
+    const shippingStatus =
+      timelineShippingStatus === "DELIVERED" || rawShippingStatus === "DELIVERED"
+        ? "DELIVERED"
+        : rawShippingStatus !== "NOT_CREATED"
+          ? rawShippingStatus
+          : timelineShippingStatus !== "NOT_CREATED"
+            ? timelineShippingStatus
+            : this.mapShippingStatus(shipment?.shippingStatus || "UNKNOWN");
+
     const partnerStatus =
+      deliveredTimelineStatus ||
       raw?.status_name ||
       raw?.current_status ||
       raw?.status ||
@@ -329,8 +365,8 @@ export class ShipmentService {
     return {
       trackingCode: shipment?.trackingCode || raw?.order_code || "",
       carrier: shipment?.carrier || "GHN",
-      shippingStatus: this.mapShippingStatus(partnerStatus),
-      partnerStatus: raw?.status_name || this.mapStatusLabel(partnerStatus),
+      shippingStatus,
+      partnerStatus: partnerStatus || this.mapStatusLabel(shippingStatus),
       codAmount: Number(raw?.cod_amount ?? shipment?.codAmount ?? 0),
       shippingFee: Number(raw?.total_fee ?? shipment?.shippingFee ?? 0),
       serviceType: raw?.service_type_id ?? null,
