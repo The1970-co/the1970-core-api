@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 
 type SnapshotPayload = {
@@ -21,46 +25,28 @@ export class RbacSnapshotsService {
     return user?.name || user?.code || user?.username || null;
   }
 
-  private async ensureDepartmentTables(tx?: any) {
-    const client = tx || this.prisma;
-
-    await client.$executeRawUnsafe(`
-      CREATE TABLE IF NOT EXISTS "Department" (
-        "id" TEXT PRIMARY KEY,
-        "name" TEXT NOT NULL,
-        "code" TEXT NOT NULL UNIQUE,
-        "description" TEXT,
-        "color" TEXT NOT NULL DEFAULT '#6366f1',
-        "isActive" BOOLEAN NOT NULL DEFAULT TRUE,
-        "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
-        "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW()
-      );
-    `);
-
-    await client.$executeRawUnsafe(`
-      CREATE TABLE IF NOT EXISTS "StaffDepartment" (
-        "id" TEXT PRIMARY KEY,
-        "staffId" TEXT NOT NULL,
-        "departmentId" TEXT NOT NULL,
-        "isHead" BOOLEAN NOT NULL DEFAULT FALSE,
-        "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
-        CONSTRAINT "StaffDepartment_staff_department_unique" UNIQUE ("staffId", "departmentId")
-      );
-    `);
+  private normalizeDate(value: any) {
+    if (!value) return undefined;
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? undefined : date;
   }
 
   private async readDepartments() {
-    await this.ensureDepartmentTables();
+    try {
+      const departments = await this.prisma.department.findMany({
+        orderBy: { name: "asc" },
+      });
 
-    const departments = await this.prisma.$queryRawUnsafe<any[]>(`
-      SELECT * FROM "Department" ORDER BY "createdAt" ASC
-    `);
+      const staffDepartments = await this.prisma.staffDepartment.findMany({
+        orderBy: { staffId: "asc" },
+      });
 
-    const staffDepartments = await this.prisma.$queryRawUnsafe<any[]>(`
-      SELECT * FROM "StaffDepartment" ORDER BY "createdAt" ASC
-    `);
-
-    return { departments, staffDepartments };
+      return { departments, staffDepartments };
+    } catch {
+      // Nếu production chưa có dữ liệu phòng ban hoặc schema phòng ban khác bản cũ,
+      // snapshot vẫn phải chạy được để đóng băng role/permission chính.
+      return { departments: [], staffDepartments: [] };
+    }
   }
 
   async list() {
@@ -98,7 +84,10 @@ export class RbacSnapshotsService {
     });
   }
 
-  async createSnapshot(body: { name?: string; description?: string }, user?: any) {
+  async createSnapshot(
+    body: { name?: string; description?: string },
+    user?: any,
+  ) {
     const { departments, staffDepartments } = await this.readDepartments();
 
     const payload: SnapshotPayload = {
@@ -158,151 +147,172 @@ export class RbacSnapshotsService {
 
   async restoreSnapshot(id: string, user?: any) {
     const snapshot = await this.prisma.rbacSnapshot.findUnique({ where: { id } });
-    if (!snapshot) throw new NotFoundException("Không tìm thấy bản đóng băng phân quyền.");
+
+    if (!snapshot) {
+      throw new NotFoundException("Không tìm thấy bản đóng băng phân quyền.");
+    }
 
     const payload = snapshot.payload as SnapshotPayload;
+
     if (!payload || payload.version !== 1) {
       throw new BadRequestException("Bản snapshot không hợp lệ.");
     }
 
-    await this.prisma.$transaction(async (tx) => {
-      await this.ensureDepartmentTables(tx);
+    await this.prisma.$transaction(
+      async (tx) => {
+        await tx.staffBranchPermission.deleteMany({});
+        await tx.staffBranchRole.deleteMany({});
+        await tx.staffUserRole.deleteMany({});
+        await tx.staffRoleTemplate.deleteMany({});
 
-      await tx.staffBranchPermission.deleteMany({});
-      await tx.staffBranchRole.deleteMany({});
-      await tx.staffUserRole.deleteMany({});
-      await tx.staffRoleTemplate.deleteMany({});
-      await tx.$executeRawUnsafe(`DELETE FROM "StaffDepartment"`);
-      await tx.$executeRawUnsafe(`DELETE FROM "Department"`);
+        try {
+          await tx.staffDepartment.deleteMany({});
+          await tx.department.deleteMany({});
+        } catch {
+          // Không chặn rollback quyền chính nếu bảng phòng ban ở DB cũ khác schema.
+        }
 
-      if (payload.roleTemplates?.length) {
-        await tx.staffRoleTemplate.createMany({
-          data: payload.roleTemplates.map((row: any) => ({
-            roleCode: row.roleCode,
-            name: row.name,
-            scope: row.scope,
-            description: row.description,
-            note: row.note,
-            permissions: row.permissions,
-            createdAt: row.createdAt ? new Date(row.createdAt) : undefined,
-            updatedAt: row.updatedAt ? new Date(row.updatedAt) : undefined,
-          })),
-          skipDuplicates: true,
+        if (payload.roleTemplates?.length) {
+          await tx.staffRoleTemplate.createMany({
+            data: payload.roleTemplates.map((row: any) => ({
+              roleCode: row.roleCode,
+              name: row.name,
+              scope: row.scope,
+              description: row.description,
+              note: row.note,
+              permissions: row.permissions,
+              createdAt: this.normalizeDate(row.createdAt),
+              updatedAt: this.normalizeDate(row.updatedAt),
+            })),
+            skipDuplicates: true,
+          });
+        }
+
+        if (payload.staffUserRoles?.length) {
+          await tx.staffUserRole.createMany({
+            data: payload.staffUserRoles.map((row: any) => ({
+              id: row.id,
+              staffId: row.staffId,
+              roleCode: row.roleCode,
+              createdAt: this.normalizeDate(row.createdAt),
+            })),
+            skipDuplicates: true,
+          });
+        }
+
+        if (payload.staffBranchRoles?.length) {
+          await tx.staffBranchRole.createMany({
+            data: payload.staffBranchRoles.map((row: any) => ({
+              id: row.id,
+              staffId: row.staffId,
+              branchId: row.branchId,
+              roleCode: row.roleCode,
+              createdAt: this.normalizeDate(row.createdAt),
+              updatedAt: this.normalizeDate(row.updatedAt),
+            })),
+            skipDuplicates: true,
+          });
+        }
+
+        if (payload.staffBranchPermissions?.length) {
+          await tx.staffBranchPermission.createMany({
+            data: payload.staffBranchPermissions.map((row: any) => ({
+              id: row.id,
+              staffId: row.staffId,
+              branchId: row.branchId,
+              permissionKeys: Array.isArray(row.permissionKeys) ? row.permissionKeys : [],
+              extraPermissionKeys: Array.isArray(row.extraPermissionKeys)
+                ? row.extraPermissionKeys
+                : [],
+              deniedPermissionKeys: Array.isArray(row.deniedPermissionKeys)
+                ? row.deniedPermissionKeys
+                : [],
+              canView: Boolean(row.canView),
+              canSell: Boolean(row.canSell),
+              canViewOwnOrders: Boolean(row.canViewOwnOrders),
+              canViewBranchOrders: Boolean(row.canViewBranchOrders),
+              canCreateOrder: Boolean(row.canCreateOrder),
+              canApproveOrder: Boolean(row.canApproveOrder),
+              canCancelOrder: Boolean(row.canCancelOrder),
+              canHandleReturn: Boolean(row.canHandleReturn),
+              canViewStock: Boolean(row.canViewStock),
+              canManageStock: Boolean(row.canManageStock),
+              canStocktake: Boolean(row.canStocktake),
+              canTransferStock: Boolean(row.canTransferStock),
+              canReceiveStock: Boolean(row.canReceiveStock),
+              canViewCustomer: Boolean(row.canViewCustomer),
+              canEditCustomer: Boolean(row.canEditCustomer),
+              canExportProductExcel: Boolean(row.canExportProductExcel),
+              canImportProductExcel: Boolean(row.canImportProductExcel),
+              canExportOrderExcel: Boolean(row.canExportOrderExcel),
+              canExportInventoryExcel: Boolean(row.canExportInventoryExcel),
+              canExportCustomerExcel: Boolean(row.canExportCustomerExcel),
+              note: row.note || "Restored from RBAC snapshot",
+              createdAt: this.normalizeDate(row.createdAt),
+              updatedAt: this.normalizeDate(row.updatedAt),
+            })),
+            skipDuplicates: true,
+          });
+        }
+
+        try {
+          if (payload.departments?.length) {
+            await tx.department.createMany({
+              data: payload.departments.map((row: any) => ({
+                id: row.id,
+                name: row.name,
+                code: row.code,
+                description: row.description || null,
+                color: row.color || "#6366f1",
+                isActive: row.isActive !== false,
+                createdAt: this.normalizeDate(row.createdAt),
+                updatedAt: this.normalizeDate(row.updatedAt),
+              })),
+              skipDuplicates: true,
+            });
+          }
+
+          if (payload.staffDepartments?.length) {
+            await tx.staffDepartment.createMany({
+              data: payload.staffDepartments.map((row: any) => ({
+                id: row.id,
+                staffId: row.staffId,
+                departmentId: row.departmentId,
+                isHead: Boolean(row.isHead),
+                createdAt: this.normalizeDate(row.createdAt),
+              })),
+              skipDuplicates: true,
+            });
+          }
+        } catch {
+          // Snapshot phòng ban là phụ. Rollback quyền chính vẫn phải thành công.
+        }
+
+        await tx.staffUser.updateMany({
+          data: {
+            sessionVersion: { increment: 1 },
+          },
         });
-      }
 
-      if (payload.staffUserRoles?.length) {
-        await tx.staffUserRole.createMany({
-          data: payload.staffUserRoles.map((row: any) => ({
-            id: row.id,
-            staffId: row.staffId,
-            roleCode: row.roleCode,
-            createdAt: row.createdAt ? new Date(row.createdAt) : undefined,
-          })),
-          skipDuplicates: true,
+        await tx.staffSession.updateMany({
+          where: { revokedAt: null },
+          data: { revokedAt: new Date() },
         });
-      }
 
-      if (payload.staffBranchRoles?.length) {
-        await tx.staffBranchRole.createMany({
-          data: payload.staffBranchRoles.map((row: any) => ({
-            id: row.id,
-            staffId: row.staffId,
-            branchId: row.branchId,
-            roleCode: row.roleCode,
-            createdAt: row.createdAt ? new Date(row.createdAt) : undefined,
-            updatedAt: row.updatedAt ? new Date(row.updatedAt) : undefined,
-          })),
-          skipDuplicates: true,
+        await tx.rbacSnapshot.update({
+          where: { id },
+          data: {
+            restoredAt: new Date(),
+            restoredById: user?.id || user?.sub || null,
+            restoredByName: this.userName(user),
+          },
         });
-      }
-
-      if (payload.staffBranchPermissions?.length) {
-        await tx.staffBranchPermission.createMany({
-          data: payload.staffBranchPermissions.map((row: any) => ({
-            id: row.id,
-            staffId: row.staffId,
-            branchId: row.branchId,
-            permissionKeys: Array.isArray(row.permissionKeys) ? row.permissionKeys : [],
-            extraPermissionKeys: Array.isArray(row.extraPermissionKeys) ? row.extraPermissionKeys : [],
-            deniedPermissionKeys: Array.isArray(row.deniedPermissionKeys) ? row.deniedPermissionKeys : [],
-            canView: Boolean(row.canView),
-            canSell: Boolean(row.canSell),
-            canViewOwnOrders: Boolean(row.canViewOwnOrders),
-            canViewBranchOrders: Boolean(row.canViewBranchOrders),
-            canCreateOrder: Boolean(row.canCreateOrder),
-            canApproveOrder: Boolean(row.canApproveOrder),
-            canCancelOrder: Boolean(row.canCancelOrder),
-            canHandleReturn: Boolean(row.canHandleReturn),
-            canViewStock: Boolean(row.canViewStock),
-            canManageStock: Boolean(row.canManageStock),
-            canStocktake: Boolean(row.canStocktake),
-            canTransferStock: Boolean(row.canTransferStock),
-            canReceiveStock: Boolean(row.canReceiveStock),
-            canViewCustomer: Boolean(row.canViewCustomer),
-            canEditCustomer: Boolean(row.canEditCustomer),
-            canExportProductExcel: Boolean(row.canExportProductExcel),
-            canImportProductExcel: Boolean(row.canImportProductExcel),
-            canExportOrderExcel: Boolean(row.canExportOrderExcel),
-            canExportInventoryExcel: Boolean(row.canExportInventoryExcel),
-            canExportCustomerExcel: Boolean(row.canExportCustomerExcel),
-            canViewReport: Boolean(row.canViewReport),
-            canViewMoney: Boolean(row.canViewMoney),
-            note: row.note || "Restored from RBAC snapshot",
-            createdAt: row.createdAt ? new Date(row.createdAt) : undefined,
-            updatedAt: row.updatedAt ? new Date(row.updatedAt) : undefined,
-          })),
-          skipDuplicates: true,
-        });
-      }
-
-      for (const row of payload.departments || []) {
-        await tx.$executeRawUnsafe(
-          `INSERT INTO "Department" ("id", "name", "code", "description", "color", "isActive", "createdAt", "updatedAt")
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           ON CONFLICT ("id") DO UPDATE SET
-             "name" = EXCLUDED."name",
-             "code" = EXCLUDED."code",
-             "description" = EXCLUDED."description",
-             "color" = EXCLUDED."color",
-             "isActive" = EXCLUDED."isActive",
-             "updatedAt" = NOW()`,
-          row.id,
-          row.name,
-          row.code,
-          row.description || null,
-          row.color || "#6366f1",
-          row.isActive !== false,
-          row.createdAt ? new Date(row.createdAt) : new Date(),
-          row.updatedAt ? new Date(row.updatedAt) : new Date(),
-        );
-      }
-
-      for (const row of payload.staffDepartments || []) {
-        await tx.$executeRawUnsafe(
-          `INSERT INTO "StaffDepartment" ("id", "staffId", "departmentId", "isHead", "createdAt")
-           VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT ("staffId", "departmentId") DO NOTHING`,
-          row.id,
-          row.staffId,
-          row.departmentId,
-          Boolean(row.isHead),
-          row.createdAt ? new Date(row.createdAt) : new Date(),
-        );
-      }
-
-      await tx.staffUser.updateMany({ data: { sessionVersion: { increment: 1 } } });
-      await tx.staffSession.updateMany({ where: { revokedAt: null }, data: { revokedAt: new Date() } });
-
-      await tx.rbacSnapshot.update({
-        where: { id },
-        data: {
-          restoredAt: new Date(),
-          restoredById: user?.id || user?.sub || null,
-          restoredByName: this.userName(user),
-        },
-      });
-    }, { maxWait: 10000, timeout: 30000 });
+      },
+      {
+        maxWait: 10000,
+        timeout: 30000,
+      },
+    );
 
     return {
       success: true,
