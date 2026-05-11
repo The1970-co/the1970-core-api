@@ -35,19 +35,6 @@ type BranchRoleInput = {
   roleCode: string;
 };
 
-function normalizeRoleCode(value: unknown) {
-  return String(value || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/đ/g, "d")
-    .replace(/Đ/g, "D")
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9_]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .replace(/_+/g, "_");
-}
-
 const UNIQUE = (values: Array<string | undefined | null>) =>
   Array.from(
     new Set(values.map((v) => String(v || "").trim()).filter(Boolean)),
@@ -192,8 +179,6 @@ const PERMISSION_LABEL_TO_KEY: Record<string, string> = {
   "Xem khuyến mãi": "promotions.view",
   "Tạo khuyến mãi": "promotions.create",
   "Sửa khuyến mãi": "promotions.edit",
-  "Xác nhận khuyến mãi": "promotions.confirm",
-  "Hủy khuyến mãi": "promotions.cancel",
   "Kích hoạt khuyến mãi": "promotions.activate",
   "Tạm dừng khuyến mãi": "promotions.pause",
   "Xóa khuyến mãi": "promotions.delete",
@@ -424,7 +409,46 @@ export class StaffService {
       .trim()
       .toLowerCase();
   }
+async deleteStaff(id: string) {
+  const staff = await this.prisma.staffUser.findUnique({
+    where: { id },
+  });
 
+  if (!staff) {
+    throw new BadRequestException("Nhân viên không tồn tại");
+  }
+
+  if (staff.role === "owner") {
+    throw new BadRequestException("Không thể xoá owner");
+  }
+
+  await this.prisma.$transaction(async (tx) => {
+    await tx.staffSession.deleteMany({
+      where: { staffId: id },
+    });
+
+    await tx.staffBranchPermission.deleteMany({
+      where: { staffId: id },
+    });
+
+    await tx.staffBranchRole.deleteMany({
+      where: { staffId: id },
+    });
+
+    await tx.staffUserRole.deleteMany({
+      where: { staffId: id },
+    });
+
+    await tx.staffUser.delete({
+      where: { id },
+    });
+  });
+
+  return {
+    success: true,
+    message: "Đã xoá nhân viên",
+  };
+}
   private normalizeRoles(input: any): string[] {
     const raw = Array.isArray(input) ? input : input ? [input] : [];
 
@@ -435,17 +459,11 @@ export class StaffService {
 
   private validateRole(roleCode: string) {
     const normalized = this.normalizeRole(roleCode);
-
-    if (!normalized) {
-      throw new BadRequestException(`Role không hợp lệ: ${roleCode || "trống"}`);
-    }
-
-    if (!/^[a-z0-9][a-z0-9_-]{1,63}$/.test(normalized)) {
+    if (!normalized || !ROLE_TEMPLATES[normalized]) {
       throw new BadRequestException(
-        `Mã role không hợp lệ: ${roleCode}. Chỉ dùng chữ thường, số, dấu - hoặc _.`,
+        `Role không hợp lệ: ${roleCode || "trống"}`,
       );
     }
-
     return normalized;
   }
 
@@ -749,7 +767,7 @@ export class StaffService {
   }
 
   async findAll() {
-    const staffList = await this.prisma.staffUser.findMany({
+    return this.prisma.staffUser.findMany({
       orderBy: [{ createdAt: "desc" }],
       include: {
         roles: true,
@@ -757,16 +775,10 @@ export class StaffService {
         branchPermissions: { include: { branch: true } },
       },
     });
-
-    const deptMap = await this.getDepartmentsForStaffIds(staffList.map((staff) => staff.id));
-    return staffList.map((staff) => ({
-      ...staff,
-      departments: deptMap.get(staff.id) || [],
-    }));
   }
 
   async findOne(id: string) {
-    const staff = await this.prisma.staffUser.findUnique({
+    return this.prisma.staffUser.findUnique({
       where: { id },
       include: {
         roles: true,
@@ -774,13 +786,6 @@ export class StaffService {
         branchPermissions: { include: { branch: true } },
       },
     });
-
-    if (!staff) return null;
-    const deptMap = await this.getDepartmentsForStaffIds([staff.id]);
-    return {
-      ...staff,
-      departments: deptMap.get(staff.id) || [],
-    };
   }
 
   async update(id: string, dto: any) {
@@ -1161,249 +1166,6 @@ export class StaffService {
   }
 
 
-
-  // ===== Department Studio =====
-  // Lưu ý: dùng raw SQL an toàn để không bị runtime 500 nếu DB chưa kịp có Prisma model Department.
-  // Sau khi ổn định nên đưa 2 model Department/StaffDepartment vào prisma/schema.prisma.
-  private async ensureDepartmentTables() {
-    await this.prisma.$executeRawUnsafe(`
-      CREATE TABLE IF NOT EXISTS "Department" (
-        "id" TEXT PRIMARY KEY,
-        "name" TEXT NOT NULL,
-        "code" TEXT NOT NULL UNIQUE,
-        "description" TEXT,
-        "color" TEXT NOT NULL DEFAULT '#6366f1',
-        "isActive" BOOLEAN NOT NULL DEFAULT TRUE,
-        "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
-        "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW()
-      );
-    `);
-
-    await this.prisma.$executeRawUnsafe(`
-      CREATE TABLE IF NOT EXISTS "StaffDepartment" (
-        "id" TEXT PRIMARY KEY,
-        "staffId" TEXT NOT NULL,
-        "departmentId" TEXT NOT NULL,
-        "isHead" BOOLEAN NOT NULL DEFAULT FALSE,
-        "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
-        CONSTRAINT "StaffDepartment_staff_department_unique" UNIQUE ("staffId", "departmentId")
-      );
-    `);
-
-    await this.prisma.$executeRawUnsafe(`
-      CREATE INDEX IF NOT EXISTS "StaffDepartment_staffId_idx"
-      ON "StaffDepartment" ("staffId");
-    `);
-
-    await this.prisma.$executeRawUnsafe(`
-      CREATE INDEX IF NOT EXISTS "StaffDepartment_departmentId_idx"
-      ON "StaffDepartment" ("departmentId");
-    `);
-  }
-
-  private normalizeDepartmentCode(value: string) {
-    return normalizeRoleCode(value).replace(/_/g, "-");
-  }
-
-  private async getDepartmentsForStaffIds(staffIds: string[]) {
-    await this.ensureDepartmentTables();
-    const ids = UNIQUE(staffIds);
-    if (!ids.length) return new Map<string, any[]>();
-
-    const rows = await this.prisma.$queryRawUnsafe<any[]>(
-      `
-        SELECT
-          sd."staffId",
-          sd."departmentId",
-          sd."isHead",
-          d."id",
-          d."name",
-          d."code",
-          d."description",
-          d."color",
-          d."isActive"
-        FROM "StaffDepartment" sd
-        INNER JOIN "Department" d ON d."id" = sd."departmentId"
-        WHERE sd."staffId" = ANY($1)
-        ORDER BY d."name" ASC
-      `,
-      ids,
-    );
-
-    const map = new Map<string, any[]>();
-    for (const row of rows) {
-      const list = map.get(row.staffId) || [];
-      list.push({
-        staffId: row.staffId,
-        departmentId: row.departmentId,
-        isHead: Boolean(row.isHead),
-        department: {
-          id: row.id,
-          name: row.name,
-          code: row.code,
-          description: row.description,
-          color: row.color,
-          isActive: row.isActive,
-        },
-      });
-      map.set(row.staffId, list);
-    }
-    return map;
-  }
-
-  async getDepartments() {
-    await this.ensureDepartmentTables();
-
-    const rows = await this.prisma.$queryRawUnsafe<any[]>(`
-      SELECT
-        d."id",
-        d."name",
-        d."code",
-        d."description",
-        d."color",
-        d."isActive",
-        d."createdAt",
-        d."updatedAt",
-        COALESCE(
-          json_agg(
-            json_build_object(
-              'staffId', sd."staffId",
-              'isHead', sd."isHead",
-              'staff', json_build_object(
-                'id', s."id",
-                'name', s."name",
-                'code', s."code",
-                'isActive', s."isActive"
-              )
-            )
-          ) FILTER (WHERE sd."staffId" IS NOT NULL),
-          '[]'
-        ) AS "members"
-      FROM "Department" d
-      LEFT JOIN "StaffDepartment" sd ON sd."departmentId" = d."id"
-      LEFT JOIN "StaffUser" s ON s."id" = sd."staffId"
-      GROUP BY d."id"
-      ORDER BY d."createdAt" DESC
-    `);
-
-    return rows.map((row) => ({
-      ...row,
-      isActive: row.isActive !== false,
-      members: Array.isArray(row.members) ? row.members : [],
-    }));
-  }
-
-  async createDepartment(dto: any) {
-    await this.ensureDepartmentTables();
-
-    const name = String(dto?.name || "").trim();
-    if (!name) throw new BadRequestException("Thiếu tên phòng ban.");
-
-    const code = this.normalizeDepartmentCode(dto?.code || name);
-    const id = `dept_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
-    const rows = await this.prisma.$queryRawUnsafe<any[]>(
-      `
-        INSERT INTO "Department" (
-          "id", "name", "code", "description", "color", "isActive", "createdAt", "updatedAt"
-        ) VALUES ($1, $2, $3, $4, $5, TRUE, NOW(), NOW())
-        ON CONFLICT ("code") DO UPDATE SET
-          "name" = EXCLUDED."name",
-          "description" = EXCLUDED."description",
-          "color" = EXCLUDED."color",
-          "isActive" = TRUE,
-          "updatedAt" = NOW()
-        RETURNING *
-      `,
-      id,
-      name,
-      code,
-      String(dto?.description || "").trim() || null,
-      String(dto?.color || "#6366f1"),
-    );
-
-    return rows[0];
-  }
-
-  async updateDepartment(id: string, dto: any) {
-    await this.ensureDepartmentTables();
-
-    const rows = await this.prisma.$queryRawUnsafe<any[]>(
-      `
-        UPDATE "Department"
-        SET
-          "name" = COALESCE($2, "name"),
-          "description" = $3,
-          "color" = COALESCE($4, "color"),
-          "isActive" = COALESCE($5, "isActive"),
-          "updatedAt" = NOW()
-        WHERE "id" = $1
-        RETURNING *
-      `,
-      id,
-      dto?.name !== undefined ? String(dto.name || "").trim() : null,
-      dto?.description !== undefined ? String(dto.description || "").trim() || null : undefined,
-      dto?.color !== undefined ? String(dto.color || "#6366f1") : null,
-      dto?.isActive !== undefined ? Boolean(dto.isActive) : null,
-    );
-
-    if (!rows.length) throw new BadRequestException("Phòng ban không tồn tại.");
-    return rows[0];
-  }
-
-  async deleteDepartment(id: string) {
-    await this.ensureDepartmentTables();
-
-    await this.prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(`DELETE FROM "StaffDepartment" WHERE "departmentId" = $1`, id);
-      await tx.$executeRawUnsafe(`DELETE FROM "Department" WHERE "id" = $1`, id);
-    });
-
-    return { success: true, message: "Đã xoá phòng ban." };
-  }
-
-  async updateStaffDepartments(staffId: string, dto: any) {
-    await this.ensureDepartmentTables();
-
-    const staff = await this.prisma.staffUser.findUnique({
-      where: { id: staffId },
-      select: { id: true },
-    });
-    if (!staff) throw new BadRequestException("Nhân viên không tồn tại");
-
-    const departmentIds = UNIQUE(Array.isArray(dto?.departmentIds) ? dto.departmentIds : []);
-
-    if (departmentIds.length) {
-      const rows = await this.prisma.$queryRawUnsafe<any[]>(
-        `SELECT "id" FROM "Department" WHERE "id" = ANY($1)`,
-        departmentIds,
-      );
-      const existing = new Set(rows.map((row) => row.id));
-      const missing = departmentIds.find((id) => !existing.has(id));
-      if (missing) throw new BadRequestException(`Phòng ban không tồn tại: ${missing}`);
-    }
-
-    await this.prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(`DELETE FROM "StaffDepartment" WHERE "staffId" = $1`, staffId);
-
-      for (const departmentId of departmentIds) {
-        await tx.$executeRawUnsafe(
-          `
-            INSERT INTO "StaffDepartment" ("id", "staffId", "departmentId", "isHead", "createdAt")
-            VALUES ($1, $2, $3, FALSE, NOW())
-            ON CONFLICT ("staffId", "departmentId") DO NOTHING
-          `,
-          `sdept_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-          staffId,
-          departmentId,
-        );
-      }
-    });
-
-    return this.findOne(staffId);
-  }
-
-
   private async bumpStaffSessionVersion(staffId: string, tx?: any) {
     const client = tx || this.prisma;
     await client.staffUser.update({
@@ -1485,110 +1247,4 @@ export class StaffService {
 
     return { message: "Đã cập nhật mật khẩu lớp 2." };
   }
-  async deleteStaff(id: string) {
-    const staff = await this.prisma.staffUser.findUnique({
-      where: { id },
-    });
-
-    if (!staff) {
-      throw new BadRequestException("Nhân viên không tồn tại");
-    }
-
-    if (String(staff.role || "").toLowerCase() === "owner") {
-      throw new BadRequestException("Không thể xoá owner");
-    }
-
-    await this.prisma.$transaction(async (tx) => {
-      await tx.staffSession.deleteMany({ where: { staffId: id } });
-      await tx.staffDepartment.deleteMany({ where: { staffId: id } });
-      await tx.staffBranchPermission.deleteMany({ where: { staffId: id } });
-      await tx.staffBranchRole.deleteMany({ where: { staffId: id } });
-      await tx.staffUserRole.deleteMany({ where: { staffId: id } });
-      await tx.staffUser.delete({ where: { id } });
-    });
-
-    return { success: true, message: "Đã xoá nhân viên" };
-  }
-
-  async changeOwnPassword(
-    staffId: string,
-    currentPassword: string,
-    newPassword: string,
-  ) {
-    if (!staffId) throw new BadRequestException("Không xác định được nhân viên.");
-
-    const staff = await this.prisma.staffUser.findUnique({
-      where: { id: staffId },
-    });
-
-    if (!staff) throw new BadRequestException("Nhân viên không tồn tại.");
-    if (!newPassword || newPassword.length < 6) {
-      throw new BadRequestException("Mật khẩu mới tối thiểu 6 ký tự.");
-    }
-
-    const ok = await bcrypt.compare(currentPassword || "", staff.passwordHash || "");
-
-    if (!ok) throw new BadRequestException("Mật khẩu hiện tại không đúng.");
-
-    const passwordHash = await bcrypt.hash(newPassword, 10);
-
-    await this.prisma.$transaction(async (tx) => {
-      await tx.staffUser.update({
-        where: { id: staffId },
-        data: {
-          passwordHash,
-          sessionVersion: { increment: 1 },
-        },
-      });
-
-      await tx.staffSession.updateMany({
-        where: { staffId, revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
-    });
-
-    return { success: true, message: "Đã đổi mật khẩu." };
-  }
-
-  async changeOwnSecurityPin(
-    staffId: string,
-    currentPassword: string,
-    newPin: string,
-  ) {
-    if (!staffId) throw new BadRequestException("Không xác định được nhân viên.");
-
-    const staff = await this.prisma.staffUser.findUnique({
-      where: { id: staffId },
-    });
-
-    if (!staff) throw new BadRequestException("Nhân viên không tồn tại.");
-    if (!/^\d{4,6}$/.test(String(newPin || ""))) {
-      throw new BadRequestException("PIN bảo mật phải từ 4-6 số.");
-    }
-
-    const ok = await bcrypt.compare(currentPassword || "", staff.passwordHash || "");
-
-    if (!ok) throw new BadRequestException("Mật khẩu hiện tại không đúng.");
-
-    const secondPasswordHash = await bcrypt.hash(newPin, 10);
-
-    await this.prisma.$transaction(async (tx) => {
-      await tx.staffUser.update({
-        where: { id: staffId },
-        data: {
-          secondPasswordHash,
-          secondPasswordEnabled: true,
-          sessionVersion: { increment: 1 },
-        },
-      });
-
-      await tx.staffSession.updateMany({
-        where: { staffId, revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
-    });
-
-    return { success: true, message: "Đã đổi PIN bảo mật." };
-  }
-
 }

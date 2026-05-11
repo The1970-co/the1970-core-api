@@ -44,6 +44,23 @@ export class ShipmentService {
     return value.toUpperCase();
   }
 
+  private normalizeGhnRequiredNote(input?: string | null) {
+    const value = String(input || "")
+      .trim()
+      .toUpperCase()
+      .replace(/[\s_\-]/g, "");
+
+    if (value === "CHOXEMHANGKHONGTHU" || value === "CHOXEMHANGKHONGCHOTHU") {
+      return "CHOXEMHANGKHONGTHU";
+    }
+
+    if (value === "CHOXEMHANG" || value === "CHOXEMHANGCHOTHU") {
+      return "CHOXEMHANG";
+    }
+
+    return "KHONGCHOXEMHANG";
+  }
+
   private normalizeTimelineStatus(status?: string | null) {
     const s = String(status || "").toUpperCase();
 
@@ -836,11 +853,12 @@ export class ShipmentService {
         Math.round(Number(dto.codAmount || 0))
       );
       const codAmount = Math.min(requestedCodAmount, remainingCodAmount);
-
+      const requiredNote = this.normalizeGhnRequiredNote((dto as any).requiredNote);
+      const shipmentNote = String(dto.note || "").trim();
       const created = await this.ghnClient.createOrder({
         payment_type_id: 1,
-        note: dto.note || "",
-        required_note: "KHONGCHOXEMHANG",
+        note: shipmentNote,
+        required_note: requiredNote,
         return_phone: this.returnPhone,
         return_address: this.returnAddress,
         return_district_id: this.fromDistrictId,
@@ -876,6 +894,13 @@ export class ShipmentService {
         })),
       });
 
+      const shipmentMetadata = {
+        ...(created || {}),
+        note: shipmentNote,
+        required_note: requiredNote,
+        requiredNote,
+      };
+
       const shipment = await tx.shipment.upsert({
         where: { orderId },
         update: {
@@ -892,7 +917,7 @@ export class ShipmentService {
           toName: dto.toName,
           toPhone: dto.toPhone,
           toAddress: dto.toAddress,
-          metadata: created,
+          metadata: shipmentMetadata,
         },
         create: {
           orderId,
@@ -909,7 +934,7 @@ export class ShipmentService {
           toName: dto.toName,
           toPhone: dto.toPhone,
           toAddress: dto.toAddress,
-          metadata: created,
+          metadata: shipmentMetadata,
         },
       });
 
@@ -2339,6 +2364,11 @@ export class ShipmentService {
       const shippingStatus = this.mapViettelPostShippingStatus(partnerStatus);
       const trackingUrl = this.buildViettelPostTrackingUrl(orderNumber);
 
+      const shipmentMetadata = {
+        ...(created || {}),
+        note: String(dto?.note || "").trim(),
+      };
+
       const shipment = await tx.shipment.upsert({
         where: { orderId },
         update: {
@@ -2830,6 +2860,11 @@ export class ShipmentService {
         throw new BadRequestException("AhaMove không trả về order_id");
       }
 
+      const shipmentMetadata = {
+        ...(created || {}),
+        note: String(dto?.note || "").trim(),
+      };
+
       const shipment = await tx.shipment.upsert({
         where: { orderId },
         update: {
@@ -2855,7 +2890,7 @@ export class ShipmentService {
           ahamoveStatus,
           ahamoveSubStatus: created?.sub_status || created?.data?.sub_status || null,
           ahamoveRaw: created,
-          metadata: created,
+          metadata: shipmentMetadata,
           lastSyncedAt: new Date(),
         },
         create: {
@@ -2882,7 +2917,7 @@ export class ShipmentService {
           ahamoveStatus,
           ahamoveSubStatus: created?.sub_status || created?.data?.sub_status || null,
           ahamoveRaw: created,
-          metadata: created,
+          metadata: shipmentMetadata,
           lastSyncedAt: new Date(),
         },
       });
