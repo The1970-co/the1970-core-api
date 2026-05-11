@@ -235,8 +235,23 @@ export class ShipmentService {
     driverPlate?: string | null;
     eta?: string | null;
     locationText?: string | null;
+    eventTime?: string | Date | null;
   }) {
     const status = this.normalizeTimelineStatus(input.status);
+    const eventTime = input.eventTime ? new Date(input.eventTime) : new Date();
+    const safeEventTime = Number.isNaN(eventTime.getTime()) ? new Date() : eventTime;
+
+    const existing = await (client as any).shipmentTimelineEvent.findFirst({
+      where: {
+        shipmentId: input.shipmentId,
+        status,
+        partnerStatus: input.partnerStatus || null,
+        eventTime: safeEventTime,
+      },
+    });
+
+    if (existing) return existing;
+
     const latest = await (client as any).shipmentTimelineEvent.findFirst({
       where: { shipmentId: input.shipmentId },
       orderBy: { eventTime: "desc" },
@@ -245,8 +260,9 @@ export class ShipmentService {
     const sameStatus = latest?.status === status;
     const samePartnerStatus =
       String(latest?.partnerStatus || "") === String(input.partnerStatus || "");
+    const isSyntheticNow = !input.eventTime;
 
-    if (sameStatus && samePartnerStatus) {
+    if (isSyntheticNow && sameStatus && samePartnerStatus) {
       return latest;
     }
 
@@ -267,7 +283,7 @@ export class ShipmentService {
         driverPlate: input.driverPlate || null,
         eta: input.eta ? String(input.eta) : null,
         locationText: input.locationText || null,
-        eventTime: new Date(),
+        eventTime: safeEventTime,
       },
     });
   }
@@ -287,31 +303,137 @@ export class ShipmentService {
     return "Cập nhật vận đơn";
   }
 
+  private pickFirstText(row: any, keys: string[]) {
+    for (const key of keys) {
+      const value = row?.[key];
+      if (value !== undefined && value !== null && String(value).trim()) {
+        return String(value).trim();
+      }
+    }
+    return "";
+  }
+
+  private normalizeGhnTimelineEvent(item: any, index: number) {
+    const rawStatus = this.pickFirstText(item, [
+      "status",
+      "status_name",
+      "current_status",
+      "action",
+      "action_name",
+      "log_status",
+      "order_status",
+    ]);
+
+    const description = this.pickFirstText(item, [
+      "description",
+      "desc",
+      "detail",
+      "message",
+      "reason",
+      "note",
+      "content",
+    ]);
+
+    const location = this.pickFirstText(item, [
+      "location",
+      "location_text",
+      "hub_name",
+      "hub",
+      "warehouse",
+      "area",
+      "station_name",
+      "post_office",
+      "address",
+    ]);
+
+    const eventCode = this.pickFirstText(item, [
+      "code",
+      "status_code",
+      "action_code",
+      "event_code",
+    ]);
+
+    const time = this.pickFirstText(item, [
+      "updated_date",
+      "action_at",
+      "created_date",
+      "event_time",
+      "time",
+      "created_at",
+      "updated_at",
+    ]);
+
+    const titleSource =
+      this.pickFirstText(item, ["status_name", "action_name", "title"]) ||
+      rawStatus ||
+      description;
+    const mappedStatus = this.mapShippingStatus(
+      [titleSource, rawStatus, description].filter(Boolean).join(" | ")
+    );
+
+    return {
+      id: `${index}-${eventCode || rawStatus || "log"}-${time || "time"}`,
+      status: mappedStatus === "NOT_CREATED" ? rawStatus : mappedStatus,
+      rawStatus,
+      eventCode,
+      title: titleSource || this.mapStatusLabel(rawStatus),
+      description,
+      location,
+      locationText: location,
+      time,
+      eventTime: time,
+      raw: item,
+    };
+  }
+
   private normalizeTimeline(raw: any) {
-    const logs = Array.isArray(raw?.log) ? raw.log : [];
+    const candidates = [
+      raw?.log,
+      raw?.logs,
+      raw?.tracking_logs,
+      raw?.trackingLogs,
+      raw?.timeline,
+      raw?.histories,
+      raw?.history,
+      raw?.data?.log,
+      raw?.data?.logs,
+      raw?.data?.tracking_logs,
+      raw?.data?.timeline,
+      raw?.data?.histories,
+      raw?.data?.history,
+    ];
+
+    const logs = candidates.find((item) => Array.isArray(item)) || [];
 
     const sorted = [...logs].sort((a, b) => {
-      const ta = new Date(a?.updated_date || a?.action_at || 0).getTime();
-      const tb = new Date(b?.updated_date || b?.action_at || 0).getTime();
+      const ta = new Date(
+        this.pickFirstText(a, [
+          "updated_date",
+          "action_at",
+          "created_date",
+          "event_time",
+          "time",
+          "created_at",
+          "updated_at",
+        ]) || 0
+      ).getTime();
+      const tb = new Date(
+        this.pickFirstText(b, [
+          "updated_date",
+          "action_at",
+          "created_date",
+          "event_time",
+          "time",
+          "created_at",
+          "updated_at",
+        ]) || 0
+      ).getTime();
       return tb - ta;
     });
 
-    return sorted.map((item: any, index: number) => {
-      const status = String(item?.status || "");
-
-      return {
-        id: `${index}-${status || "log"}`,
-        status,
-        title: item?.status_name || this.mapStatusLabel(status),
-        description: item?.description || item?.reason || "",
-        location: item?.location || item?.hub_name || item?.area || "",
-        time:
-          item?.updated_date ||
-          item?.action_at ||
-          item?.created_date ||
-          "",
-      };
-    });
+    return sorted.map((item: any, index: number) =>
+      this.normalizeGhnTimelineEvent(item, index)
+    );
   }
 
   private normalizeTracking(raw: any, shipment: any) {
@@ -412,6 +534,36 @@ export class ShipmentService {
     const shipmentStatus = String(order.shipment?.shippingStatus || "").toUpperCase();
     if (shipmentStatus.includes("DELIVERED") || shipmentStatus.includes("SUCCESS")) {
       throw new BadRequestException("Đơn đã giao thành công, không thể sửa COD");
+    }
+  }
+
+  private async appendCarrierTimelineEvents(client: any, input: {
+    shipmentId: string;
+    orderId?: string | null;
+    carrier?: string | null;
+    trackingCode?: string | null;
+    timeline?: any[];
+    source?: string;
+  }) {
+    const rows = Array.isArray(input.timeline) ? input.timeline : [];
+
+    for (const row of rows) {
+      await this.appendShipmentTimelineEvent(client, {
+        shipmentId: input.shipmentId,
+        orderId: input.orderId,
+        carrier: input.carrier,
+        trackingCode: input.trackingCode,
+        status: row.status || row.rawStatus || row.title || "UNKNOWN",
+        partnerStatus: row.rawStatus || row.title || row.status || null,
+        title: row.title || this.timelineTitle(row.status, input.carrier),
+        description: [row.description, row.location ? `Vị trí/Bưu cục: ${row.location}` : ""]
+          .filter(Boolean)
+          .join(" · ") || null,
+        raw: row.raw || row,
+        source: input.source || "carrier_timeline",
+        locationText: row.locationText || row.location || null,
+        eventTime: row.eventTime || row.time || null,
+      });
     }
   }
 
@@ -749,8 +901,21 @@ export class ShipmentService {
         status: normalized.shippingStatus,
         partnerStatus: normalized.partnerStatus,
         title: this.timelineTitle(normalized.shippingStatus, shipment.carrier),
+        description:
+          normalized.timeline?.[0]?.description ||
+          normalized.timeline?.[0]?.location ||
+          null,
         raw,
         source: force ? "manual_refresh" : "polling",
+      });
+
+      await this.appendCarrierTimelineEvents(tx, {
+        shipmentId: shipment.id,
+        orderId: shipment.orderId,
+        carrier: shipment.carrier,
+        trackingCode: shipment.trackingCode || "",
+        timeline: normalized.timeline,
+        source: force ? "ghn_manual_refresh" : "ghn_polling",
       });
 
       const orderSyncData = this.buildCarrierOrderSyncData(normalized.shippingStatus);
@@ -1385,9 +1550,13 @@ export class ShipmentService {
     return (Array.isArray(events) ? events : []).map((event: any) => ({
       id: event.id,
       status: event.status || event.partnerStatus || "",
+      partnerStatus: event.partnerStatus || "",
+      rawStatus: event.raw?.rawStatus || event.partnerStatus || event.status || "",
+      eventCode: event.raw?.eventCode || event.raw?.code || event.raw?.status_code || "",
       title: event.title || this.timelineTitle(event.status, event.carrier),
-      description: event.description || "",
-      location: event.locationText || "",
+      description: event.description || event.raw?.description || event.raw?.detail || event.raw?.message || "",
+      location: event.locationText || event.raw?.location || event.raw?.hub_name || event.raw?.area || "",
+      locationText: event.locationText || event.raw?.location || event.raw?.hub_name || event.raw?.area || "",
       time: event.eventTime || event.createdAt || "",
       driverName: event.driverName || null,
       driverPhone: event.driverPhone || null,

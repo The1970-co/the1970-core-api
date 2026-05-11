@@ -72,22 +72,34 @@ export class AuthService {
   private buildPermissionKeys(user: any) {
     if (this.isOwnerOrAdmin(user)) return ["*"];
 
-    const keys: string[] = [];
+    const keys = new Set<string>();
     const rows = Array.isArray(user?.branchPermissions)
       ? user.branchPermissions
       : [];
 
+    const addKeys = (values: any[]) => {
+      if (!Array.isArray(values)) return;
+      values
+        .map((key: any) => String(key || "").trim())
+        .filter(Boolean)
+        .forEach((key: string) => keys.add(key));
+    };
+
+    const removeKeys = (values: any[]) => {
+      if (!Array.isArray(values)) return;
+      values
+        .map((key: any) => String(key || "").trim())
+        .filter(Boolean)
+        .forEach((key: string) => keys.delete(key));
+    };
+
     for (const row of rows) {
-      if (Array.isArray(row?.permissionKeys)) {
-        keys.push(
-          ...row.permissionKeys
-            .map((key: any) => String(key || "").trim())
-            .filter(Boolean),
-        );
-      }
+      addKeys(row?.permissionKeys);
+      addKeys(row?.extraPermissionKeys);
+      removeKeys(row?.deniedPermissionKeys);
     }
 
-    return Array.from(new Set(keys));
+    return Array.from(keys);
   }
 
   private async buildAccessToken(user: any, session: any) {

@@ -73,15 +73,31 @@ export class JwtGuard implements CanActivate {
     const isOwnerOrAdmin = roles.includes("owner") || roles.includes("admin");
     const permissionKeys = isOwnerOrAdmin
       ? ["*"]
-      : Array.from(
-          new Set(
-            (session.staff.branchPermissions || []).flatMap((row: any) =>
-              Array.isArray(row.permissionKeys)
-                ? row.permissionKeys.map((key: any) => String(key || "").trim()).filter(Boolean)
-                : [],
-            ),
-          ),
-        );
+      : (() => {
+          const keys = new Set<string>();
+          const addKeys = (values: any[]) => {
+            if (!Array.isArray(values)) return;
+            values
+              .map((key: any) => String(key || "").trim())
+              .filter(Boolean)
+              .forEach((key: string) => keys.add(key));
+          };
+          const removeKeys = (values: any[]) => {
+            if (!Array.isArray(values)) return;
+            values
+              .map((key: any) => String(key || "").trim())
+              .filter(Boolean)
+              .forEach((key: string) => keys.delete(key));
+          };
+
+          (session.staff.branchPermissions || []).forEach((row: any) => {
+            addKeys(row?.permissionKeys);
+            addKeys(row?.extraPermissionKeys);
+            removeKeys(row?.deniedPermissionKeys);
+          });
+
+          return Array.from(keys);
+        })();
 
     req.user = {
       id: session.staff.id,
