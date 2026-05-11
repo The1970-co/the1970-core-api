@@ -32,6 +32,18 @@ export class CategoriesController {
     return this.categoriesService.create(body);
   }
 
+  @Post('normalize')
+  normalize(
+    @Body()
+    body: {
+      capitalizeNames?: boolean;
+      sortAlphabetically?: boolean;
+      hideInactiveFromPickers?: boolean;
+    },
+  ) {
+    return this.categoriesService.normalize(body || {});
+  }
+
   @Patch(':id')
   update(
     @Param('id') id: string,

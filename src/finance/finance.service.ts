@@ -1,10 +1,56 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { FulfillmentStatus, OrderStatus, PaymentStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 
 @Injectable()
 export class FinanceService {
   constructor(private readonly prisma: PrismaService) {}
+
+  private isOwner(user?: any) {
+    const roles = [
+      ...(Array.isArray(user?.roles) ? user.roles : []),
+      user?.role,
+    ]
+      .map((role) => String(role || "").toLowerCase())
+      .filter(Boolean);
+
+    return roles.includes("owner") || roles.includes("admin") ||
+      (Array.isArray(user?.permissions) && user.permissions.includes("*"));
+  }
+
+  private userBranch(user?: any) {
+    return user?.branchId || null;
+  }
+
+  private ensureBranchScope(user?: any, branchId?: string | null) {
+    if (this.isOwner(user)) return;
+
+    const currentBranchId = this.userBranch(user);
+    if (!currentBranchId) {
+      throw new ForbiddenException("Tài khoản chưa được gán chi nhánh.");
+    }
+
+    if (branchId && String(branchId) !== String(currentBranchId)) {
+      throw new ForbiddenException("Không có quyền xem hoặc thao tác dữ liệu chi nhánh khác.");
+    }
+  }
+
+  private scopedBranchId(user?: any, requestedBranchId?: string | null) {
+    if (this.isOwner(user)) {
+      return requestedBranchId && requestedBranchId !== "ALL" ? requestedBranchId : null;
+    }
+
+    const currentBranchId = this.userBranch(user);
+    if (!currentBranchId) {
+      throw new ForbiddenException("Tài khoản chưa được gán chi nhánh.");
+    }
+
+    if (requestedBranchId && requestedBranchId !== "ALL" && String(requestedBranchId) !== String(currentBranchId)) {
+      throw new ForbiddenException("Không có quyền xem dữ liệu chi nhánh khác.");
+    }
+
+    return currentBranchId;
+  }
 
   private toNumber(value: unknown) {
     return Number(value || 0);
@@ -588,150 +634,49 @@ export class FinanceService {
   }
 
 
-private async ensureCashVoucherTable() {
-  await this.prisma.$executeRawUnsafe(`
-    CREATE TABLE IF NOT EXISTS "CashVoucher" (
-      "id" TEXT PRIMARY KEY,
-      "voucherCode" TEXT NOT NULL UNIQUE,
-      "type" TEXT NOT NULL,
-      "status" TEXT NOT NULL DEFAULT 'DRAFT',
-      "branchId" TEXT,
-      "paymentSourceId" TEXT,
-      "amount" NUMERIC(18,2) NOT NULL DEFAULT 0,
-      "category" TEXT,
-      "title" TEXT NOT NULL,
-      "partnerName" TEXT,
-      "partnerPhone" TEXT,
-      "note" TEXT,
-      "createdById" TEXT,
-      "createdByName" TEXT,
-      "confirmedById" TEXT,
-      "confirmedByName" TEXT,
-      "cancelledById" TEXT,
-      "cancelledByName" TEXT,
-      "confirmedAt" TIMESTAMP,
-      "cancelledAt" TIMESTAMP,
-      "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
-      "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW()
-    );
-  `);
+  private async ensureCashVoucherTable() {
+    await this.prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "CashVoucher" (
+        "id" TEXT PRIMARY KEY,
+        "voucherCode" TEXT NOT NULL UNIQUE,
+        "type" TEXT NOT NULL,
+        "status" TEXT NOT NULL DEFAULT 'DRAFT',
+        "branchId" TEXT,
+        "paymentSourceId" TEXT,
+        "amount" NUMERIC(18,2) NOT NULL DEFAULT 0,
+        "category" TEXT,
+        "title" TEXT NOT NULL,
+        "partnerName" TEXT,
+        "partnerPhone" TEXT,
+        "note" TEXT,
+        "createdById" TEXT,
+        "createdByName" TEXT,
+        "confirmedById" TEXT,
+        "confirmedByName" TEXT,
+        "cancelledById" TEXT,
+        "cancelledByName" TEXT,
+        "confirmedAt" TIMESTAMP,
+        "cancelledAt" TIMESTAMP,
+        "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
+        "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
 
-  // AUTO MIGRATE
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "type" TEXT NOT NULL DEFAULT 'RECEIPT';
-  `);
+    await this.prisma.$executeRawUnsafe(`
+      CREATE INDEX IF NOT EXISTS "CashVoucher_type_status_createdAt_idx"
+      ON "CashVoucher" ("type", "status", "createdAt");
+    `);
 
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "status" TEXT NOT NULL DEFAULT 'DRAFT';
-  `);
+    await this.prisma.$executeRawUnsafe(`
+      CREATE INDEX IF NOT EXISTS "CashVoucher_branchId_createdAt_idx"
+      ON "CashVoucher" ("branchId", "createdAt");
+    `);
 
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "branchId" TEXT;
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "paymentSourceId" TEXT;
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "amount" NUMERIC(18,2) NOT NULL DEFAULT 0;
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "category" TEXT;
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "title" TEXT NOT NULL DEFAULT '';
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "partnerName" TEXT;
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "partnerPhone" TEXT;
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "note" TEXT;
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "createdById" TEXT;
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "createdByName" TEXT;
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "confirmedById" TEXT;
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "confirmedByName" TEXT;
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "cancelledById" TEXT;
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "cancelledByName" TEXT;
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "confirmedAt" TIMESTAMP;
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "cancelledAt" TIMESTAMP;
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMP NOT NULL DEFAULT NOW();
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    ALTER TABLE "CashVoucher"
-    ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW();
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    CREATE INDEX IF NOT EXISTS "CashVoucher_type_status_createdAt_idx"
-    ON "CashVoucher" ("type", "status", "createdAt");
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    CREATE INDEX IF NOT EXISTS "CashVoucher_branchId_createdAt_idx"
-    ON "CashVoucher" ("branchId", "createdAt");
-  `);
-
-  await this.prisma.$executeRawUnsafe(`
-    CREATE INDEX IF NOT EXISTS "CashVoucher_paymentSourceId_createdAt_idx"
-    ON "CashVoucher" ("paymentSourceId", "createdAt");
-  `);
-}
+    await this.prisma.$executeRawUnsafe(`
+      CREATE INDEX IF NOT EXISTS "CashVoucher_paymentSourceId_createdAt_idx"
+      ON "CashVoucher" ("paymentSourceId", "createdAt");
+    `);
+  }
 
   private async generateCashVoucherCode(type: "RECEIPT" | "PAYMENT") {
     await this.ensureCashVoucherTable();
@@ -772,7 +717,7 @@ private async ensureCashVoucherTable() {
     paymentSourceId?: string;
     status?: string;
     q?: string;
-  }) {
+  }, user?: any) {
     await this.ensureCashVoucherTable();
 
     const { from, to, dateFrom, dateTo } = this.makeDateRange(
@@ -788,8 +733,9 @@ private async ensureCashVoucherTable() {
       where.push(`v."type" = $${values.length}`);
     }
 
-    if (params.branchId && params.branchId !== "ALL") {
-      values.push(params.branchId);
+    const scopedBranchId = this.scopedBranchId(user, params.branchId);
+    if (scopedBranchId) {
+      values.push(scopedBranchId);
       where.push(`v."branchId" = $${values.length}`);
     }
 
@@ -890,7 +836,7 @@ private async ensureCashVoucherTable() {
     note?: string;
     createdById?: string;
     createdByName?: string;
-  }) {
+  }, user?: any) {
     await this.ensureCashVoucherTable();
 
     const type = this.normalizeCashVoucherType(body.type);
@@ -904,6 +850,7 @@ private async ensureCashVoucherTable() {
       throw new BadRequestException("Số tiền phiếu phải lớn hơn 0.");
     }
 
+    const branchId = this.scopedBranchId(user, body.branchId || null);
     const voucherCode = await this.generateCashVoucherCode(type);
     const id = `cv_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 
@@ -920,7 +867,7 @@ private async ensureCashVoucherTable() {
       id,
       voucherCode,
       type,
-      body.branchId || null,
+      branchId || null,
       body.paymentSourceId || null,
       amount,
       body.category?.trim() || null,
@@ -947,6 +894,7 @@ private async ensureCashVoucherTable() {
       partnerPhone?: string;
       note?: string;
     },
+    user?: any,
   ) {
     await this.ensureCashVoucherTable();
 
@@ -957,6 +905,12 @@ private async ensureCashVoucherTable() {
 
     if (!current.length) {
       throw new NotFoundException("Không tìm thấy phiếu thu/chi.");
+    }
+
+    this.ensureBranchScope(user, current[0].branchId);
+
+    if (body.branchId !== undefined) {
+      this.ensureBranchScope(user, body.branchId || null);
     }
 
     if (current[0].status !== "DRAFT") {
@@ -1009,8 +963,20 @@ private async ensureCashVoucherTable() {
       confirmedByName?: string;
       note?: string;
     } = {},
+    user?: any,
   ) {
     await this.ensureCashVoucherTable();
+
+    const current = await this.prisma.$queryRawUnsafe<any[]>(
+      `SELECT * FROM "CashVoucher" WHERE "id" = $1 LIMIT 1`,
+      id,
+    );
+
+    if (!current.length) {
+      throw new NotFoundException("Không tìm thấy phiếu thu/chi.");
+    }
+
+    this.ensureBranchScope(user, current[0].branchId);
 
     const rows = await this.prisma.$queryRawUnsafe<any[]>(
       `
@@ -1045,8 +1011,20 @@ private async ensureCashVoucherTable() {
       cancelledByName?: string;
       note?: string;
     } = {},
+    user?: any,
   ) {
     await this.ensureCashVoucherTable();
+
+    const current = await this.prisma.$queryRawUnsafe<any[]>(
+      `SELECT * FROM "CashVoucher" WHERE "id" = $1 LIMIT 1`,
+      id,
+    );
+
+    if (!current.length) {
+      throw new NotFoundException("Không tìm thấy phiếu thu/chi.");
+    }
+
+    this.ensureBranchScope(user, current[0].branchId);
 
     const rows = await this.prisma.$queryRawUnsafe<any[]>(
       `

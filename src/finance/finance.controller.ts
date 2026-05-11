@@ -6,6 +6,7 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   UseGuards,
 } from "@nestjs/common";
 import { JwtGuard } from "../auth/jwt.guard";
@@ -40,6 +41,7 @@ export class FinanceController {
   @Get("cash-vouchers")
   @RequirePermissions("cash_voucher.view")
   getCashVouchers(
+    @Req() req: any,
     @Query("type") type?: "RECEIPT" | "PAYMENT" | "ALL",
     @Query("dateFrom") dateFrom?: string,
     @Query("dateTo") dateTo?: string,
@@ -56,11 +58,12 @@ export class FinanceController {
       paymentSourceId,
       status,
       q,
-    });
+    }, req.user);
   }
 
   @Post("cash-vouchers")
   createCashVoucher(
+    @Req() req: any,
     @Body()
     body: {
       type: "RECEIPT" | "PAYMENT";
@@ -76,11 +79,12 @@ export class FinanceController {
       createdByName?: string;
     }
   ) {
-    return this.financeService.createCashVoucher(body);
+    return this.financeService.createCashVoucher(body, req.user);
   }
 
   @Patch("cash-vouchers/:id")
   updateCashVoucher(
+    @Req() req: any,
     @Param("id") id: string,
     @Body()
     body: {
@@ -94,11 +98,12 @@ export class FinanceController {
       note?: string;
     }
   ) {
-    return this.financeService.updateCashVoucher(id, body);
+    return this.financeService.updateCashVoucher(id, body, req.user);
   }
 
   @Patch("cash-vouchers/:id/confirm")
   confirmCashVoucher(
+    @Req() req: any,
     @Param("id") id: string,
     @Body()
     body: {
@@ -107,11 +112,12 @@ export class FinanceController {
       note?: string;
     }
   ) {
-    return this.financeService.confirmCashVoucher(id, body);
+    return this.financeService.confirmCashVoucher(id, body, req.user);
   }
 
   @Patch("cash-vouchers/:id/cancel")
   cancelCashVoucher(
+    @Req() req: any,
     @Param("id") id: string,
     @Body()
     body: {
@@ -120,7 +126,7 @@ export class FinanceController {
       note?: string;
     }
   ) {
-    return this.financeService.cancelCashVoucher(id, body);
+    return this.financeService.cancelCashVoucher(id, body, req.user);
   }
 
   @Get("local-delivery-reconciliation")

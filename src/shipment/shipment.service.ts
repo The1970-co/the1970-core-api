@@ -313,18 +313,261 @@ export class ShipmentService {
     return "";
   }
 
-  private normalizeGhnTimelineEvent(item: any, index: number) {
-    const rawStatus = this.pickFirstText(item, [
-      "status",
-      "status_name",
-      "current_status",
-      "action",
-      "action_name",
-      "log_status",
-      "order_status",
+
+  private normalizeGhnStatusKey(input?: string | null) {
+    return String(input || "")
+      .trim()
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/đ/g, "d")
+      .replace(/Đ/g, "D")
+      .replace(/[\s\-]+/g, "_")
+      .replace(/[^a-z0-9_]+/g, "")
+      .replace(/_+/g, "_")
+      .replace(/^_|_$/g, "");
+  }
+
+  private ghnStatusLabel(input?: string | null) {
+    const key = this.normalizeGhnStatusKey(input);
+    const labels: Record<string, string> = {
+      ready_to_pick: "Sẵn sàng lấy hàng",
+      picking: "Đang lấy hàng",
+      money_collect_picking: "Đang lấy hàng COD",
+      picked: "Lấy hàng thành công",
+      storing: "Nhập hàng vào kho/bưu cục",
+      storing_order: "Nhập hàng vào kho/bưu cục",
+      sorting: "Đang phân loại hàng",
+      transporting: "Đang trung chuyển hàng",
+      transport: "Đang trung chuyển hàng",
+      ready_to_deliver: "Sẵn sàng giao hàng",
+      waiting_to_deliver: "Sẵn sàng giao hàng",
+      delivering: "Đang giao hàng",
+      money_collect_delivering: "Đang giao hàng COD",
+      delivered: "Giao hàng thành công",
+      delivery_success: "Giao hàng thành công",
+      completed: "Giao hàng thành công",
+      delivery_fail: "Giao thất bại",
+      deliver_fail: "Giao thất bại",
+      waiting_to_return: "Chờ hoàn hàng",
+      return: "Đang hoàn hàng",
+      returning: "Đang hoàn hàng",
+      returned: "Đã hoàn hàng",
+      cancel: "Đã huỷ vận đơn",
+      cancelled: "Đã huỷ vận đơn",
+      lost: "Thất lạc hàng",
+      damage: "Hàng hư hỏng",
+    };
+
+    if (labels[key]) return labels[key];
+
+    const text = this.normalizeCarrierStatusText(input);
+    if (text.includes("giao hang thanh cong") || text.includes("delivered") || text.includes("success")) return "Giao hàng thành công";
+    if (text.includes("dang giao") || text.includes("delivering")) return "Đang giao hàng";
+    if (text.includes("trung chuyen") || text.includes("transport")) return "Đang trung chuyển hàng";
+    if (text.includes("phan loai") || text.includes("sort")) return "Đang phân loại hàng";
+    if (text.includes("nhap") || text.includes("luu") || text.includes("storing")) return "Nhập hàng vào kho/bưu cục";
+    if (text.includes("lay hang") || text.includes("pick")) return "Đang lấy hàng";
+    if (text.includes("hoan") || text.includes("return")) return "Đang hoàn hàng";
+    if (text.includes("that bai") || text.includes("fail")) return "Giao thất bại";
+    if (text.includes("huy") || text.includes("cancel")) return "Đã huỷ vận đơn";
+
+    return String(input || "Cập nhật vận đơn").trim();
+  }
+
+  private collectGhnTimelineCandidates(raw: any) {
+    const candidates = [
+      raw?.log,
+      raw?.logs,
+      raw?.tracking_logs,
+      raw?.trackingLogs,
+      raw?.timeline,
+      raw?.histories,
+      raw?.history,
+      raw?.status_logs,
+      raw?.sorting_logs,
+      raw?.order_logs,
+      raw?.data?.log,
+      raw?.data?.logs,
+      raw?.data?.tracking_logs,
+      raw?.data?.trackingLogs,
+      raw?.data?.timeline,
+      raw?.data?.histories,
+      raw?.data?.history,
+      raw?.data?.status_logs,
+      raw?.data?.sorting_logs,
+      raw?.data?.order_logs,
+      raw?.publicTracking?.timelines,
+      raw?.publicTracking?.raw?.timelines,
+      raw?.publicTracking?.raw?.log,
+      raw?.publicTracking?.raw?.logs,
+      raw?.publicTracking?.raw?.timeline,
+      raw?.publicTracking?.raw?.history,
+    ];
+
+    const rows: any[] = [];
+    for (const item of candidates) {
+      if (Array.isArray(item)) rows.push(...item);
+    }
+
+    // Public GHN fallback may return nested Next/Nuxt data. Walk it softly.
+    const walk = (node: any, depth = 0) => {
+      if (!node || depth > 7) return;
+      if (Array.isArray(node)) {
+        const looksLikeTimeline = node.some((row) => {
+          if (!row || typeof row !== "object") return false;
+          const keys = Object.keys(row).map((key) => key.toLowerCase());
+          const hasStatus = keys.some((key) =>
+            ["status", "status_name", "action", "action_name", "current_status"].includes(key)
+          );
+          const hasTimeOrDetail = keys.some((key) =>
+            ["time", "updated_date", "created_date", "updated_at", "created_at", "action_at", "event_time", "description", "detail", "message", "location", "hub_name", "warehouse", "area"].includes(key)
+          );
+          return hasStatus && hasTimeOrDetail;
+        });
+        if (looksLikeTimeline) rows.push(...node);
+        node.slice(0, 80).forEach((child) => walk(child, depth + 1));
+        return;
+      }
+      if (typeof node === "object") {
+        for (const value of Object.values(node)) walk(value, depth + 1);
+      }
+    };
+
+    walk(raw?.publicTracking?.raw?.jsonObjects);
+
+    const seen = new Set<string>();
+    return rows.filter((row) => {
+      if (!row || typeof row !== "object") return false;
+      const key = JSON.stringify({
+        status: row.status || row.status_name || row.action || row.action_name || row.current_status || "",
+        time: row.updated_date || row.created_date || row.updated_at || row.created_at || row.action_at || row.event_time || row.time || "",
+        detail: row.description || row.detail || row.message || row.reason || row.content || "",
+        location: row.location || row.location_text || row.hub_name || row.warehouse || row.area || row.address || "",
+      });
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  private pickGhnLocation(item: any, shipment?: any) {
+    const location = this.pickFirstText(item, [
+      "location",
+      "location_text",
+      "locationText",
+      "hub_name",
+      "hubName",
+      "hub",
+      "warehouse",
+      "warehouse_name",
+      "warehouseName",
+      "current_warehouse",
+      "currentWarehouse",
+      "current_location",
+      "currentLocation",
+      "area",
+      "station_name",
+      "stationName",
+      "post_office",
+      "postOffice",
+      "from_location",
+      "to_location",
+      "address",
     ]);
 
-    const description = this.pickFirstText(item, [
+    if (location) return location;
+
+    const statusKey = this.normalizeGhnStatusKey(
+      this.pickFirstText(item, ["status", "status_name", "action", "action_name", "current_status"])
+    );
+
+    if (["delivered", "delivery_success", "delivering", "money_collect_delivering"].includes(statusKey)) {
+      return String(shipment?.toAddress || shipment?.order?.shippingAddressLine1 || "").trim();
+    }
+
+    return "";
+  }
+
+  private buildGhnTimelineDescription(input: {
+    rawStatus?: string | null;
+    title?: string | null;
+    explicitDescription?: string | null;
+    location?: string | null;
+    shipment?: any;
+    item?: any;
+  }) {
+    const key = this.normalizeGhnStatusKey(input.rawStatus || input.title || "");
+    const explicit = String(input.explicitDescription || "").trim();
+    const location = String(input.location || "").replace(/\s+/g, " ").trim();
+
+    const code = this.pickFirstText(input.item, [
+      "order_code",
+      "client_order_code",
+      "tracking_code",
+      "trackingCode",
+      "orderCode",
+    ]);
+    const partialText = /_PR|partial|giao\s*1\s*phan|giao\s*mot\s*phan/i.test(
+      [code, input.item?.description, input.item?.reason, input.item?.note, input.item?.message]
+        .filter(Boolean)
+        .join(" ")
+    )
+      ? `${code || "Đơn"} - Đơn giao 1 phần`
+      : "";
+
+    const normalizedExplicit = this.normalizeGhnStatusKey(explicit);
+    const looksRawOnly = explicit && (normalizedExplicit === key || normalizedExplicit === this.normalizeGhnStatusKey(input.rawStatus));
+    if (explicit && !looksRawOnly && !/^(delivered|delivering|storing|transporting|picking|picked|sorting|money_collect)/i.test(explicit)) {
+      return [explicit, partialText].filter(Boolean).join("\n");
+    }
+
+    let detail = "";
+    if (["delivered", "delivery_success", "completed"].includes(key)) {
+      detail = `Đơn hàng được giao thành công${location ? ` tại ${location}` : ""}.`;
+    } else if (["delivering", "money_collect_delivering"].includes(key)) {
+      detail = `Đơn hàng đang giao${location ? ` đến ${location}` : ""}.`;
+    } else if (["ready_to_deliver", "waiting_to_deliver"].includes(key)) {
+      detail = `Đơn hàng sẵn sàng được giao${location ? ` tại ${location}` : ""}.`;
+    } else if (["storing", "storing_order"].includes(key)) {
+      detail = `Đơn hàng lưu tại ${location || "bưu cục/kho"}.`;
+    } else if (key === "sorting") {
+      detail = `Đơn hàng đang phân loại${location ? ` tại ${location}` : ""}.`;
+    } else if (["transporting", "transport"].includes(key)) {
+      detail = `Đơn hàng đang trung chuyển${location ? ` đến ${location}` : ""}.`;
+    } else if (key === "picked") {
+      detail = `Đơn hàng lấy thành công${location ? ` tại ${location}` : ""}.`;
+    } else if (["picking", "money_collect_picking"].includes(key)) {
+      detail = `Nhân viên đang lấy hàng${location ? ` tại ${location}` : ""}.`;
+    } else if (key === "ready_to_pick") {
+      detail = `Đơn hàng chờ lấy${location ? ` tại ${location}` : ""}.`;
+    } else if (["delivery_fail", "deliver_fail"].includes(key)) {
+      detail = `Đơn hàng giao thất bại${location ? ` tại ${location}` : ""}.`;
+    } else if (["return", "returning", "waiting_to_return"].includes(key)) {
+      detail = `Đơn hàng đang hoàn${location ? ` tại ${location}` : ""}.`;
+    } else if (key === "returned") {
+      detail = `Đơn hàng đã hoàn${location ? ` về ${location}` : ""}.`;
+    } else if (["cancel", "cancelled"].includes(key)) {
+      detail = "Vận đơn đã huỷ.";
+    } else {
+      detail = `${this.ghnStatusLabel(input.rawStatus || input.title)}${location ? ` tại ${location}` : ""}.`;
+    }
+
+    return [detail, partialText].filter(Boolean).join("\n");
+  }
+
+  private normalizeGhnTimelineEvent(item: any, index: number, shipment?: any) {
+    const rawStatus = this.pickFirstText(item, [
+      "status",
+      "current_status",
+      "log_status",
+      "order_status",
+      "action",
+      "action_name",
+      "status_name",
+    ]);
+
+    const explicitDescription = this.pickFirstText(item, [
       "description",
       "desc",
       "detail",
@@ -334,23 +577,14 @@ export class ShipmentService {
       "content",
     ]);
 
-    const location = this.pickFirstText(item, [
-      "location",
-      "location_text",
-      "hub_name",
-      "hub",
-      "warehouse",
-      "area",
-      "station_name",
-      "post_office",
-      "address",
-    ]);
+    const location = this.pickGhnLocation(item, shipment);
 
     const eventCode = this.pickFirstText(item, [
       "code",
       "status_code",
       "action_code",
       "event_code",
+      "log_code",
     ]);
 
     const time = this.pickFirstText(item, [
@@ -361,14 +595,26 @@ export class ShipmentService {
       "time",
       "created_at",
       "updated_at",
+      "update_time",
     ]);
 
-    const titleSource =
-      this.pickFirstText(item, ["status_name", "action_name", "title"]) ||
+    const rawTitle =
+      this.pickFirstText(item, ["status_name", "action_name", "title", "name"]) ||
       rawStatus ||
-      description;
+      explicitDescription;
+
+    const title = this.ghnStatusLabel(rawTitle || rawStatus);
+    const description = this.buildGhnTimelineDescription({
+      rawStatus,
+      title: rawTitle,
+      explicitDescription,
+      location,
+      shipment,
+      item,
+    });
+
     const mappedStatus = this.mapShippingStatus(
-      [titleSource, rawStatus, description].filter(Boolean).join(" | ")
+      [title, rawTitle, rawStatus, description].filter(Boolean).join(" | ")
     );
 
     return {
@@ -376,34 +622,25 @@ export class ShipmentService {
       status: mappedStatus === "NOT_CREATED" ? rawStatus : mappedStatus,
       rawStatus,
       eventCode,
-      title: titleSource || this.mapStatusLabel(rawStatus),
+      title,
       description,
       location,
       locationText: location,
       time,
       eventTime: time,
-      raw: item,
+      raw: {
+        ...(item || {}),
+        rawStatus,
+        eventCode,
+        description,
+        location,
+        title,
+      },
     };
   }
 
-  private normalizeTimeline(raw: any) {
-    const candidates = [
-      raw?.log,
-      raw?.logs,
-      raw?.tracking_logs,
-      raw?.trackingLogs,
-      raw?.timeline,
-      raw?.histories,
-      raw?.history,
-      raw?.data?.log,
-      raw?.data?.logs,
-      raw?.data?.tracking_logs,
-      raw?.data?.timeline,
-      raw?.data?.histories,
-      raw?.data?.history,
-    ];
-
-    const logs = candidates.find((item) => Array.isArray(item)) || [];
+  private normalizeTimeline(raw: any, shipment?: any) {
+    const logs = this.collectGhnTimelineCandidates(raw);
 
     const sorted = [...logs].sort((a, b) => {
       const ta = new Date(
@@ -415,6 +652,7 @@ export class ShipmentService {
           "time",
           "created_at",
           "updated_at",
+          "update_time",
         ]) || 0
       ).getTime();
       const tb = new Date(
@@ -426,18 +664,19 @@ export class ShipmentService {
           "time",
           "created_at",
           "updated_at",
+          "update_time",
         ]) || 0
       ).getTime();
       return tb - ta;
     });
 
     return sorted.map((item: any, index: number) =>
-      this.normalizeGhnTimelineEvent(item, index)
+      this.normalizeGhnTimelineEvent(item, index, shipment)
     );
   }
 
   private normalizeTracking(raw: any, shipment: any) {
-    const timeline = this.normalizeTimeline(raw);
+    const timeline = this.normalizeTimeline(raw, shipment);
 
     const rawStatusText = [
       raw?.status_name,
@@ -855,7 +1094,9 @@ export class ShipmentService {
       };
     }
 
-    const raw = await this.ghnClient.getOrderDetail(shipment.trackingCode || "");
+    const raw = await (this.ghnClient as any).getOrderDetailWithPublicTracking
+      ? await (this.ghnClient as any).getOrderDetailWithPublicTracking(shipment.trackingCode || "")
+      : await this.ghnClient.getOrderDetail(shipment.trackingCode || "");
     const normalized = this.normalizeTracking(raw, shipment);
 
     const expiresAt = new Date(

@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
@@ -13,6 +14,53 @@ import { ScanStocktakeDto } from "./dto/scan-stocktake.dto";
 @Injectable()
 export class StocktakeSessionService {
   constructor(private prisma: PrismaService) {}
+
+  private isOwner(user?: any) {
+    const roles = [
+      ...(Array.isArray(user?.roles) ? user.roles : []),
+      user?.role,
+    ]
+      .map((role) => String(role || "").toLowerCase())
+      .filter(Boolean);
+
+    return roles.includes("owner") || roles.includes("admin") ||
+      (Array.isArray(user?.permissions) && user.permissions.includes("*"));
+  }
+
+  private userBranch(user?: any) {
+    return user?.branchId || null;
+  }
+
+  private scopedBranchId(user?: any, requestedBranchId?: string | null) {
+    if (this.isOwner(user)) return requestedBranchId || undefined;
+
+    const branchId = this.userBranch(user);
+    if (!branchId) throw new ForbiddenException("Tài khoản chưa được gán chi nhánh.");
+
+    if (requestedBranchId && String(requestedBranchId) !== String(branchId)) {
+      throw new ForbiddenException("Không có quyền thao tác phiên kiểm kho chi nhánh khác.");
+    }
+
+    return branchId;
+  }
+
+  private async ensureSessionAccess(sessionId: string, user?: any) {
+    if (this.isOwner(user)) return;
+
+    const session = await this.prisma.stocktakeSession.findUnique({
+      where: { id: sessionId },
+      select: { id: true, branchId: true },
+    });
+
+    if (!session) throw new NotFoundException("Không tìm thấy phiên kiểm kho.");
+
+    const branchId = this.userBranch(user);
+    if (!branchId) throw new ForbiddenException("Tài khoản chưa được gán chi nhánh.");
+
+    if (String(session.branchId) !== String(branchId)) {
+      throw new ForbiddenException("Không có quyền xem hoặc thao tác phiên kiểm kho chi nhánh khác.");
+    }
+  }
 
   private normalizeStatus(status?: string | null) {
     return String(status || "")
@@ -126,10 +174,12 @@ export class StocktakeSessionService {
     });
   }
 
-  createSession(dto: CreateStocktakeSessionDto) {
+  createSession(dto: CreateStocktakeSessionDto, user?: any) {
+    const branchId = this.scopedBranchId(user, dto.branchId);
+
     return this.prisma.stocktakeSession.create({
       data: {
-        branchId: dto.branchId,
+        branchId,
         name: dto.name,
         note: dto.note,
         createdById: dto.createdById,
@@ -144,10 +194,12 @@ export class StocktakeSessionService {
   async listSessions(
     branchId?: string,
     filters?: { status?: string; from?: string; to?: string },
+    user?: any,
   ) {
     const where: any = {};
 
-    if (branchId) where.branchId = branchId;
+    const scopedBranchId = this.scopedBranchId(user, branchId);
+    if (scopedBranchId) where.branchId = scopedBranchId;
     if (filters?.status)
       where.status = String(filters.status).trim().toUpperCase();
 
@@ -183,7 +235,8 @@ export class StocktakeSessionService {
     return enriched;
   }
 
-  getSession(id: string) {
+  async getSession(id: string, user?: any) {
+    await this.ensureSessionAccess(id, user);
     return this.prisma.stocktakeSession.findUnique({
       where: { id },
       include: {
@@ -201,7 +254,8 @@ export class StocktakeSessionService {
     });
   }
 
-  async startSession(id: string) {
+  async startSession(id: string, user?: any) {
+    await this.ensureSessionAccess(id, user);
     const session = await this.prisma.stocktakeSession.findUnique({
       where: { id },
     });
@@ -233,7 +287,8 @@ export class StocktakeSessionService {
     });
   }
 
-  async pauseSession(id: string) {
+  async pauseSession(id: string, user?: any) {
+    await this.ensureSessionAccess(id, user);
     const session = await this.prisma.stocktakeSession.findUnique({
       where: { id },
     });
@@ -266,7 +321,8 @@ export class StocktakeSessionService {
     });
   }
 
-  async resumeSession(id: string) {
+  async resumeSession(id: string, user?: any) {
+    await this.ensureSessionAccess(id, user);
     const session = await this.prisma.stocktakeSession.findUnique({
       where: { id },
     });
@@ -302,7 +358,8 @@ export class StocktakeSessionService {
     });
   }
 
-  async finishSession(id: string) {
+  async finishSession(id: string, user?: any) {
+    await this.ensureSessionAccess(id, user);
     const session = await this.prisma.stocktakeSession.findUnique({
       where: { id },
     });
@@ -331,7 +388,8 @@ export class StocktakeSessionService {
     });
   }
 
-  async joinSession(sessionId: string, dto: JoinStocktakeSessionDto) {
+  async joinSession(sessionId: string, dto: JoinStocktakeSessionDto, user?: any) {
+    await this.ensureSessionAccess(sessionId, user);
     const session = await this.prisma.stocktakeSession.findUnique({
       where: { id: sessionId },
     });
@@ -354,7 +412,10 @@ export class StocktakeSessionService {
     });
   }
 
-  finishWorker(workerId: string) {
+  async finishWorker(workerId: string, user?: any) {
+    const worker = await this.prisma.stocktakeWorker.findUnique({ where: { id: workerId }, select: { sessionId: true } });
+    if (!worker) throw new NotFoundException("Không tìm thấy nhân sự kiểm kho.");
+    await this.ensureSessionAccess(worker.sessionId, user);
     return this.prisma.stocktakeWorker.update({
       where: { id: workerId },
       data: {
@@ -451,7 +512,8 @@ export class StocktakeSessionService {
     return targetRack;
   }
 
-  async scan(dto: ScanStocktakeDto) {
+  async scan(dto: ScanStocktakeDto, user?: any) {
+    await this.ensureSessionAccess(dto.sessionId, user);
     const code = this.normalizeCode(dto.code);
 
     if (!code) {
@@ -593,7 +655,8 @@ export class StocktakeSessionService {
     return this.finishArea(areaId, "MISMATCH");
   }
 
-  async getSessionSummary(sessionId: string) {
+  async getSessionSummary(sessionId: string, user?: any) {
+    await this.ensureSessionAccess(sessionId, user);
     const session = await this.prisma.stocktakeSession.findUnique({
       where: { id: sessionId },
     });
@@ -1030,14 +1093,17 @@ export class StocktakeSessionService {
     };
   }
 
-  async getSessionDetail(sessionId: string) {
+  async getSessionDetail(sessionId: string, user?: any) {
+    await this.ensureSessionAccess(sessionId, user);
     return this.buildSessionDetail(sessionId);
   }
 
   async getSessionItems(
     sessionId: string,
     filters?: { status?: string; q?: string },
+    user?: any,
   ) {
+    await this.ensureSessionAccess(sessionId, user);
     const detail = await this.buildSessionDetail(sessionId);
     const q = String(filters?.q || "")
       .trim()
@@ -1076,7 +1142,8 @@ export class StocktakeSessionService {
     return rows;
   }
 
-  async getSessionLogs(sessionId: string) {
+  async getSessionLogs(sessionId: string, user?: any) {
+    await this.ensureSessionAccess(sessionId, user);
     const session = await this.prisma.stocktakeSession.findUnique({
       where: { id: sessionId },
     });
@@ -1105,8 +1172,10 @@ export class StocktakeSessionService {
 
   async applySession(
     sessionId: string,
-    body: { note?: string; createdById?: string },
+    body: { note?: string; createdById?: string } = {},
+    user?: any,
   ) {
+    await this.ensureSessionAccess(sessionId, user);
     const detail = await this.buildSessionDetail(sessionId);
     const session = detail.session;
 
@@ -1225,7 +1294,8 @@ export class StocktakeSessionService {
     }));
   }
 
-  async exportSessionExcel(sessionId: string) {
+  async exportSessionExcel(sessionId: string, user?: any) {
+    await this.ensureSessionAccess(sessionId, user);
     const detail = await this.buildSessionDetail(sessionId);
     const session = detail.session;
 
@@ -1301,12 +1371,14 @@ export class StocktakeSessionService {
     };
   }
 
-  async getWorkerSummary(sessionId: string, workerId: string) {
+  async getWorkerSummary(sessionId: string, workerId: string, user?: any) {
+    await this.ensureSessionAccess(sessionId, user);
     const rows = await this.getSessionSummary(sessionId);
     return rows.filter((row: any) => row.workerId === workerId);
   }
 
-  async getZoneSummary(sessionId: string) {
+  async getZoneSummary(sessionId: string, user?: any) {
+    await this.ensureSessionAccess(sessionId, user);
     const workers = await this.prisma.stocktakeWorker.findMany({
       where: { sessionId },
       include: {
@@ -1337,10 +1409,11 @@ export class StocktakeSessionService {
   // Dán vào StocktakeSessionService nếu muốn frontend load phiên active theo chi nhánh.
   // Frontend trong gói này đã có localStorage resume, nên endpoint này là nâng cấp thêm.
 
-  async getActiveSession(branchId?: string) {
+  async getActiveSession(branchId?: string, user?: any) {
+    const scopedBranchId = this.scopedBranchId(user, branchId);
     const session = await this.prisma.stocktakeSession.findFirst({
       where: {
-        ...(branchId ? { branchId } : {}),
+        ...(scopedBranchId ? { branchId: scopedBranchId } : {}),
         status: {
           in: ["IN_PROGRESS", "PAUSED", "DRAFT"],
         },

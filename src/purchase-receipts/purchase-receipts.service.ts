@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import {
   InventoryMovementType,
   Prisma,
@@ -38,6 +38,42 @@ type PayReceiptInput = {
 @Injectable()
 export class PurchaseReceiptsService {
   constructor(private readonly prisma: PrismaService) {}
+
+  private isOwner(user?: any) {
+    const roles = [
+      ...(Array.isArray(user?.roles) ? user.roles : []),
+      user?.role,
+    ]
+      .map((role) => String(role || "").toLowerCase())
+      .filter(Boolean);
+
+    return roles.includes("owner") || roles.includes("admin") ||
+      (Array.isArray(user?.permissions) && user.permissions.includes("*"));
+  }
+
+  private userBranch(user?: any) {
+    return user?.branchId || null;
+  }
+
+  private ensureBranchAccess(user?: any, branchId?: string | null) {
+    if (this.isOwner(user)) return;
+
+    const currentBranchId = this.userBranch(user);
+    if (!currentBranchId) {
+      throw new ForbiddenException("Tài khoản chưa được gán chi nhánh.");
+    }
+
+    if (branchId && String(branchId) !== String(currentBranchId)) {
+      throw new ForbiddenException("Không có quyền xem hoặc thao tác phiếu nhập chi nhánh khác.");
+    }
+  }
+
+  private scopeWhereByUser(user?: any) {
+    if (this.isOwner(user)) return {};
+    const currentBranchId = this.userBranch(user);
+    if (!currentBranchId) return { id: "__NO_ACCESS__" };
+    return { branchId: currentBranchId };
+  }
 
   private toNumber(value: unknown) {
     if (typeof value === "number") return value;
@@ -188,14 +224,15 @@ export class PurchaseReceiptsService {
     );
   }
 
-  async findAll() {
+  async findAll(user?: any) {
     return this.prisma.purchaseReceipt.findMany({
+      where: this.scopeWhereByUser(user),
       orderBy: { createdAt: "desc" },
       include: this.getReceiptInclude(),
     });
   }
 
-  async getById(id: string) {
+  async getById(id: string, user?: any) {
     const receipt = await this.prisma.purchaseReceipt.findUnique({
       where: { id },
       include: {
@@ -222,10 +259,12 @@ export class PurchaseReceiptsService {
       throw new NotFoundException("Không tìm thấy phiếu nhập");
     }
 
+    this.ensureBranchAccess(user, receipt.branchId);
+
     return receipt;
   }
 
-  async create(data: CreateReceiptInput) {
+  async create(data: CreateReceiptInput, user?: any) {
     if (!data.branchId) {
       throw new BadRequestException("Thiếu kho nhập");
     }
@@ -233,6 +272,8 @@ export class PurchaseReceiptsService {
     if (!data.supplierId) {
       throw new BadRequestException("Thiếu nhà cung cấp");
     }
+
+    this.ensureBranchAccess(user, data.branchId);
 
     const [branch, supplier, validCreatedById] = await Promise.all([
       this.prisma.branch.findUnique({
@@ -312,7 +353,7 @@ export class PurchaseReceiptsService {
     );
   }
 
-  async updateDraft(id: string, data: UpdateReceiptInput) {
+  async updateDraft(id: string, data: UpdateReceiptInput, user?: any) {
     const receipt = await this.prisma.purchaseReceipt.findUnique({
       where: { id },
       include: {
@@ -324,6 +365,8 @@ export class PurchaseReceiptsService {
     if (!receipt) {
       throw new NotFoundException("Không tìm thấy phiếu nhập");
     }
+
+    this.ensureBranchAccess(user, receipt.branchId);
 
     if (receipt.status !== PurchaseReceiptStatus.DRAFT) {
       throw new BadRequestException("Chỉ sửa được phiếu đang nháp");
@@ -424,7 +467,7 @@ export class PurchaseReceiptsService {
   }
 
 
-  async requestPayment(id: string) {
+  async requestPayment(id: string, user?: any) {
     const receipt = await this.prisma.purchaseReceipt.findUnique({
       where: { id },
       include: {
@@ -436,6 +479,8 @@ export class PurchaseReceiptsService {
     if (!receipt) {
       throw new NotFoundException("Không tìm thấy phiếu nhập");
     }
+
+    this.ensureBranchAccess(user, receipt.branchId);
 
     if (receipt.status !== PurchaseReceiptStatus.DRAFT) {
       throw new BadRequestException("Chỉ xác nhận đủ hàng được từ phiếu nháp");
@@ -454,7 +499,7 @@ export class PurchaseReceiptsService {
     });
   }
 
-  async pay(id: string, data: PayReceiptInput = {}) {
+  async pay(id: string, data: PayReceiptInput = {}, user?: any) {
     const receipt = await this.prisma.purchaseReceipt.findUnique({
       where: { id },
       include: {
@@ -467,6 +512,8 @@ export class PurchaseReceiptsService {
     if (!receipt) {
       throw new NotFoundException("Không tìm thấy phiếu nhập");
     }
+
+    this.ensureBranchAccess(user, receipt.branchId);
 
     if (
       receipt.status !== PurchaseReceiptStatus.PAYMENT_REQUESTED &&
@@ -544,7 +591,7 @@ export class PurchaseReceiptsService {
     });
   }
 
-  async importStock(id: string, createdById?: string) {
+  async importStock(id: string, createdById?: string, user?: any) {
     const receipt = await this.prisma.purchaseReceipt.findUnique({
       where: { id },
       include: {
@@ -556,6 +603,8 @@ export class PurchaseReceiptsService {
     if (!receipt) {
       throw new NotFoundException("Không tìm thấy phiếu nhập");
     }
+
+    this.ensureBranchAccess(user, receipt.branchId);
 
     if (receipt.status !== PurchaseReceiptStatus.PAID) {
       throw new BadRequestException("Phiếu chưa thanh toán đủ, không được nhập kho");
@@ -642,7 +691,7 @@ export class PurchaseReceiptsService {
     );
   }
 
-  async complete(id: string) {
+  async complete(id: string, user?: any) {
     const receipt = await this.prisma.purchaseReceipt.findUnique({
       where: { id },
       include: {
@@ -654,6 +703,8 @@ export class PurchaseReceiptsService {
     if (!receipt) {
       throw new NotFoundException("Không tìm thấy phiếu nhập");
     }
+
+    this.ensureBranchAccess(user, receipt.branchId);
 
     if (receipt.status !== PurchaseReceiptStatus.STOCK_IMPORTED) {
       throw new BadRequestException("Chỉ hoàn tất được phiếu đã nhập kho");
@@ -675,7 +726,7 @@ export class PurchaseReceiptsService {
     });
   }
 
-  async cancel(id: string) {
+  async cancel(id: string, user?: any) {
     const receipt = await this.prisma.purchaseReceipt.findUnique({
       where: { id },
       include: {
@@ -686,6 +737,8 @@ export class PurchaseReceiptsService {
     if (!receipt) {
       throw new NotFoundException("Không tìm thấy phiếu nhập");
     }
+
+    this.ensureBranchAccess(user, receipt.branchId);
 
     if (receipt.status !== PurchaseReceiptStatus.DRAFT) {
       throw new BadRequestException("Chỉ hủy được phiếu đang nháp/chưa nhập kho");

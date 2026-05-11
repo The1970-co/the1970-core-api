@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { InventoryMovementType, PrismaClient } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -10,6 +10,29 @@ type TxClient = Omit<
 @Injectable()
 export class StocktakeService {
   constructor(private readonly prisma: PrismaService) {}
+
+  private isOwner(user?: any) {
+    const roles = [
+      ...(Array.isArray(user?.roles) ? user.roles : []),
+      user?.role,
+    ]
+      .map((role) => String(role || "").toLowerCase())
+      .filter(Boolean);
+
+    return roles.includes("owner") || roles.includes("admin") ||
+      (Array.isArray(user?.permissions) && user.permissions.includes("*"));
+  }
+
+  private scopedBranchId(user?: any, requestedBranchId?: string | null) {
+    if (this.isOwner(user)) return String(requestedBranchId || "").trim();
+
+    const branchId = String(user?.branchId || "").trim();
+    if (!branchId) throw new ForbiddenException("Tài khoản chưa được gán chi nhánh.");
+    if (requestedBranchId && String(requestedBranchId) !== branchId) {
+      throw new ForbiddenException("Không có quyền kiểm kho chi nhánh khác.");
+    }
+    return branchId;
+  }
 
   private toNumber(value: unknown) {
     if (typeof value === 'number') return value;
@@ -71,10 +94,10 @@ export class StocktakeService {
     });
   }
 
-  async applyStocktake(body: any) {
+  async applyStocktake(body: any, user?: any) {
     const sessionName = String(body.sessionName || 'Stocktake Session').trim();
     const sessionNote = String(body.sessionNote || '').trim();
-    const branchId = String(body.branchId || '').trim();
+    const branchId = this.scopedBranchId(user, body.branchId);
     const rows = Array.isArray(body.rows) ? body.rows : [];
 
     if (!branchId) {

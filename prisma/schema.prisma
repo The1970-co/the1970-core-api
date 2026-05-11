@@ -1551,3 +1551,18 @@ model StaffDepartment {
   @@index([staffId])
   @@index([departmentId])
 }
+
+model RbacSnapshot {
+  id             String    @id @default(cuid())
+  name           String
+  description    String?
+  payload        Json
+  createdById    String?
+  createdByName  String?
+  createdAt      DateTime  @default(now())
+  restoredAt     DateTime?
+  restoredById   String?
+  restoredByName String?
+
+  @@index([createdAt])
+}
