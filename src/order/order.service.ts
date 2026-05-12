@@ -1839,8 +1839,9 @@ export class OrderService {
             }),
           });
 
-          // POS cash voucher sync chạy sau khi transaction tạo đơn commit.
-          // Không chạy trong transaction chính để tránh lỗi phiếu thu làm rollback đơn POS.
+          // POS cash voucher sync runs after the order transaction commits.
+          // Do not create CashVoucher inside this transaction, otherwise one finance query
+          // can abort the whole POS order with PostgreSQL 25P02.
         }
 
         if (modeConfig.deductStockNow || shouldCompleteCounterSale) {
@@ -2059,7 +2060,9 @@ export class OrderService {
 
         const finalOrderPayments = Array.isArray((finalOrderWithPayments as any)?.payments)
           ? (finalOrderWithPayments as any).payments
-          : [];
+          : Array.isArray(finalOrderAny?.payments)
+            ? finalOrderAny.payments
+            : [];
 
         const paidPayments = finalOrderPayments
           .filter((payment: any) => {

@@ -168,7 +168,10 @@ export class FinanceService {
     }
 
     if (params.status && params.status !== "ALL") {
-      where.status = params.status as PaymentStatus;
+      const requestedStatus = String(params.status).toUpperCase();
+      if (!["RECEIPT", "PAYMENT"].includes(requestedStatus)) {
+        where.status = params.status as PaymentStatus;
+      }
     }
 
     if (params.branchId && params.branchId !== "ALL") {
@@ -208,6 +211,7 @@ export class FinanceService {
             finalAmount: true,
             paymentStatus: true,
             status: true,
+            salesChannel: true,
             createdAt: true,
           },
         },
@@ -266,8 +270,27 @@ export class FinanceService {
       ...voucherValues,
     );
 
+    const moneyPayments = payments.filter((payment) => {
+      const status = String(payment.status || "").toUpperCase();
+      const sourceType = String(payment.paymentSource?.type || "").toUpperCase();
+      const salesChannel = String((payment.order as any)?.salesChannel || "").toUpperCase();
+      const orderStatus = String(payment.order?.status || "").toUpperCase();
+
+      if (!payment.paymentSourceId) return false;
+      if (sourceType === "COD") return false;
+      if (status !== "PAID" && status !== "PARTIAL") return false;
+
+      // POS chỉ được vào tổng quan nguồn tiền khi đơn đã hoàn thành.
+      if (salesChannel === "POS") {
+        return orderStatus === "COMPLETED";
+      }
+
+      // Đơn online/chuyển khoản cọc: chỉ cần payment đã PAID/PARTIAL và có nguồn tiền thật.
+      return true;
+    });
+
     const paymentDedupKeys = new Set(
-      payments.map((payment) =>
+      moneyPayments.map((payment) =>
         [
           payment.orderId || "",
           payment.paymentSourceId || "",
@@ -286,7 +309,7 @@ export class FinanceService {
     let totalAll = 0;
     let totalCollected = 0;
 
-    for (const p of payments) {
+    for (const p of moneyPayments) {
       const amount = this.toNumber(p.amount);
       const key = p.paymentSourceId || "NO_SOURCE";
       const sourceName = p.paymentSource?.name || p.method || "Chưa rõ";
@@ -437,15 +460,15 @@ export class FinanceService {
         totalRefunded,
         totalFailed,
         totalAll,
-        totalPayments: payments.length + mappedCashVouchers.length,
+        totalPayments: moneyPayments.length + mappedCashVouchers.length,
         averagePayment:
-          payments.length + mappedCashVouchers.length > 0
-            ? Math.round(totalAll / (payments.length + mappedCashVouchers.length))
+          moneyPayments.length + mappedCashVouchers.length > 0
+            ? Math.round(totalAll / (moneyPayments.length + mappedCashVouchers.length))
             : 0,
       },
       bySource: bySourceRows,
       payments: [
-        ...payments.map((p) => ({
+        ...moneyPayments.map((p) => ({
         id: p.id,
         orderId: p.orderId,
         orderCode: p.order?.orderCode || "—",
@@ -823,6 +846,8 @@ export class FinanceService {
       ADD COLUMN IF NOT EXISTS "title" TEXT,
       ADD COLUMN IF NOT EXISTS "partnerName" TEXT,
       ADD COLUMN IF NOT EXISTS "partnerPhone" TEXT,
+      ADD COLUMN IF NOT EXISTS "refType" TEXT,
+      ADD COLUMN IF NOT EXISTS "refId" TEXT,
       ADD COLUMN IF NOT EXISTS "createdById" TEXT,
       ADD COLUMN IF NOT EXISTS "createdByName" TEXT,
       ADD COLUMN IF NOT EXISTS "confirmedById" TEXT,
