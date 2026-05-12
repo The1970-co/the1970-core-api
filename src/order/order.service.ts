@@ -1249,37 +1249,39 @@ export class OrderService {
     `);
   }
 
-private async generateOrderCashVoucherCode(tx: any, type: "RECEIPT" | "PAYMENT") {
-  const prefix = type === "RECEIPT" ? "PT" : "PC";
-  const now = new Date();
+  private async generateOrderCashVoucherCode(tx: any, type: "RECEIPT" | "PAYMENT") {
+    const prefix = type === "RECEIPT" ? "PT" : "PC";
+    const now = new Date();
 
-  const ymd = [
-    now.getFullYear(),
-    String(now.getMonth() + 1).padStart(2, "0"),
-    String(now.getDate()).padStart(2, "0"),
-  ].join("");
+    const ymd = [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, "0"),
+      String(now.getDate()).padStart(2, "0"),
+    ].join("");
 
-  const time = [
-    String(now.getHours()).padStart(2, "0"),
-    String(now.getMinutes()).padStart(2, "0"),
-    String(now.getSeconds()).padStart(2, "0"),
-    String(now.getMilliseconds()).padStart(3, "0"),
-  ].join("");
+    const time = [
+      String(now.getHours()).padStart(2, "0"),
+      String(now.getMinutes()).padStart(2, "0"),
+      String(now.getSeconds()).padStart(2, "0"),
+      String(now.getMilliseconds()).padStart(3, "0"),
+    ].join("");
 
-  for (let i = 0; i < 10; i += 1) {
-    const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
-    const code = `${prefix}${ymd}-${time}-${rand}`;
+    for (let i = 0; i < 20; i += 1) {
+      const rand = Math.random().toString(36).slice(2, 8).toUpperCase();
+      const code = `${prefix}${ymd}-${time}-${rand}`;
 
-    const existed = await tx.$queryRawUnsafe(
-      `SELECT "id" FROM "CashVoucher" WHERE "code" = $1 OR "voucherCode" = $1 LIMIT 1`,
-      code,
-    );
+      const existed = await tx.$queryRawUnsafe(
+        `SELECT "id" FROM "CashVoucher" WHERE "code" = $1 OR "voucherCode" = $1 LIMIT 1`,
+        code,
+      );
 
-    if (!Array.isArray(existed) || !existed.length) return code;
+      if (!Array.isArray(existed) || existed.length === 0) {
+        return code;
+      }
+    }
+
+    return `${prefix}${ymd}-${Date.now()}-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
   }
-
-  return `${prefix}${ymd}-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-}
 
   private async createPosCashVouchers(
     tx: any,
