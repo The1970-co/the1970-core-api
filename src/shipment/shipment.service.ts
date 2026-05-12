@@ -2571,57 +2571,86 @@ export class ShipmentService {
       });
     }
 
+    let viettelPickupError = "";
+
     try {
+      this.logger.log("[PICKUP_LOCATIONS] Loading ViettelPost inventories...");
       const inventories = await this.listViettelPostInventories();
-      for (const item of inventories as any[]) {
+
+      this.logger.log(
+        `[PICKUP_LOCATIONS] ViettelPost inventories loaded: ${inventories.length}`,
+      );
+
+      inventories.forEach((item: any, index: number) => {
+        const groupAddressId = Number(item.groupAddressId || 0) || undefined;
+        const name = item.name || process.env.VIETTELPOST_SENDER_NAME || this.returnName;
+        const phone = item.phone || process.env.VIETTELPOST_SENDER_PHONE || this.returnPhone;
+        const address = item.address || process.env.VIETTELPOST_SENDER_ADDRESS || this.returnAddress;
+
         locations.push({
-          id: `viettelpost-${item.groupAddressId}`,
+          id: `viettelpost-${groupAddressId || `inventory-${index}`}`,
           carrier: "viettelpost",
-          label: `${item.name || "Kho ViettelPost"}${item.address ? ` · ${item.address}` : ""}`,
-          name: item.name || process.env.VIETTELPOST_SENDER_NAME || this.returnName,
-          phone: item.phone || process.env.VIETTELPOST_SENDER_PHONE || this.returnPhone,
-          address: item.address || process.env.VIETTELPOST_SENDER_ADDRESS || this.returnAddress,
-          viettelGroupAddressId: Number(item.groupAddressId),
-          groupAddressId: Number(item.groupAddressId),
+          label: `${name || "Kho ViettelPost"}${address ? ` · ${address}` : ""}`,
+          name: name || "Kho ViettelPost",
+          phone: phone || "",
+          address: address || "",
+          viettelGroupAddressId: groupAddressId,
+          groupAddressId,
           viettelProvinceId: Number(item.provinceId || 0) || undefined,
           viettelDistrictId: Number(item.districtId || 0) || undefined,
           viettelWardId: Number(item.wardId || 0) || undefined,
+          raw: item.raw || item,
         });
-      }
+      });
     } catch (error) {
-      this.logger.warn(
-        `[PICKUP_LOCATIONS] Không tải được kho ViettelPost: ${
-          error instanceof Error ? error.message : error
-        }`
-      );
+      viettelPickupError = error instanceof Error ? error.message : String(error);
+      this.logger.error(`[PICKUP_LOCATIONS] ViettelPost inventory error: ${viettelPickupError}`);
     }
 
-    const envVtpGroupId = Number(process.env.VIETTELPOST_SENDER_GROUP_ADDRESS_ID || 0);
+    // Luôn thêm fallback từ ENV để production không bị trắng kho ViettelPost khi API listInventory lỗi.
+    // Nếu ENV trên Railway đúng, UI vẫn có kho để map; nếu ENV sai, raw._loadError sẽ giúp đọc log ngay.
+    const envVtpGroupId = Number(
+      process.env.VIETTELPOST_SENDER_GROUP_ADDRESS_ID ||
+        process.env.VIETTELPOST_GROUPADDRESS_ID ||
+        process.env.VIETTELPOST_GROUP_ADDRESS_ID ||
+        0,
+    );
+    const envVtpName = String(process.env.VIETTELPOST_SENDER_NAME || this.returnName || "ViettelPost");
+    const envVtpPhone = String(process.env.VIETTELPOST_SENDER_PHONE || this.returnPhone || "");
+    const envVtpAddress = String(process.env.VIETTELPOST_SENDER_ADDRESS || this.returnAddress || "");
+    const shouldAddEnvVtp = Boolean(envVtpGroupId || envVtpName || envVtpPhone || envVtpAddress);
+
     const hasEnvVtp = locations.some(
       (item) =>
         item.carrier === "viettelpost" &&
-        Number(item.groupAddressId || item.viettelGroupAddressId || 0) === envVtpGroupId,
+        Number(item.groupAddressId || item.viettelGroupAddressId || 0) === envVtpGroupId &&
+        envVtpGroupId > 0,
     );
 
-    if (!hasEnvVtp && envVtpGroupId) {
+    if (shouldAddEnvVtp && !hasEnvVtp) {
       locations.push({
-        id: `viettelpost-env-${envVtpGroupId}`,
+        id: `viettelpost-env-${envVtpGroupId || "default"}`,
         carrier: "viettelpost",
-        label: `${process.env.VIETTELPOST_SENDER_NAME || this.returnName}${
-          process.env.VIETTELPOST_SENDER_ADDRESS
-            ? ` · ${process.env.VIETTELPOST_SENDER_ADDRESS}`
-            : ""
-        }`,
-        name: process.env.VIETTELPOST_SENDER_NAME || this.returnName,
-        phone: process.env.VIETTELPOST_SENDER_PHONE || this.returnPhone,
-        address: process.env.VIETTELPOST_SENDER_ADDRESS || this.returnAddress,
-        viettelGroupAddressId: envVtpGroupId,
-        groupAddressId: envVtpGroupId,
+        label: `${envVtpName}${envVtpAddress ? ` · ${envVtpAddress}` : ""}`,
+        name: envVtpName,
+        phone: envVtpPhone,
+        address: envVtpAddress,
+        viettelGroupAddressId: envVtpGroupId || undefined,
+        groupAddressId: envVtpGroupId || undefined,
         viettelProvinceId: Number(process.env.VIETTELPOST_SENDER_PROVINCE_ID || 0) || undefined,
         viettelDistrictId: Number(process.env.VIETTELPOST_SENDER_DISTRICT_ID || 0) || undefined,
         viettelWardId: Number(process.env.VIETTELPOST_SENDER_WARD_ID || 0) || undefined,
+        raw: {
+          source: "env_fallback",
+          groupAddressId: envVtpGroupId || undefined,
+          loadError: viettelPickupError || undefined,
+        },
       });
     }
+
+    this.logger.log(
+      `[PICKUP_LOCATIONS] total=${locations.length} | ghn=${locations.filter((item) => item.carrier === "ghn").length} | ahamove=${locations.filter((item) => item.carrier === "ahamove").length} | viettelpost=${locations.filter((item) => item.carrier === "viettelpost").length}`,
+    );
 
     return locations;
   }

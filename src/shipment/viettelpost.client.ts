@@ -304,7 +304,64 @@ export class ViettelPostClient {
   }
 
   listInventories() {
-    return this.request<any>(this.endpoint("INVENTORIES", "/user/listInventory"));
+    const endpoints = Array.from(
+      new Set([
+        this.endpoint("INVENTORIES", "/user/listInventory"),
+        this.endpoint("INVENTORIES_ALT", "/user/listInventoryV2"),
+        this.endpoint("INVENTORIES_SETTING", "/setting/listInventory"),
+        this.endpoint("INVENTORIES_ADDRESS", "/setting/listAddress"),
+      ])
+    );
+
+    const countRows = (input: any): number => {
+      const candidates = [
+        input,
+        input?.data,
+        input?.DATA,
+        input?.result,
+        input?.RESULT,
+        input?.items,
+        input?.rows,
+        input?.list,
+        input?.LIST,
+        input?.data?.data,
+        input?.data?.items,
+        input?.data?.rows,
+        input?.data?.list,
+      ];
+
+      for (const item of candidates) {
+        if (Array.isArray(item)) return item.length;
+      }
+
+      return 0;
+    };
+
+    return (async () => {
+      let lastError = "";
+      let lastData: any = null;
+
+      for (const path of endpoints) {
+        try {
+          const data = await this.request<any>(path);
+          const count = countRows(data);
+
+          this.logger.log(`[VIETTELPOST_INVENTORIES] ${path} => ${count}`);
+
+          if (count > 0) return data;
+          lastData = data;
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : String(error);
+          this.logger.error(`[VIETTELPOST_INVENTORIES_ERROR] ${path} | ${lastError}`);
+        }
+      }
+
+      if (lastData) return lastData;
+
+      throw new BadRequestException(
+        `Không lấy được danh sách kho ViettelPost${lastError ? `: ${lastError}` : ""}`,
+      );
+    })();
   }
 
   getPrice(payload: any) {
