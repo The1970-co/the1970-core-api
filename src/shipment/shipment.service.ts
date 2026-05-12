@@ -2342,22 +2342,16 @@ export class ShipmentService {
         "groupAddressId",
         "groupaddressId",
         "groupAddressID",
-        "groupaddressID",
         "GROUPADDRESS_ID",
         "GROUP_ADDRESS_ID",
-        "GROUPADDRESSID",
-        "GROUP_ADDRESSID",
         "SENDER_GROUP_ADDRESS_ID",
         "sender_group_address_id",
         "senderGroupAddressId",
-        "group_id",
-        "groupId",
-        "GROUP_ID",
-        "addressId",
-        "address_id",
-        "ADDRESS_ID",
         "senderAddressId",
         "sender_address_id",
+        "address_id",
+        "addressId",
+        "ADDRESS_ID",
         "id",
         "ID",
         "_id"
@@ -2372,7 +2366,6 @@ export class ShipmentService {
         "SENDER_PROVINCE",
         "SENDER_PROVINCE_ID",
         "senderProvinceId",
-        "PROVINCEID",
         "province.value",
         "province.id"
       ) || 0
@@ -2386,7 +2379,6 @@ export class ShipmentService {
         "SENDER_DISTRICT",
         "SENDER_DISTRICT_ID",
         "senderDistrictId",
-        "DISTRICTID",
         "district.value",
         "district.id"
       ) || 0
@@ -2402,7 +2394,6 @@ export class ShipmentService {
         "SENDER_WARD",
         "SENDER_WARD_ID",
         "senderWardId",
-        "WARDID",
         "ward.value",
         "ward.id"
       ) || 0
@@ -2413,19 +2404,13 @@ export class ShipmentService {
       "NAME",
       "full_name",
       "fullName",
-      "fullname",
       "SENDER_FULLNAME",
       "SENDER_NAME",
       "senderName",
-      "sender_name",
       "contact_name",
       "contactName",
       "customer_name",
-      "customerName",
-      "GROUP_ADDRESS_NAME",
-      "groupAddressName",
-      "warehouseName",
-      "warehouse_name"
+      "customerName"
     );
 
     const phone = pick(
@@ -2437,10 +2422,8 @@ export class ShipmentService {
       "MOBILE",
       "SENDER_PHONE",
       "senderPhone",
-      "sender_phone",
       "contact_phone",
-      "contactPhone",
-      "CONTACT_PHONE"
+      "contactPhone"
     );
 
     const address = pick(
@@ -2448,15 +2431,10 @@ export class ShipmentService {
       "ADDRESS",
       "SENDER_ADDRESS",
       "senderAddress",
-      "sender_address",
       "full_address",
       "fullAddress",
       "ADDRESS_FULL",
-      "address_full",
-      "sender_full_address",
-      "senderFullAddress",
-      "warehouseAddress",
-      "warehouse_address"
+      "address_full"
     );
 
     return {
@@ -2473,71 +2451,66 @@ export class ShipmentService {
   }
 
   private extractViettelPostInventories(raw: any) {
+    const directCandidates = [
+      raw,
+      raw?.data,
+      raw?.DATA,
+      raw?.result,
+      raw?.RESULT,
+      raw?.inventories,
+      raw?.inventory,
+      raw?.listInventory,
+      raw?.listInventories,
+      raw?.list,
+      raw?.LIST,
+      raw?.rows,
+      raw?.items,
+      raw?.data?.data,
+      raw?.data?.result,
+      raw?.data?.RESULT,
+      raw?.data?.list,
+      raw?.data?.LIST,
+      raw?.data?.rows,
+      raw?.data?.items,
+      raw?.DATA?.data,
+      raw?.DATA?.result,
+      raw?.DATA?.RESULT,
+      raw?.DATA?.list,
+      raw?.DATA?.LIST,
+    ];
+
+    for (const item of directCandidates) {
+      if (Array.isArray(item)) return item;
+    }
+
     const rows: any[] = [];
-
-    const looksLikeInventory = (item: any) => {
-      if (!item || typeof item !== "object") return false;
-      const keys = Object.keys(item).map((key) => key.toLowerCase());
-      return keys.some((key) =>
-        [
-          "group_address_id",
-          "groupaddressid",
-          "groupaddress_id",
-          "sender_group_address_id",
-          "senderaddressid",
-          "addressid",
-          "address_id",
-          "group_id",
-          "groupid",
-          "sender_address",
-          "full_address",
-          "address",
-          "phone",
-          "sender_phone",
-          "contact_phone",
-        ].includes(key)
-      );
-    };
-
     const walk = (node: any, depth = 0) => {
-      if (!node || depth > 9) return;
+      if (!node || depth > 6) return;
 
       if (Array.isArray(node)) {
-        if (node.some(looksLikeInventory)) {
-          rows.push(...node.filter((item) => item && typeof item === "object"));
-        }
-        for (const child of node.slice(0, 200)) walk(child, depth + 1);
+        const looksLikeInventory = node.some((item) => {
+          if (!item || typeof item !== "object") return false;
+          const keys = Object.keys(item).map((key) => key.toLowerCase());
+          return keys.some((key) =>
+            [
+              "group_address_id",
+              "groupaddressid",
+              "groupaddress_id",
+              "sender_group_address_id",
+              "senderaddressid",
+              "address",
+              "sender_address",
+              "full_address",
+            ].includes(key)
+          );
+        });
+
+        if (looksLikeInventory) rows.push(...node);
+        for (const child of node.slice(0, 80)) walk(child, depth + 1);
         return;
       }
 
       if (typeof node === "object") {
-        const preferredKeys = [
-          "data",
-          "DATA",
-          "result",
-          "RESULT",
-          "items",
-          "ITEMS",
-          "rows",
-          "ROWS",
-          "list",
-          "LIST",
-          "inventories",
-          "inventory",
-          "listInventory",
-          "listInventories",
-          "ownInventory",
-          "ownInventories",
-          "warehouses",
-          "warehouse",
-          "addresses",
-          "address",
-        ];
-
-        for (const key of preferredKeys) {
-          if (node?.[key] !== undefined) walk(node[key], depth + 1);
-        }
-
         for (const value of Object.values(node)) walk(value, depth + 1);
       }
     };
@@ -2546,16 +2519,20 @@ export class ShipmentService {
 
     const seen = new Set<string>();
     return rows.filter((item) => {
-      const normalized = this.normalizeViettelPostInventory(item);
       const key = JSON.stringify({
-        id: normalized.groupAddressId || "",
-        phone: normalized.phone || "",
-        address: normalized.address || "",
-        name: normalized.name || "",
+        id:
+          item?.group_address_id ||
+          item?.groupAddressId ||
+          item?.GROUPADDRESS_ID ||
+          item?.GROUP_ADDRESS_ID ||
+          item?.id ||
+          item?.ID ||
+          "",
+        address: item?.address || item?.ADDRESS || item?.SENDER_ADDRESS || item?.full_address || "",
       });
       if (seen.has(key)) return false;
       seen.add(key);
-      return normalized.groupAddressId || normalized.address || normalized.name || normalized.phone;
+      return true;
     });
   }
 
@@ -2602,14 +2579,14 @@ export class ShipmentService {
       const inventories = await this.listViettelPostInventories();
       for (const item of inventories as any[]) {
         locations.push({
-          id: `viettelpost-${item.groupAddressId}`,
+          id: `viettelpost-${item.groupAddressId || item.phone || item.address || item.name}`,
           carrier: "viettelpost",
-          label: `${item.name || "Kho ViettelPost"}${item.address ? ` · ${item.address}` : ""}`,
+          label: `${item.name || process.env.VIETTELPOST_SENDER_NAME || "Kho ViettelPost"}${item.address ? ` · ${item.address}` : ""}`,
           name: item.name || process.env.VIETTELPOST_SENDER_NAME || this.returnName,
           phone: item.phone || process.env.VIETTELPOST_SENDER_PHONE || this.returnPhone,
           address: item.address || process.env.VIETTELPOST_SENDER_ADDRESS || this.returnAddress,
-          viettelGroupAddressId: Number(item.groupAddressId),
-          groupAddressId: Number(item.groupAddressId),
+          viettelGroupAddressId: Number(item.groupAddressId || 0) || undefined,
+          groupAddressId: Number(item.groupAddressId || 0) || undefined,
           viettelProvinceId: Number(item.provinceId || 0) || undefined,
           viettelDistrictId: Number(item.districtId || 0) || undefined,
           viettelWardId: Number(item.wardId || 0) || undefined,
@@ -2623,7 +2600,13 @@ export class ShipmentService {
       );
     }
 
-    const envVtpGroupId = Number(process.env.VIETTELPOST_SENDER_GROUP_ADDRESS_ID || 0);
+    const envVtpGroupId = Number(
+      process.env.VIETTELPOST_SENDER_GROUP_ADDRESS_ID ||
+        process.env.VIETTELPOST_GROUPADDRESS_ID ||
+        process.env.VIETTELPOST_GROUP_ADDRESS_ID ||
+        process.env.VIETTELPOST_SENDER_ADDRESS_ID ||
+        0
+    );
     const hasEnvVtp = locations.some(
       (item) =>
         item.carrier === "viettelpost" &&
@@ -2661,8 +2644,6 @@ export class ShipmentService {
       // không luôn trả provinceId/districtId. Vẫn phải đưa ra UI để map kho giống Sapo,
       // lúc create/quote sẽ fallback tỉnh/huyện/xã từ env nếu inventory thiếu mã.
       .filter((item: any) => item.groupAddressId || item.address || item.name || item.phone);
-
-    this.logger.log(`[VIETTELPOST_INVENTORIES_NORMALIZED] ${rows.length}`);
 
     return rows;
   }
