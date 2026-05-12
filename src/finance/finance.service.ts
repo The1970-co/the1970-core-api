@@ -1184,4 +1184,35 @@ export class FinanceService {
 
     return rows[0];
   }
+
+  async deleteCashVoucher(id: string, user?: any) {
+    await this.ensureCashVoucherTable();
+
+    const current = await this.prisma.$queryRawUnsafe<any[]>(
+      `SELECT *, COALESCE("status", 'DRAFT') AS "status" FROM "CashVoucher" WHERE "id" = $1 LIMIT 1`,
+      id,
+    );
+
+    if (!current.length) {
+      throw new NotFoundException("Không tìm thấy phiếu thu/chi.");
+    }
+
+    this.ensureBranchScope(user, current[0].branchId);
+
+    if (current[0].status === "CONFIRMED") {
+      throw new BadRequestException("Phiếu đã xác nhận không được xoá. Hãy huỷ phiếu nếu cần điều chỉnh.");
+    }
+
+    await this.prisma.$executeRawUnsafe(
+      `DELETE FROM "CashVoucher" WHERE "id" = $1`,
+      id,
+    );
+
+    return {
+      ok: true,
+      id,
+      voucherCode: current[0].voucherCode || current[0].code || id,
+    };
+  }
+
 }

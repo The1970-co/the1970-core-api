@@ -173,66 +173,67 @@ model CustomerAddress {
 }
 
 model Order {
-  id                    String                  @id @default(cuid())
-  orderCode             String                  @unique
-  salesChannel          SalesChannel
-  customerId            String?
-  customerName          String?
-  customerPhone         String?
-  branchId              String?
-  currency              String                  @default("VND")
-  totalAmount           Decimal                 @default(0) @db.Decimal(14, 2)
-  discountAmount        Decimal                 @default(0) @db.Decimal(14, 2)
-  shippingFee           Decimal                 @default(0) @db.Decimal(14, 2)
-  finalAmount           Decimal                 @default(0) @db.Decimal(14, 2)
-  paymentStatus         PaymentStatus           @default(UNPAID)
-  fulfillmentStatus     FulfillmentStatus       @default(UNFULFILLED)
-  status                OrderStatus             @default(NEW)
-  note                  String?
-  source                String?
-  customerAddressId     String?
-  shippingRecipientName String?
-  shippingPhone         String?
-  shippingEmail         String?
-  shippingAddressLabel  String?
-  shippingAddressLine1  String?
-  shippingAddressLine2  String?
-  shippingWard          String?
-  shippingDistrict      String?
-  shippingCity          String?
-  shippingProvince      String?
-  shippingCountry       String?
-  shippingPostalCode    String?
-  shippingGhnDistrictId Int?
-  shippingGhnWardCode   String?
-  shippingGhnWardIdV2   String?
-  billingRecipientName  String?
-  billingPhone          String?
-  billingEmail          String?
-  billingAddressLabel   String?
-  billingAddressLine1   String?
-  billingAddressLine2   String?
-  billingWard           String?
-  billingDistrict       String?
-  billingCity           String?
-  billingProvince       String?
-  billingCountry        String?
-  billingPostalCode     String?
-  createdAt             DateTime                @default(now())
-  updatedAt             DateTime                @updatedAt
-  createdByStaffId      String?
-  createdByStaffName    String?
-  assignedStaffId       String?
-  assignedStaffName     String?
-  soldAt                DateTime                @default(now())
-  isPartialDelivery     Boolean                 @default(false)
-  partialReason         String?
-  customerAddress       CustomerAddress?        @relation(fields: [customerAddressId], references: [id])
-  customer              Customer?               @relation(fields: [customerId], references: [id])
-  items                 OrderItem[]
-  partialDeliveries     PartialDeliveryRecord[]
-  payments              Payment[]
-  shipment              Shipment?
+  id                      String                  @id @default(cuid())
+  orderCode               String                  @unique
+  salesChannel            SalesChannel
+  customerId              String?
+  customerName            String?
+  customerPhone           String?
+  branchId                String?
+  currency                String                  @default("VND")
+  totalAmount             Decimal                 @default(0) @db.Decimal(14, 2)
+  discountAmount          Decimal                 @default(0) @db.Decimal(14, 2)
+  shippingFee             Decimal                 @default(0) @db.Decimal(14, 2)
+  finalAmount             Decimal                 @default(0) @db.Decimal(14, 2)
+  paymentStatus           PaymentStatus           @default(UNPAID)
+  fulfillmentStatus       FulfillmentStatus       @default(UNFULFILLED)
+  status                  OrderStatus             @default(NEW)
+  note                    String?
+  source                  String?
+  customerAddressId       String?
+  shippingRecipientName   String?
+  shippingPhone           String?
+  shippingEmail           String?
+  shippingAddressLabel    String?
+  shippingAddressLine1    String?
+  shippingAddressLine2    String?
+  shippingWard            String?
+  shippingDistrict        String?
+  shippingCity            String?
+  shippingProvince        String?
+  shippingCountry         String?
+  shippingPostalCode      String?
+  shippingGhnDistrictId   Int?
+  shippingGhnWardCode     String?
+  shippingGhnWardIdV2     String?
+  billingRecipientName    String?
+  billingPhone            String?
+  billingEmail            String?
+  billingAddressLabel     String?
+  billingAddressLine1     String?
+  billingAddressLine2     String?
+  billingWard             String?
+  billingDistrict         String?
+  billingCity             String?
+  billingProvince         String?
+  billingCountry          String?
+  billingPostalCode       String?
+  createdAt               DateTime                @default(now())
+  updatedAt               DateTime                @updatedAt
+  createdByStaffId        String?
+  createdByStaffName      String?
+  assignedStaffId         String?
+  assignedStaffName       String?
+  soldAt                  DateTime                @default(now())
+  isPartialDelivery       Boolean                 @default(false)
+  partialReason           String?
+  customerAddress         CustomerAddress?        @relation(fields: [customerAddressId], references: [id])
+  customer                Customer?               @relation(fields: [customerId], references: [id])
+  items                   OrderItem[]
+  partialDeliveries       PartialDeliveryRecord[] @relation("PartialDeliverySourceOrder")
+  returnPartialDeliveries PartialDeliveryRecord[] @relation("PartialDeliveryReturnOrder")
+  payments                Payment[]
+  shipment                Shipment?
 
   @@index([customerPhone])
   @@index([branchId])
@@ -803,21 +804,29 @@ model ShipmentCodAuthCode {
 }
 
 model PartialDeliveryRecord {
-  id                   String                @id @default(cuid())
-  orderId              String
-  orderCode            String
-  ghnTrackingCode      String?
-  originalCod          Decimal               @db.Decimal(14, 2)
-  adjustedCod          Decimal               @db.Decimal(14, 2)
-  reason               String?
-  approvedBy           String?
-  approvedById         String?
-  note                 String?
-  createdAt            DateTime              @default(now())
-  updatedAt            DateTime              @updatedAt
-  items                PartialDeliveryItem[]
-  order                Order                 @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  returnStatus         String?               @default("PENDING_RETURN")
+  id              String                @id @default(cuid())
+  code            String?               @unique
+  orderId         String
+  orderCode       String
+  ghnTrackingCode String?
+  originalCod     Decimal               @db.Decimal(14, 2)
+  adjustedCod     Decimal               @db.Decimal(14, 2)
+  shippingFee     Decimal               @default(0) @db.Decimal(14, 2)
+  reason          String?
+  approvedBy      String?
+  approvedById    String?
+  note            String?
+  handledAt       DateTime?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  items           PartialDeliveryItem[]
+  order           Order                 @relation("PartialDeliverySourceOrder", fields: [orderId], references: [id], onDelete: Cascade)
+
+  returnOrderId        String?
+  returnOrderCode      String?
+  returnTrackingCode   String?
+  returnOrder          Order?    @relation("PartialDeliveryReturnOrder", fields: [returnOrderId], references: [id], onDelete: SetNull)
+  returnStatus         String?   @default("PENDING_RETURN")
   returnReceivedAt     DateTime?
   returnReceivedBy     String?
   returnStockReceiptId String?
@@ -826,22 +835,34 @@ model PartialDeliveryRecord {
   @@index([orderId])
   @@index([orderCode])
   @@index([ghnTrackingCode])
+  @@index([returnOrderId])
+  @@index([returnOrderCode])
+  @@index([returnTrackingCode])
+  @@index([returnStatus])
 }
 
 model PartialDeliveryItem {
   id           String                @id @default(cuid())
   recordId     String
   orderItemId  String?
+  variantId    String?
   productName  String
   sku          String
+  color        String?
+  size         String?
   orderedQty   Int
   deliveredQty Int
+  returnedQty  Int                   @default(0)
+  actionType   String                @default("KEPT")
   unitPrice    Decimal               @db.Decimal(14, 2)
   lineTotal    Decimal               @db.Decimal(14, 2)
   createdAt    DateTime              @default(now())
   record       PartialDeliveryRecord @relation(fields: [recordId], references: [id], onDelete: Cascade)
 
   @@index([recordId])
+  @@index([orderItemId])
+  @@index([variantId])
+  @@index([actionType])
 }
 
 model PaymentSource {
@@ -1400,10 +1421,24 @@ model ReturnExchangeItem {
 }
 
 model CashVoucher {
-  id              String          @id @default(cuid())
-  code            String          @unique
-  direction       String
-  voucherType     String
+  id String @id @default(cuid())
+
+  // New voucher fields
+  code        String @unique
+  direction   String
+  voucherType String
+
+  // Legacy voucher fields already existing in DB. Keep them to avoid data loss/drop warnings.
+  voucherCode   String?
+  type          String?
+  category      String?
+  title         String?
+  status        String?
+  partnerName   String?
+  partnerPhone  String?
+  createdById   String?
+  createdByName String?
+
   amount          Decimal         @default(0) @db.Decimal(14, 2)
   paymentSourceId String?
   branchId        String?
@@ -1420,6 +1455,10 @@ model CashVoucher {
 
   @@index([direction])
   @@index([voucherType])
+  @@index([voucherCode])
+  @@index([type])
+  @@index([category])
+  @@index([status])
   @@index([paymentSourceId])
   @@index([branchId])
   @@index([refType, refId])

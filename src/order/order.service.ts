@@ -56,6 +56,86 @@ export class OrderService {
     return cleaned || null;
   }
 
+
+  private partialDeliveryCode() {
+    const stamp = new Date()
+      .toISOString()
+      .replace(/[-:TZ.]/g, "")
+      .slice(0, 14);
+    const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
+    return `PDL-${stamp}-${rand}`;
+  }
+
+  private mapPartialReturnStatus(status?: string | null) {
+    const s = String(status || "").toUpperCase();
+    if (!s) return "PENDING_RETURN";
+    if (s.includes("DELIVERED") || s.includes("RETURNED") || s.includes("COMPLETED") || s.includes("SUCCESS")) return "RETURNED";
+    if (s.includes("CANCEL")) return "CANCELLED";
+    if (s.includes("FAIL") || s.includes("LOST") || s.includes("DAMAGE")) return "RETURN_FAILED";
+    if (s.includes("RETURN") || s.includes("TRANSIT") || s.includes("DELIVER") || s.includes("PICK")) return "RETURNING";
+    return s;
+  }
+
+  private mapPartialDeliveryRecord(record: any) {
+    if (!record) return null;
+
+    const items = Array.isArray(record.items) ? record.items : [];
+    const returnShipment = record.returnOrder?.shipment || null;
+    const returnStatus = this.mapPartialReturnStatus(
+      returnShipment?.shippingStatus || record.returnStatus,
+    );
+
+    return {
+      ...record,
+      originalCod: this.toNumber(record.originalCod),
+      adjustedCod: this.toNumber(record.adjustedCod),
+      shippingFee: this.toNumber(record.shippingFee),
+      handledAt: record.handledAt || record.createdAt || null,
+      returnStatus,
+      returnOrder: record.returnOrder
+        ? {
+          id: record.returnOrder.id,
+          orderCode: record.returnOrder.orderCode,
+          status: record.returnOrder.status,
+          fulfillmentStatus: record.returnOrder.fulfillmentStatus,
+          paymentStatus: record.returnOrder.paymentStatus,
+          createdAt: record.returnOrder.createdAt,
+          shipment: returnShipment
+            ? {
+              ...returnShipment,
+              codAmount: this.toNumber(returnShipment.codAmount),
+              shippingFee: this.toNumber(returnShipment.shippingFee),
+            }
+            : null,
+        }
+        : null,
+      items: items.map((item: any) => ({
+        ...item,
+        orderedQty: Number(item.orderedQty || 0),
+        deliveredQty: Number(item.deliveredQty || 0),
+        returnedQty: Number(item.returnedQty ?? Math.max(0, Number(item.orderedQty || 0) - Number(item.deliveredQty || 0))),
+        unitPrice: this.toNumber(item.unitPrice),
+        lineTotal: this.toNumber(item.lineTotal),
+      })),
+      keptItems: items
+        .filter((item: any) => String(item.actionType || "KEPT") === "KEPT")
+        .map((item: any) => ({
+          ...item,
+          qty: Number(item.deliveredQty || 0),
+          unitPrice: this.toNumber(item.unitPrice),
+          lineTotal: this.toNumber(item.lineTotal),
+        })),
+      returnedItems: items
+        .filter((item: any) => String(item.actionType || "") === "RETURNED" || Number(item.returnedQty || 0) > 0)
+        .map((item: any) => ({
+          ...item,
+          qty: Number(item.returnedQty || 0),
+          unitPrice: this.toNumber(item.unitPrice),
+          lineTotal: this.toNumber(item.lineTotal),
+        })),
+    };
+  }
+
   private isOwner(user?: any) {
     return user?.role === "owner" || user?.role === "admin";
   }
@@ -554,6 +634,9 @@ export class OrderService {
           codAmount: this.toNumber(order.shipment.codAmount),
         }
         : null,
+      partialDeliveries: Array.isArray(order.partialDeliveries)
+        ? order.partialDeliveries.map((record: any) => this.mapPartialDeliveryRecord(record))
+        : [],
       payments: Array.isArray(order.payments)
         ? order.payments.map((payment: any) => ({
           ...payment,
@@ -1623,6 +1706,17 @@ export class OrderService {
       include: {
         items: true,
         shipment: true,
+        partialDeliveries: {
+          orderBy: { createdAt: "desc" },
+          include: {
+            items: true,
+            returnOrder: {
+              include: {
+                shipment: true,
+              },
+            },
+          },
+        },
         payments: {
           include: {
             paymentSource: true,
@@ -1889,6 +1983,222 @@ export class OrderService {
     );
 
     return this.getOrderById(orderId, user);
+  }
+
+
+  async createPartialDelivery(body: any, user?: any) {
+    const orderId = String(body?.orderId || "").trim();
+    if (!orderId) throw new BadRequestException("Thiếu orderId.");
+
+    const existing = await this.prisma.order.findFirst({
+      where: this.buildOrderWhereByUser(user, { id: orderId }),
+      include: {
+        items: true,
+        shipment: true,
+        partialDeliveries: true,
+      },
+    });
+
+    if (!existing) throw new BadRequestException("Không tìm thấy đơn hàng.");
+    this.assertOrderActionPermission(user, "orders.edit", existing.branchId || null);
+
+    const inputItems = Array.isArray(body?.items) ? body.items : [];
+    if (!inputItems.length) throw new BadRequestException("Thiếu sản phẩm giao hàng 1 phần.");
+
+    const itemById = new Map((existing.items || []).map((item: any) => [String(item.id), item]));
+    const normalizedItems = inputItems.map((row: any) => {
+      const source = itemById.get(String(row.orderItemId || ""));
+      const orderedQty = Number(row.orderedQty ?? source?.qty ?? 0);
+      const deliveredQty = Math.max(0, Math.min(Number(row.deliveredQty ?? orderedQty), orderedQty));
+      const returnedQty = Math.max(0, orderedQty - deliveredQty);
+      const unitPrice = Number(row.unitPrice ?? source?.unitPrice ?? 0);
+      return {
+        source,
+        orderItemId: row.orderItemId || source?.id || null,
+        variantId: source?.variantId || row.variantId || null,
+        productName: String(row.productName || source?.productName || "Sản phẩm"),
+        sku: String(row.sku || source?.sku || ""),
+        color: row.color ?? source?.color ?? null,
+        size: row.size ?? source?.size ?? null,
+        orderedQty,
+        deliveredQty,
+        returnedQty,
+        unitPrice,
+        keptLineTotal: deliveredQty * unitPrice,
+        returnedLineTotal: returnedQty * unitPrice,
+      };
+    });
+
+    const returnedItems = normalizedItems.filter((item) => item.returnedQty > 0);
+    if (!returnedItems.length) {
+      throw new BadRequestException("Phiếu giao 1 phần phải có ít nhất 1 sản phẩm hoàn về.");
+    }
+
+    const originalCod = Number(body?.originalCod ?? existing.shipment?.codAmount ?? existing.finalAmount ?? 0);
+    const adjustedCod = Number(body?.adjustedCod ?? 0);
+    const code = this.partialDeliveryCode();
+    const returnOrderCodeBase = `${existing.orderCode}_PR`;
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      let returnOrder = await tx.order.findFirst({
+        where: { orderCode: returnOrderCodeBase },
+        include: { shipment: true },
+      });
+
+      if (!returnOrder) {
+        const returnedTotal = returnedItems.reduce((sum, item) => sum + item.returnedLineTotal, 0);
+        returnOrder = await tx.order.create({
+          data: {
+            orderCode: returnOrderCodeBase,
+            salesChannel: existing.salesChannel,
+            customerId: existing.customerId || null,
+            customerName: existing.customerName || null,
+            customerPhone: existing.customerPhone || null,
+            branchId: existing.branchId || null,
+            currency: existing.currency || "VND",
+            totalAmount: returnedTotal,
+            discountAmount: 0,
+            shippingFee: 0,
+            finalAmount: 0,
+            paymentStatus: PaymentStatus.UNPAID,
+            fulfillmentStatus: FulfillmentStatus.PROCESSING,
+            status: OrderStatus.SHIPPED,
+            note: `Đơn hoàn tự động từ phiếu giao hàng 1 phần ${code} của đơn ${existing.orderCode}`,
+            source: "PARTIAL_DELIVERY_RETURN",
+            customerAddressId: existing.customerAddressId || null,
+            shippingRecipientName: existing.shippingRecipientName || existing.customerName || null,
+            shippingPhone: existing.shippingPhone || existing.customerPhone || null,
+            shippingAddressLine1: existing.shippingAddressLine1 || null,
+            shippingAddressLine2: existing.shippingAddressLine2 || null,
+            shippingWard: existing.shippingWard || null,
+            shippingDistrict: existing.shippingDistrict || null,
+            shippingCity: existing.shippingCity || null,
+            shippingProvince: existing.shippingProvince || null,
+            shippingCountry: existing.shippingCountry || null,
+            shippingPostalCode: existing.shippingPostalCode || null,
+            shippingGhnDistrictId: existing.shippingGhnDistrictId || null,
+            shippingGhnWardCode: existing.shippingGhnWardCode || null,
+            createdByStaffId: user?.id ? String(user.id) : existing.createdByStaffId || null,
+            createdByStaffName: user?.name || user?.fullName || user?.code || existing.createdByStaffName || null,
+            assignedStaffId: existing.assignedStaffId || null,
+            assignedStaffName: existing.assignedStaffName || null,
+            isPartialDelivery: true,
+            partialReason: body?.reason || "Đơn hoàn từ giao hàng 1 phần",
+            items: {
+              create: returnedItems.map((item) => ({
+                variantId: item.variantId,
+                sku: item.sku,
+                productName: item.productName,
+                color: item.color,
+                size: item.size,
+                qty: item.returnedQty,
+                unitPrice: item.unitPrice,
+                lineTotal: item.returnedLineTotal,
+              })),
+            },
+          },
+          include: { shipment: true },
+        });
+      }
+
+      const record = await tx.partialDeliveryRecord.create({
+        data: {
+          code,
+          orderId: existing.id,
+          orderCode: existing.orderCode,
+          ghnTrackingCode: body?.ghnTrackingCode || existing.shipment?.trackingCode || null,
+          originalCod,
+          adjustedCod,
+          shippingFee: Number(existing.shippingFee || 0),
+          reason: body?.reason || null,
+          note: body?.note || null,
+          approvedBy: body?.approvedBy || user?.name || user?.fullName || user?.code || null,
+          approvedById: user?.id ? String(user.id) : null,
+          handledAt: new Date(),
+          returnOrderId: returnOrder.id,
+          returnOrderCode: returnOrder.orderCode,
+          returnTrackingCode: returnOrder.shipment?.trackingCode || null,
+          returnStatus: this.mapPartialReturnStatus(returnOrder.shipment?.shippingStatus || returnOrder.fulfillmentStatus),
+          items: {
+            create: normalizedItems.flatMap((item) => {
+              const rows: any[] = [];
+              if (item.deliveredQty > 0) {
+                rows.push({
+                  orderItemId: item.orderItemId,
+                  variantId: item.variantId,
+                  productName: item.productName,
+                  sku: item.sku,
+                  color: item.color,
+                  size: item.size,
+                  orderedQty: item.orderedQty,
+                  deliveredQty: item.deliveredQty,
+                  returnedQty: 0,
+                  actionType: "KEPT",
+                  unitPrice: item.unitPrice,
+                  lineTotal: item.keptLineTotal,
+                });
+              }
+              if (item.returnedQty > 0) {
+                rows.push({
+                  orderItemId: item.orderItemId,
+                  variantId: item.variantId,
+                  productName: item.productName,
+                  sku: item.sku,
+                  color: item.color,
+                  size: item.size,
+                  orderedQty: item.orderedQty,
+                  deliveredQty: item.deliveredQty,
+                  returnedQty: item.returnedQty,
+                  actionType: "RETURNED",
+                  unitPrice: item.unitPrice,
+                  lineTotal: item.returnedLineTotal,
+                });
+              }
+              return rows;
+            }),
+          },
+        },
+        include: {
+          items: true,
+          returnOrder: { include: { shipment: true } },
+        },
+      });
+
+      await tx.order.update({
+        where: { id: existing.id },
+        data: {
+          isPartialDelivery: true,
+          partialReason: body?.reason || "Giao hàng 1 phần",
+          fulfillmentStatus: FulfillmentStatus.PARTIAL,
+        },
+      });
+
+      if (existing.shipment?.id) {
+        await tx.shipment.update({
+          where: { id: existing.shipment.id },
+          data: { codAmount: adjustedCod },
+        }).catch(() => null);
+      }
+
+      return record;
+    });
+
+    return this.mapPartialDeliveryRecord(result);
+  }
+
+  async getPartialDelivery(id: string, user?: any) {
+    const record = await this.prisma.partialDeliveryRecord.findUnique({
+      where: { id },
+      include: {
+        items: true,
+        order: true,
+        returnOrder: { include: { shipment: true, items: true } },
+      },
+    });
+
+    if (!record) throw new BadRequestException("Không tìm thấy phiếu giao hàng 1 phần.");
+    this.ensureBranchAccess(user, record.order?.branchId || null);
+    return this.mapPartialDeliveryRecord(record);
   }
 
   async updateOrderStatus(orderId: string, status: OrderStatus, user?: any) {

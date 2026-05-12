@@ -75,6 +75,26 @@ export class QuoteShipmentDto {
   requiredNote?: string;
 
   @IsOptional()
+  @IsInt()
+  fromDistrictId?: number;
+
+  @IsOptional()
+  @IsString()
+  fromWardCode?: string;
+
+  @IsOptional()
+  @IsString()
+  fromName?: string;
+
+  @IsOptional()
+  @IsString()
+  fromPhone?: string;
+
+  @IsOptional()
+  @IsString()
+  fromAddress?: string;
+
+  @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => QuoteShipmentItemDto)

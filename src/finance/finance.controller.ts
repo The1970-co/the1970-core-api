@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -8,6 +9,7 @@ import {
   Query,
   Req,
   UseGuards,
+  ForbiddenException,
 } from "@nestjs/common";
 import { JwtGuard } from "../auth/jwt.guard";
 import { PermissionGuard } from "../auth/guards/permission.guard";
@@ -19,7 +21,90 @@ import { FinanceService } from "./finance.service";
 export class FinanceController {
   constructor(private readonly financeService: FinanceService) {}
 
+  private userPermissions(user?: any) {
+    const keys = new Set<string>();
+    const add = (items?: any[]) => {
+      if (!Array.isArray(items)) return;
+      items.forEach((item) => {
+        const value = String(item || "").trim();
+        if (value) keys.add(value);
+      });
+    };
+
+    add(user?.permissions);
+    add(user?.permissionKeys);
+
+    if (Array.isArray(user?.branchPermissions)) {
+      user.branchPermissions.forEach((row: any) => {
+        add(row?.permissionKeys);
+        add(row?.extraPermissionKeys);
+      });
+      user.branchPermissions.forEach((row: any) => {
+        if (Array.isArray(row?.deniedPermissionKeys)) {
+          row.deniedPermissionKeys.forEach((key: any) => keys.delete(String(key || "").trim()));
+        }
+      });
+    }
+
+    return keys;
+  }
+
+  private ensureAnyPermission(user: any, permissions: string[]) {
+    const roles = [
+      ...(Array.isArray(user?.roles) ? user.roles : []),
+      user?.role,
+    ].map((role) => String(role || "").toLowerCase());
+
+    const keys = this.userPermissions(user);
+    const allowed =
+      roles.includes("owner") ||
+      roles.includes("admin") ||
+      keys.has("*") ||
+      permissions.some((permission) => keys.has(permission));
+
+    if (!allowed) {
+      throw new ForbiddenException("Bạn không có quyền truy cập chức năng này.");
+    }
+  }
+
+  private cashVoucherViewPermissions(type?: "RECEIPT" | "PAYMENT" | "ALL") {
+    if (type === "RECEIPT") return ["cash_voucher.view_receipt", "cash_voucher.view"];
+    if (type === "PAYMENT") return ["cash_voucher.view_payment", "cash_voucher.view"];
+    return ["cash_voucher.view_receipt", "cash_voucher.view_payment", "cash_voucher.view"];
+  }
+
+  private cashVoucherCreatePermissions(type?: "RECEIPT" | "PAYMENT") {
+    return type === "PAYMENT"
+      ? ["cash_voucher.create_payment"]
+      : ["cash_voucher.create_receipt"];
+  }
+
+  private cashVoucherEditPermissions(type?: "RECEIPT" | "PAYMENT") {
+    return type === "PAYMENT"
+      ? ["cash_voucher.edit_payment"]
+      : ["cash_voucher.edit_receipt"];
+  }
+
+  private cashVoucherConfirmPermissions(type?: "RECEIPT" | "PAYMENT") {
+    return type === "PAYMENT"
+      ? ["cash_voucher.confirm_payment"]
+      : ["cash_voucher.confirm_receipt"];
+  }
+
+  private cashVoucherCancelPermissions(type?: "RECEIPT" | "PAYMENT") {
+    return type === "PAYMENT"
+      ? ["cash_voucher.cancel_payment"]
+      : ["cash_voucher.cancel_receipt"];
+  }
+
+  private cashVoucherDeletePermissions(type?: "RECEIPT" | "PAYMENT") {
+    return type === "PAYMENT"
+      ? ["cash_voucher.delete_payment", "cash_voucher.cancel_payment"]
+      : ["cash_voucher.delete_receipt", "cash_voucher.cancel_receipt"];
+  }
+
   @Get("daily")
+  @RequirePermissions("finance.view")
   getDaily(
     @Query("dateFrom") dateFrom?: string,
     @Query("dateTo") dateTo?: string,
@@ -39,7 +124,6 @@ export class FinanceController {
   }
 
   @Get("cash-vouchers")
-  @RequirePermissions("cash_voucher.view")
   getCashVouchers(
     @Req() req: any,
     @Query("type") type?: "RECEIPT" | "PAYMENT" | "ALL",
@@ -50,6 +134,7 @@ export class FinanceController {
     @Query("status") status?: string,
     @Query("q") q?: string
   ) {
+    this.ensureAnyPermission(req.user, this.cashVoucherViewPermissions(type));
     return this.financeService.getCashVouchers({
       type,
       dateFrom,
@@ -79,6 +164,7 @@ export class FinanceController {
       createdByName?: string;
     }
   ) {
+    this.ensureAnyPermission(req.user, this.cashVoucherCreatePermissions(body.type));
     return this.financeService.createCashVoucher(body, req.user);
   }
 
@@ -98,6 +184,7 @@ export class FinanceController {
       note?: string;
     }
   ) {
+    this.ensureAnyPermission(req.user, ["cash_voucher.edit_receipt", "cash_voucher.edit_payment"]);
     return this.financeService.updateCashVoucher(id, body, req.user);
   }
 
@@ -112,6 +199,7 @@ export class FinanceController {
       note?: string;
     }
   ) {
+    this.ensureAnyPermission(req.user, ["cash_voucher.confirm_receipt", "cash_voucher.confirm_payment"]);
     return this.financeService.confirmCashVoucher(id, body, req.user);
   }
 
@@ -126,10 +214,22 @@ export class FinanceController {
       note?: string;
     }
   ) {
+    this.ensureAnyPermission(req.user, ["cash_voucher.cancel_receipt", "cash_voucher.cancel_payment"]);
     return this.financeService.cancelCashVoucher(id, body, req.user);
   }
 
+  @Delete("cash-vouchers/:id")
+  deleteCashVoucher(
+    @Req() req: any,
+    @Param("id") id: string,
+    @Query("type") type?: "RECEIPT" | "PAYMENT"
+  ) {
+    this.ensureAnyPermission(req.user, this.cashVoucherDeletePermissions(type));
+    return this.financeService.deleteCashVoucher(id, req.user);
+  }
+
   @Get("local-delivery-reconciliation")
+  @RequirePermissions("finance.local_delivery.view")
   getLocalDeliveryReconciliation(
     @Query("dateFrom") dateFrom?: string,
     @Query("dateTo") dateTo?: string,
@@ -151,6 +251,7 @@ export class FinanceController {
   @Patch("local-delivery-reconciliation/:orderId/delivered")
   @RequirePermissions("finance.local_delivery.confirm")
   markLocalDeliveryDelivered(
+    @Req() req: any,
     @Param("orderId") orderId: string,
     @Body()
     body: {
@@ -166,6 +267,7 @@ export class FinanceController {
   @Patch("local-delivery-reconciliation/:orderId/cod-received")
   @RequirePermissions("finance.local_delivery.confirm")
   markLocalDeliveryCodReceived(
+    @Req() req: any,
     @Param("orderId") orderId: string,
     @Body()
     body: {

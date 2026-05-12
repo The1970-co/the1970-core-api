@@ -1235,109 +1235,9 @@ export class ShipmentService {
   }
 
 
-
-  async listPickupLocations() {
-    const items: any[] = [];
-
-    const ghnDistrictId = Number(process.env.GHN_FROM_DISTRICT_ID || 0);
-    const ghnWardCode = process.env.GHN_FROM_WARD_CODE || "";
-    const ghnAddress = process.env.GHN_RETURN_ADDRESS || this.returnAddress || "";
-    const ghnName = process.env.GHN_RETURN_NAME || this.returnName || "The 1970";
-    const ghnPhone = process.env.GHN_RETURN_PHONE || this.returnPhone || "";
-
-    if (ghnDistrictId || ghnAddress || ghnPhone) {
-      items.push({
-        id: "ghn-default",
-        carrier: "ghn",
-        label: `${ghnName || "GHN"}${ghnPhone ? ` · ${ghnPhone}` : ""}${ghnAddress ? ` · ${ghnAddress}` : ""}`,
-        name: ghnName,
-        phone: ghnPhone,
-        address: ghnAddress,
-        isDefault: true,
-        source: "env",
-        ghnShopId: process.env.GHN_SHOP_ID || undefined,
-        ghnFromDistrictId: ghnDistrictId || undefined,
-        ghnFromWardCode: ghnWardCode || undefined,
-        raw: {
-          shopId: process.env.GHN_SHOP_ID || undefined,
-          fromDistrictId: ghnDistrictId || undefined,
-          fromWardCode: ghnWardCode || undefined,
-        },
-      });
-    }
-
-    const ahamoveName = process.env.AHAMOVE_FROM_NAME || this.returnName || "The 1970";
-    const ahamovePhone = process.env.AHAMOVE_FROM_PHONE || this.returnPhone || "";
-    const ahamoveAddress = process.env.AHAMOVE_FROM_ADDRESS || this.returnAddress || "";
-
-    if (ahamoveAddress || ahamovePhone) {
-      items.push({
-        id: "ahamove-default",
-        carrier: "ahamove",
-        label: `${ahamoveName || "AhaMove"}${ahamovePhone ? ` · ${ahamovePhone}` : ""}${ahamoveAddress ? ` · ${ahamoveAddress}` : ""}`,
-        name: ahamoveName,
-        phone: ahamovePhone,
-        address: ahamoveAddress,
-        isDefault: true,
-        source: "env",
-        raw: {
-          fromName: ahamoveName,
-          fromPhone: ahamovePhone,
-          fromAddress: ahamoveAddress,
-        },
-      });
-    }
-
-    const viettelInventories = await this.listViettelPostInventories().catch(() => [] as any[]);
-    for (const inventory of viettelInventories) {
-      const groupId = Number(inventory.groupAddressId || inventory.group_address_id || 0);
-      items.push({
-        id: `viettelpost-${groupId || inventory.address || items.length}`,
-        carrier: "viettelpost",
-        label: `${inventory.name || "Kho ViettelPost"}${inventory.phone ? ` · ${inventory.phone}` : ""}${inventory.address ? ` · ${inventory.address}` : ""}`,
-        name: inventory.name || process.env.VIETTELPOST_SENDER_NAME || this.returnName,
-        phone: inventory.phone || process.env.VIETTELPOST_SENDER_PHONE || this.returnPhone,
-        address: inventory.address || process.env.VIETTELPOST_SENDER_ADDRESS || this.returnAddress,
-        isDefault: groupId === Number(process.env.VIETTELPOST_SENDER_GROUP_ADDRESS_ID || 0),
-        source: "viettelpost",
-        viettelGroupAddressId: groupId || undefined,
-        viettelProvinceId: Number(inventory.provinceId || 0) || undefined,
-        viettelDistrictId: Number(inventory.districtId || 0) || undefined,
-        viettelWardId: Number(inventory.wardId || 0) || undefined,
-        raw: inventory,
-      });
-    }
-
-    if (!items.some((item) => item.carrier === "viettelpost")) {
-      const groupId = Number(process.env.VIETTELPOST_SENDER_GROUP_ADDRESS_ID || 0);
-      const address = process.env.VIETTELPOST_SENDER_ADDRESS || this.returnAddress || "";
-      const name = process.env.VIETTELPOST_SENDER_NAME || this.returnName || "ViettelPost";
-      const phone = process.env.VIETTELPOST_SENDER_PHONE || this.returnPhone || "";
-      if (groupId || address || phone) {
-        items.push({
-          id: "viettelpost-default",
-          carrier: "viettelpost",
-          label: `${name}${phone ? ` · ${phone}` : ""}${address ? ` · ${address}` : ""}`,
-          name,
-          phone,
-          address,
-          isDefault: true,
-          source: "env",
-          viettelGroupAddressId: groupId || undefined,
-          viettelProvinceId: Number(process.env.VIETTELPOST_SENDER_PROVINCE_ID || 0) || undefined,
-          viettelDistrictId: Number(process.env.VIETTELPOST_SENDER_DISTRICT_ID || 0) || undefined,
-          viettelWardId: Number(process.env.VIETTELPOST_SENDER_WARD_ID || 0) || undefined,
-          raw: {},
-        });
-      }
-    }
-
-    return items;
-  }
-
   async quote(dto: QuoteShipmentDto) {
-    const fromDistrictId = Number((dto as any)?.fromDistrictId || this.fromDistrictId || 0);
-    const fromWardCode = String((dto as any)?.fromWardCode || this.fromWardCode || "");
+    const fromDistrictId = Number((dto as any).fromDistrictId || this.fromDistrictId || 0);
+    const fromWardCode = String((dto as any).fromWardCode || this.fromWardCode || "");
 
     if (!fromDistrictId) {
       throw new BadRequestException("Thiếu GHN_FROM_DISTRICT_ID");
@@ -1437,18 +1337,13 @@ export class ShipmentService {
         };
       }
 
-      const fromDistrictId = Number((dto as any)?.fromDistrictId || this.fromDistrictId || 0);
-      const fromWardCode = String((dto as any)?.fromWardCode || this.fromWardCode || "");
-      const fromName = String((dto as any)?.fromName || this.returnName || "The 1970");
-      const fromPhone = String((dto as any)?.fromPhone || this.returnPhone || "");
-      const fromAddress = String((dto as any)?.fromAddress || this.returnAddress || "");
+      const fromDistrictId = Number((dto as any).fromDistrictId || this.fromDistrictId || 0);
+      const fromWardCode = String((dto as any).fromWardCode || this.fromWardCode || "");
+      const fromName = String((dto as any).fromName || this.returnName || "The 1970");
+      const fromPhone = String((dto as any).fromPhone || this.returnPhone || "");
+      const fromAddress = String((dto as any).fromAddress || this.returnAddress || "");
 
-      if (
-        !fromDistrictId ||
-        !fromWardCode ||
-        !fromPhone ||
-        !fromAddress
-      ) {
+      if (!fromDistrictId || !fromWardCode || !fromPhone || !fromAddress) {
         throw new BadRequestException("Thiếu cấu hình GHN đầu gửi");
       }
 
@@ -1539,9 +1434,9 @@ export class ShipmentService {
           codAmount,
           shippingFee: created.total_fee ?? null,
           weight: dto.weight,
-          fromName,
-          fromPhone,
-          fromAddress,
+          fromName: this.returnName,
+          fromPhone: this.returnPhone,
+          fromAddress: this.returnAddress,
           toName: dto.toName,
           toPhone: dto.toPhone,
           toAddress: dto.toAddress,
@@ -1556,9 +1451,9 @@ export class ShipmentService {
           codAmount,
           shippingFee: created.total_fee ?? null,
           weight: dto.weight,
-          fromName,
-          fromPhone,
-          fromAddress,
+          fromName: this.returnName,
+          fromPhone: this.returnPhone,
+          fromAddress: this.returnAddress,
           toName: dto.toName,
           toPhone: dto.toPhone,
           toAddress: dto.toAddress,
@@ -2384,54 +2279,314 @@ export class ShipmentService {
   }
 
   private normalizeViettelPostInventory(raw: any) {
+    const pick = (...keys: string[]) => {
+      for (const key of keys) {
+        const value = key.split(".").reduce((acc: any, part) => acc?.[part], raw);
+        if (value !== undefined && value !== null && String(value).trim()) {
+          return String(value).trim();
+        }
+      }
+      return "";
+    };
+
     const groupAddressId = Number(
-      raw?.group_address_id ||
-      raw?.groupAddressId ||
-      raw?.GROUPADDRESS_ID ||
-      raw?.GROUP_ADDRESS_ID ||
-      raw?.id ||
-      0
+      pick(
+        "group_address_id",
+        "groupAddressId",
+        "GROUPADDRESS_ID",
+        "GROUP_ADDRESS_ID",
+        "groupaddressId",
+        "groupAddressID",
+        "GROUP_ADDRESS_ID",
+        "SENDER_GROUP_ADDRESS_ID",
+        "sender_group_address_id",
+        "senderGroupAddressId",
+        "id",
+        "ID",
+        "_id"
+      ) || 0
+    );
+
+    const provinceId = Number(
+      pick(
+        "province_id",
+        "provinceId",
+        "PROVINCE_ID",
+        "SENDER_PROVINCE",
+        "SENDER_PROVINCE_ID",
+        "senderProvinceId",
+        "province.value",
+        "province.id"
+      ) || 0
+    );
+
+    const districtId = Number(
+      pick(
+        "district_id",
+        "districtId",
+        "DISTRICT_ID",
+        "SENDER_DISTRICT",
+        "SENDER_DISTRICT_ID",
+        "senderDistrictId",
+        "district.value",
+        "district.id"
+      ) || 0
+    );
+
+    const wardId = Number(
+      pick(
+        "wards_id",
+        "ward_id",
+        "wardId",
+        "WARDS_ID",
+        "WARD_ID",
+        "SENDER_WARD",
+        "SENDER_WARD_ID",
+        "senderWardId",
+        "ward.value",
+        "ward.id"
+      ) || 0
+    );
+
+    const name = pick(
+      "name",
+      "NAME",
+      "full_name",
+      "fullName",
+      "SENDER_FULLNAME",
+      "SENDER_NAME",
+      "senderName",
+      "contact_name",
+      "contactName",
+      "customer_name",
+      "customerName"
+    );
+
+    const phone = pick(
+      "phone",
+      "PHONE",
+      "tel",
+      "TEL",
+      "mobile",
+      "MOBILE",
+      "SENDER_PHONE",
+      "senderPhone",
+      "contact_phone",
+      "contactPhone"
+    );
+
+    const address = pick(
+      "address",
+      "ADDRESS",
+      "SENDER_ADDRESS",
+      "senderAddress",
+      "full_address",
+      "fullAddress",
+      "ADDRESS_FULL",
+      "address_full"
     );
 
     return {
       groupAddressId,
-      cusId: Number(raw?.cus_id || raw?.cusId || raw?.CUS_ID || 0) || undefined,
-      name: String(raw?.name || raw?.NAME || raw?.full_name || raw?.SENDER_FULLNAME || ""),
-      phone: String(raw?.phone || raw?.PHONE || raw?.tel || raw?.SENDER_PHONE || ""),
-      address: String(raw?.address || raw?.ADDRESS || raw?.SENDER_ADDRESS || ""),
-      provinceId: Number(raw?.province_id || raw?.provinceId || raw?.PROVINCE_ID || raw?.SENDER_PROVINCE || 0),
-      districtId: Number(raw?.district_id || raw?.districtId || raw?.DISTRICT_ID || raw?.SENDER_DISTRICT || 0),
-      wardId: Number(raw?.wards_id || raw?.ward_id || raw?.wardId || raw?.WARDS_ID || raw?.WARD_ID || raw?.SENDER_WARD || 0) || undefined,
+      cusId: Number(pick("cus_id", "cusId", "CUS_ID", "customer_id", "customerId") || 0) || undefined,
+      name,
+      phone,
+      address,
+      provinceId,
+      districtId,
+      wardId: wardId || undefined,
       raw,
     };
   }
 
   private extractViettelPostInventories(raw: any) {
-    const candidates = [
+    const directCandidates = [
       raw,
       raw?.data,
       raw?.DATA,
       raw?.result,
       raw?.RESULT,
       raw?.inventories,
-      raw?.vtp_inventories,
+      raw?.inventory,
+      raw?.listInventory,
+      raw?.listInventories,
+      raw?.list,
+      raw?.LIST,
+      raw?.rows,
+      raw?.items,
       raw?.data?.data,
       raw?.data?.result,
       raw?.data?.RESULT,
+      raw?.data?.list,
+      raw?.data?.LIST,
+      raw?.data?.rows,
+      raw?.data?.items,
+      raw?.DATA?.data,
+      raw?.DATA?.result,
+      raw?.DATA?.RESULT,
+      raw?.DATA?.list,
+      raw?.DATA?.LIST,
     ];
 
-    for (const item of candidates) {
+    for (const item of directCandidates) {
       if (Array.isArray(item)) return item;
     }
 
-    return [];
+    const rows: any[] = [];
+    const walk = (node: any, depth = 0) => {
+      if (!node || depth > 6) return;
+
+      if (Array.isArray(node)) {
+        const looksLikeInventory = node.some((item) => {
+          if (!item || typeof item !== "object") return false;
+          const keys = Object.keys(item).map((key) => key.toLowerCase());
+          return keys.some((key) =>
+            [
+              "group_address_id",
+              "groupaddressid",
+              "groupaddress_id",
+              "sender_group_address_id",
+              "senderaddressid",
+              "address",
+              "sender_address",
+              "full_address",
+            ].includes(key)
+          );
+        });
+
+        if (looksLikeInventory) rows.push(...node);
+        for (const child of node.slice(0, 80)) walk(child, depth + 1);
+        return;
+      }
+
+      if (typeof node === "object") {
+        for (const value of Object.values(node)) walk(value, depth + 1);
+      }
+    };
+
+    walk(raw);
+
+    const seen = new Set<string>();
+    return rows.filter((item) => {
+      const key = JSON.stringify({
+        id:
+          item?.group_address_id ||
+          item?.groupAddressId ||
+          item?.GROUPADDRESS_ID ||
+          item?.GROUP_ADDRESS_ID ||
+          item?.id ||
+          item?.ID ||
+          "",
+        address: item?.address || item?.ADDRESS || item?.SENDER_ADDRESS || item?.full_address || "",
+      });
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  async getPickupLocations() {
+    const locations: any[] = [];
+
+    const ghnShopId = Number(process.env.GHN_SHOP_ID || 0);
+    const ghnDistrictId = Number(process.env.GHN_FROM_DISTRICT_ID || 0);
+    const ghnWardCode = String(process.env.GHN_FROM_WARD_CODE || "");
+    const ghnAddress = String(process.env.GHN_RETURN_ADDRESS || "");
+    const ghnName = String(process.env.GHN_RETURN_NAME || "The 1970");
+    const ghnPhone = String(process.env.GHN_RETURN_PHONE || "");
+
+    if (ghnDistrictId && ghnWardCode) {
+      locations.push({
+        id: `ghn-${ghnShopId || "default"}-${ghnDistrictId}-${ghnWardCode}`,
+        carrier: "ghn",
+        label: `${ghnName}${ghnAddress ? ` · ${ghnAddress}` : ""}`,
+        name: ghnName,
+        phone: ghnPhone,
+        address: ghnAddress,
+        ghnShopId: ghnShopId || undefined,
+        ghnFromDistrictId: ghnDistrictId,
+        ghnFromWardCode: ghnWardCode,
+      });
+    }
+
+    const ahamoveName = String(process.env.AHAMOVE_FROM_NAME || this.returnName || "The 1970");
+    const ahamovePhone = String(process.env.AHAMOVE_FROM_PHONE || this.returnPhone || "");
+    const ahamoveAddress = String(process.env.AHAMOVE_FROM_ADDRESS || this.returnAddress || "");
+
+    if (ahamovePhone && ahamoveAddress) {
+      locations.push({
+        id: `ahamove-default-${ahamovePhone}`,
+        carrier: "ahamove",
+        label: `${ahamoveName}${ahamoveAddress ? ` · ${ahamoveAddress}` : ""}`,
+        name: ahamoveName,
+        phone: ahamovePhone,
+        address: ahamoveAddress,
+      });
+    }
+
+    try {
+      const inventories = await this.listViettelPostInventories();
+      for (const item of inventories as any[]) {
+        locations.push({
+          id: `viettelpost-${item.groupAddressId}`,
+          carrier: "viettelpost",
+          label: `${item.name || "Kho ViettelPost"}${item.address ? ` · ${item.address}` : ""}`,
+          name: item.name || process.env.VIETTELPOST_SENDER_NAME || this.returnName,
+          phone: item.phone || process.env.VIETTELPOST_SENDER_PHONE || this.returnPhone,
+          address: item.address || process.env.VIETTELPOST_SENDER_ADDRESS || this.returnAddress,
+          viettelGroupAddressId: Number(item.groupAddressId),
+          groupAddressId: Number(item.groupAddressId),
+          viettelProvinceId: Number(item.provinceId || 0) || undefined,
+          viettelDistrictId: Number(item.districtId || 0) || undefined,
+          viettelWardId: Number(item.wardId || 0) || undefined,
+        });
+      }
+    } catch (error) {
+      this.logger.warn(
+        `[PICKUP_LOCATIONS] Không tải được kho ViettelPost: ${
+          error instanceof Error ? error.message : error
+        }`
+      );
+    }
+
+    const envVtpGroupId = Number(process.env.VIETTELPOST_SENDER_GROUP_ADDRESS_ID || 0);
+    const hasEnvVtp = locations.some(
+      (item) =>
+        item.carrier === "viettelpost" &&
+        Number(item.groupAddressId || item.viettelGroupAddressId || 0) === envVtpGroupId,
+    );
+
+    if (!hasEnvVtp && envVtpGroupId) {
+      locations.push({
+        id: `viettelpost-env-${envVtpGroupId}`,
+        carrier: "viettelpost",
+        label: `${process.env.VIETTELPOST_SENDER_NAME || this.returnName}${
+          process.env.VIETTELPOST_SENDER_ADDRESS
+            ? ` · ${process.env.VIETTELPOST_SENDER_ADDRESS}`
+            : ""
+        }`,
+        name: process.env.VIETTELPOST_SENDER_NAME || this.returnName,
+        phone: process.env.VIETTELPOST_SENDER_PHONE || this.returnPhone,
+        address: process.env.VIETTELPOST_SENDER_ADDRESS || this.returnAddress,
+        viettelGroupAddressId: envVtpGroupId,
+        groupAddressId: envVtpGroupId,
+        viettelProvinceId: Number(process.env.VIETTELPOST_SENDER_PROVINCE_ID || 0) || undefined,
+        viettelDistrictId: Number(process.env.VIETTELPOST_SENDER_DISTRICT_ID || 0) || undefined,
+        viettelWardId: Number(process.env.VIETTELPOST_SENDER_WARD_ID || 0) || undefined,
+      });
+    }
+
+    return locations;
   }
 
   async listViettelPostInventories() {
     const raw = await this.viettelPostClient.listInventories();
     const rows = this.extractViettelPostInventories(raw)
       .map((item: any) => this.normalizeViettelPostInventory(item))
-      .filter((item: any) => item.groupAddressId && item.provinceId && item.districtId);
+      // ViettelPost /user/listInventory có tài khoản chỉ trả groupAddressId + address,
+      // không luôn trả provinceId/districtId. Vẫn phải đưa ra UI để map kho giống Sapo,
+      // lúc create/quote sẽ fallback tỉnh/huyện/xã từ env nếu inventory thiếu mã.
+      .filter((item: any) => item.groupAddressId || item.address || item.name || item.phone);
 
     return rows;
   }
@@ -2456,9 +2611,9 @@ export class ShipmentService {
         return {
           groupAddressId: Number(found.groupAddressId),
           cusId: Number(found.cusId || 0) || undefined,
-          provinceId: Number(found.provinceId),
-          districtId: Number(found.districtId),
-          wardId: Number(found.wardId || 0) || undefined,
+          provinceId: Number(found.provinceId || 0) || Number((await this.getViettelSenderConfigFromEnv()).provinceId),
+          districtId: Number(found.districtId || 0) || Number((await this.getViettelSenderConfigFromEnv()).districtId),
+          wardId: Number(found.wardId || 0) || Number((await this.getViettelSenderConfigFromEnv()).wardId || 0) || undefined,
           name: input?.fromName || found.name || process.env.VIETTELPOST_SENDER_NAME || this.returnName,
           phone: input?.fromPhone || found.phone || process.env.VIETTELPOST_SENDER_PHONE || this.returnPhone,
           address: input?.fromAddress || found.address || process.env.VIETTELPOST_SENDER_ADDRESS || this.returnAddress,

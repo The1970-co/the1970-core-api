@@ -34,6 +34,11 @@ export class ShipmentController {
       .replace(/^xã\s+/i, "");
   }
 
+  @Get("pickup-locations")
+  getPickupLocations() {
+    return this.shipmentService.getPickupLocations();
+  }
+
   @Get("order/:orderId/tracking")
   getShipmentTrackingByOrder(
     @Param("orderId") orderId: string,
@@ -169,11 +174,6 @@ export class ShipmentController {
       String(body.code).trim(),
       req.user
     );
-  }
-
-  @Get("pickup-locations")
-  getPickupLocations() {
-    return this.shipmentService.listPickupLocations();
   }
 
   @Post("ghn/track")
