@@ -1840,8 +1840,7 @@ export class OrderService {
           });
 
           // POS cash voucher sync runs after the order transaction commits.
-          // Do not create CashVoucher inside this transaction, otherwise one finance query
-          // can abort the whole POS order with PostgreSQL 25P02.
+          // Keep CashVoucher out of the main order transaction to avoid PostgreSQL 25P02 rollback.
         }
 
         if (modeConfig.deductStockNow || shouldCompleteCounterSale) {
@@ -2066,11 +2065,7 @@ export class OrderService {
 
         const paidPayments = finalOrderPayments
           .filter((payment: any) => {
-            const sourceType = String(
-              payment?.paymentSource?.type ||
-                payment?.sourceType ||
-                ""
-            ).toUpperCase();
+            const sourceType = String(payment?.paymentSource?.type || payment?.sourceType || "").toUpperCase();
 
             return (
               payment?.paymentSourceId &&

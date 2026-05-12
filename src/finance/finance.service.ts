@@ -271,21 +271,19 @@ export class FinanceService {
     );
 
     const moneyPayments = payments.filter((payment) => {
-      const status = String(payment.status || "").toUpperCase();
+      const paymentStatus = String(payment.status || "").toUpperCase();
       const sourceType = String(payment.paymentSource?.type || "").toUpperCase();
       const salesChannel = String((payment.order as any)?.salesChannel || "").toUpperCase();
       const orderStatus = String(payment.order?.status || "").toUpperCase();
 
       if (!payment.paymentSourceId) return false;
       if (sourceType === "COD") return false;
-      if (status !== "PAID" && status !== "PARTIAL") return false;
+      if (paymentStatus !== "PAID" && paymentStatus !== "PARTIAL") return false;
 
-      // POS chỉ được vào tổng quan nguồn tiền khi đơn đã hoàn thành.
       if (salesChannel === "POS") {
         return orderStatus === "COMPLETED";
       }
 
-      // Đơn online/chuyển khoản cọc: chỉ cần payment đã PAID/PARTIAL và có nguồn tiền thật.
       return true;
     });
 
@@ -1041,6 +1039,111 @@ export class FinanceService {
       ...values,
     );
 
+    const virtualPosValues: any[] = [];
+    const virtualPosWhere: string[] = [
+      `o."salesChannel" = 'POS'`,
+      `o."status" = 'COMPLETED'`,
+      `p."status" IN ('PAID', 'PARTIAL')`,
+      `p."paymentSourceId" IS NOT NULL`,
+      `COALESCE(ps."type", '') != 'COD'`,
+      `NOT EXISTS (
+        SELECT 1
+        FROM "CashVoucher" cv
+        WHERE cv."refType" = 'ORDER'
+          AND cv."refId" = o."id"
+          AND cv."paymentSourceId" = p."paymentSourceId"
+          AND ROUND((cv."amount")::numeric, 0) = ROUND((p."amount")::numeric, 0)
+          AND COALESCE(cv."status", 'DRAFT') != 'CANCELLED'
+      )`,
+    ];
+
+    if (params.dateFrom || params.dateTo) {
+      const { from, to } = this.makeDateRange(params.dateFrom, params.dateTo);
+      const fromBuffer = new Date(from);
+      fromBuffer.setDate(fromBuffer.getDate() - 1);
+      const toBuffer = new Date(to);
+      toBuffer.setDate(toBuffer.getDate() + 1);
+
+      virtualPosValues.push(fromBuffer, toBuffer);
+      virtualPosWhere.push(`p."createdAt" BETWEEN $1 AND $2`);
+    }
+
+    if (params.type && params.type !== "ALL" && params.type !== "RECEIPT") {
+      virtualPosWhere.push(`1 = 0`);
+    }
+
+    const virtualScopedBranchId = this.scopedBranchId(user, params.branchId);
+    if (virtualScopedBranchId) {
+      virtualPosValues.push(virtualScopedBranchId);
+      virtualPosWhere.push(`o."branchId" = $${virtualPosValues.length}`);
+    }
+
+    if (params.paymentSourceId && params.paymentSourceId !== "ALL") {
+      virtualPosValues.push(params.paymentSourceId);
+      virtualPosWhere.push(`p."paymentSourceId" = $${virtualPosValues.length}`);
+    }
+
+    if (params.status && params.status !== "ALL" && params.status !== "CONFIRMED") {
+      virtualPosWhere.push(`1 = 0`);
+    }
+
+    if (params.q?.trim()) {
+      virtualPosValues.push(`%${params.q.trim()}%`);
+      virtualPosWhere.push(`(
+        o."orderCode" ILIKE $${virtualPosValues.length}
+        OR COALESCE(o."customerName", '') ILIKE $${virtualPosValues.length}
+        OR COALESCE(o."customerPhone", '') ILIKE $${virtualPosValues.length}
+        OR COALESCE(p."note", '') ILIKE $${virtualPosValues.length}
+        OR COALESCE(ps."name", '') ILIKE $${virtualPosValues.length}
+      )`);
+    }
+
+    const virtualPosRows = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+        SELECT
+          CONCAT('virtual_pos_', p."id") AS "id",
+          CONCAT('POS-', o."orderCode") AS "voucherCode",
+          'RECEIPT' AS "type",
+          'CONFIRMED' AS "status",
+          'IN' AS "direction",
+          'Thu bán hàng POS' AS "voucherType",
+          'Thu bán hàng POS' AS "category",
+          CONCAT('Thu bán lẻ POS ', o."orderCode") AS "title",
+          o."customerName" AS "partnerName",
+          o."customerPhone" AS "partnerPhone",
+          o."customerName" AS "customerName",
+          o."customerPhone" AS "customerPhone",
+          o."branchId" AS "branchId",
+          p."paymentSourceId" AS "paymentSourceId",
+          p."amount" AS "amount",
+          'ORDER' AS "refType",
+          o."id" AS "refId",
+          COALESCE(p."note", 'Thanh toán POS') AS "note",
+          o."createdByStaffId" AS "createdById",
+          o."createdByStaffName" AS "createdByName",
+          o."createdByStaffId" AS "staffId",
+          o."createdByStaffName" AS "staffName",
+          o."createdAt" AS "createdAt",
+          p."paidAt" AS "confirmedAt",
+          p."createdAt" AS "updatedAt",
+          NULL AS "cancelledAt",
+          b."name" AS "branchName",
+          ps."name" AS "paymentSourceName",
+          ps."code" AS "paymentSourceCode",
+          ps."type" AS "paymentSourceType",
+          true AS "isVirtualPosReceipt"
+        FROM "Payment" p
+        JOIN "Order" o ON o."id" = p."orderId"
+        LEFT JOIN "Branch" b ON b."id" = o."branchId"
+        LEFT JOIN "PaymentSource" ps ON ps."id" = p."paymentSourceId"
+        WHERE ${virtualPosWhere.join(" AND ")}
+        ORDER BY p."createdAt" DESC
+      `,
+      ...virtualPosValues,
+    );
+
+    const allRows = [...rows, ...virtualPosRows];
+
     let totalReceipt = 0;
     let totalPayment = 0;
     let confirmedReceipt = 0;
@@ -1048,7 +1151,7 @@ export class FinanceService {
     let pendingAmount = 0;
     let cancelledAmount = 0;
 
-    for (const row of rows) {
+    for (const row of allRows) {
       const amount = this.toNumber(row.amount);
 
       if (row.type === "RECEIPT") totalReceipt += amount;
@@ -1071,9 +1174,9 @@ export class FinanceService {
         netCashFlow: confirmedReceipt - confirmedPayment,
         pendingAmount,
         cancelledAmount,
-        totalRows: rows.length,
+        totalRows: allRows.length,
       },
-      rows: rows.map((row) => ({
+      rows: allRows.map((row) => ({
         ...row,
         amount: this.toNumber(row.amount),
         createdAt: row.createdAt,
