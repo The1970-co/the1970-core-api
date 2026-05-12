@@ -246,9 +246,37 @@ export class OrderService {
     };
   }
 
-  private buildPartialReturnTrackingCode(record: any, sourceOrder?: any) {
-    const explicit = String(record?.returnTrackingCode || "").trim();
+  private extractPartialReturnTrackingCode(sourceOrder?: any) {
+    const shipment = sourceOrder?.shipment || null;
+    const metadata = shipment?.metadata || {};
+
+    const explicit = String(
+      metadata?.data?.partial_return_code ||
+      metadata?.partial_return_code ||
+      metadata?.partialReturnCode ||
+      metadata?.return_order_code ||
+      metadata?.returnOrderCode ||
+      ""
+    ).trim();
+
     if (explicit) return explicit;
+
+    const baseTrackingCode = String(
+      shipment?.trackingCode ||
+      sourceOrder?.trackingCode ||
+      ""
+    ).trim();
+
+    if (!baseTrackingCode) return "";
+    return baseTrackingCode.endsWith("_PR") ? baseTrackingCode : `${baseTrackingCode}_PR`;
+  }
+
+  private buildPartialReturnTrackingCode(record: any, sourceOrder?: any) {
+    const explicit = String(record?.returnTrackingCode || record?.returnOrderCode || "").trim();
+    if (explicit) return explicit;
+
+    const fromShipmentMetadata = this.extractPartialReturnTrackingCode(sourceOrder);
+    if (fromShipmentMetadata) return fromShipmentMetadata;
 
     const baseTrackingCode = String(
       record?.ghnTrackingCode ||
@@ -370,11 +398,85 @@ export class OrderService {
     }
   }
 
+  private async findReturnExchangeForSourceOrder(sourceOrder?: any) {
+    const candidates = Array.from(
+      new Set(
+        [sourceOrder?.id, sourceOrder?.orderCode]
+          .map((value) => String(value || "").trim())
+          .filter(Boolean),
+      ),
+    );
+
+    if (!candidates.length) return null;
+
+    try {
+      return await (this.prisma as any).returnExchange.findFirst({
+        where: {
+          OR: candidates.map((value) => ({ originalOrderId: value })),
+        },
+        include: { items: true },
+        orderBy: { createdAt: "desc" },
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  private async buildPartialDeliveryProjectionFromOrder(sourceOrder?: any) {
+    if (!sourceOrder) return null;
+
+    const returnTrackingCode = this.extractPartialReturnTrackingCode(sourceOrder);
+    const returnExchange = await this.findReturnExchangeForSourceOrder(sourceOrder);
+
+    // Nếu không có mã hoàn GHN và cũng không có phiếu đổi/trả thì không dựng response.
+    // Đây không phải insert DB, chỉ là projection runtime từ dữ liệu thật đang có.
+    if (!returnTrackingCode && !returnExchange) return null;
+
+    const returnStatus = this.mapPartialReturnStatus(
+      String(returnExchange?.status || "").toUpperCase() === "COMPLETED"
+        ? "RETURNED"
+        : "PENDING_RETURN",
+    );
+
+    return {
+      id: `runtime-partial-${sourceOrder.id}`,
+      code: `PDL-${sourceOrder.orderCode || sourceOrder.id}`,
+      orderId: sourceOrder.id,
+      orderCode: sourceOrder.orderCode,
+      order: sourceOrder,
+      ghnTrackingCode: sourceOrder?.shipment?.trackingCode || null,
+      originalCod: this.toNumber(sourceOrder.finalAmount),
+      adjustedCod: this.toNumber(sourceOrder?.shipment?.codAmount || 0),
+      shippingFee: this.toNumber(sourceOrder.shippingFee),
+      reason: sourceOrder.partialReason || "Đơn đã được xử lý theo flow giao hàng 1 phần.",
+      note: null,
+      approvedBy: null,
+      approvedById: null,
+      handledAt: returnExchange?.createdAt || sourceOrder?.shipment?.updatedAt || sourceOrder.updatedAt || sourceOrder.createdAt || null,
+      createdAt: returnExchange?.createdAt || sourceOrder?.shipment?.updatedAt || sourceOrder.updatedAt || sourceOrder.createdAt || null,
+      returnOrderId: null,
+      returnOrderCode: returnTrackingCode || null,
+      returnTrackingCode: returnTrackingCode || null,
+      returnStatus,
+      returnReceivedAt: returnStatus === "RETURNED" ? returnExchange?.updatedAt || new Date() : null,
+      items: [],
+      _returnExchange: returnExchange || null,
+      returnOrder: null,
+    };
+  }
+
   private async attachPartialReturnContext(records: any[], sourceOrder?: any) {
-    if (!Array.isArray(records) || !records.length) return records || [];
+    let safeRecords = Array.isArray(records) ? records.filter(Boolean) : [];
+
+    if (!safeRecords.length) {
+      const projection = await this.buildPartialDeliveryProjectionFromOrder(sourceOrder);
+      safeRecords = projection ? [projection] : [];
+    }
+
+    if (!safeRecords.length) return [];
 
     const withTracking = await Promise.all(
-      records.map((record) => this.attachPartialReturnTracking(record, sourceOrder)),
+      safeRecords.map((record) => this.attachPartialReturnTracking(record, sourceOrder)),
     );
 
     return Promise.all(
@@ -1099,6 +1201,200 @@ export class OrderService {
     });
   }
 
+  private async ensureOrderCashVoucherTable(tx: any) {
+    await tx.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "CashVoucher" (
+        "id" TEXT PRIMARY KEY,
+        "code" TEXT UNIQUE,
+        "voucherCode" TEXT UNIQUE,
+        "direction" TEXT,
+        "voucherType" TEXT,
+        "type" TEXT,
+        "status" TEXT DEFAULT 'DRAFT',
+        "amount" NUMERIC(18,2) NOT NULL DEFAULT 0,
+        "paymentSourceId" TEXT,
+        "branchId" TEXT,
+        "staffId" TEXT,
+        "staffName" TEXT,
+        "customerName" TEXT,
+        "customerPhone" TEXT,
+        "category" TEXT,
+        "title" TEXT,
+        "partnerName" TEXT,
+        "partnerPhone" TEXT,
+        "refType" TEXT,
+        "refId" TEXT,
+        "note" TEXT,
+        "createdById" TEXT,
+        "createdByName" TEXT,
+        "confirmedById" TEXT,
+        "confirmedByName" TEXT,
+        "cancelledById" TEXT,
+        "cancelledByName" TEXT,
+        "confirmedAt" TIMESTAMP,
+        "cancelledAt" TIMESTAMP,
+        "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
+        "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await tx.$executeRawUnsafe(`
+      ALTER TABLE "CashVoucher"
+      ADD COLUMN IF NOT EXISTS "code" TEXT,
+      ADD COLUMN IF NOT EXISTS "voucherCode" TEXT,
+      ADD COLUMN IF NOT EXISTS "direction" TEXT,
+      ADD COLUMN IF NOT EXISTS "voucherType" TEXT,
+      ADD COLUMN IF NOT EXISTS "type" TEXT,
+      ADD COLUMN IF NOT EXISTS "status" TEXT DEFAULT 'DRAFT',
+      ADD COLUMN IF NOT EXISTS "category" TEXT,
+      ADD COLUMN IF NOT EXISTS "title" TEXT,
+      ADD COLUMN IF NOT EXISTS "partnerName" TEXT,
+      ADD COLUMN IF NOT EXISTS "partnerPhone" TEXT,
+      ADD COLUMN IF NOT EXISTS "refType" TEXT,
+      ADD COLUMN IF NOT EXISTS "refId" TEXT,
+      ADD COLUMN IF NOT EXISTS "createdById" TEXT,
+      ADD COLUMN IF NOT EXISTS "createdByName" TEXT,
+      ADD COLUMN IF NOT EXISTS "confirmedById" TEXT,
+      ADD COLUMN IF NOT EXISTS "confirmedByName" TEXT,
+      ADD COLUMN IF NOT EXISTS "cancelledById" TEXT,
+      ADD COLUMN IF NOT EXISTS "cancelledByName" TEXT,
+      ADD COLUMN IF NOT EXISTS "confirmedAt" TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS "cancelledAt" TIMESTAMP;
+    `);
+
+    await tx.$executeRawUnsafe(`
+      CREATE INDEX IF NOT EXISTS "CashVoucher_refType_refId_idx"
+      ON "CashVoucher" ("refType", "refId");
+    `);
+
+    await tx.$executeRawUnsafe(`
+      CREATE INDEX IF NOT EXISTS "CashVoucher_paymentSourceId_createdAt_idx"
+      ON "CashVoucher" ("paymentSourceId", "createdAt");
+    `);
+  }
+
+  private async generateOrderCashVoucherCode(tx: any, type: "RECEIPT" | "PAYMENT") {
+    const prefix = type === "RECEIPT" ? "PT" : "PC";
+    const today = new Date();
+    const ymd = [
+      today.getFullYear(),
+      String(today.getMonth() + 1).padStart(2, "0"),
+      String(today.getDate()).padStart(2, "0"),
+    ].join("");
+
+    const rows = await tx.$queryRawUnsafe(
+      `SELECT COUNT(*)::int AS count FROM "CashVoucher" WHERE COALESCE("voucherCode", "code", '') LIKE $1`,
+      `${prefix}${ymd}%`,
+    );
+
+    const count = Number((rows as Array<{ count: bigint | number | string }>)?.[0]?.count || 0) + 1;
+    return `${prefix}${ymd}-${String(count).padStart(4, "0")}`;
+  }
+
+  private async createPosCashVouchers(
+    tx: any,
+    input: {
+      order: any;
+      payments: Array<{ paymentSourceId: string | null; amount: number; note?: string | null }>;
+      paymentSourceMap: Map<string, any>;
+      branchId: string;
+      user?: any;
+      customerName?: string | null;
+      customerPhone?: string | null;
+    },
+  ) {
+    const payments = input.payments
+      .map((payment) => {
+        const source = input.paymentSourceMap.get(String(payment.paymentSourceId || ""));
+        return {
+          ...payment,
+          source,
+          amount: this.toNumber(payment.amount),
+        };
+      })
+      .filter((payment) => {
+        if (!payment.paymentSourceId || payment.amount <= 0) return false;
+        const sourceType = String(payment.source?.type || "").toUpperCase();
+        return sourceType !== "COD";
+      });
+
+    if (!payments.length) return;
+
+    await this.ensureOrderCashVoucherTable(tx);
+
+    for (const payment of payments) {
+      const existed = await tx.$queryRawUnsafe(
+        `
+          SELECT "id"
+          FROM "CashVoucher"
+          WHERE "refType" = 'ORDER'
+            AND "refId" = $1
+            AND "paymentSourceId" = $2
+            AND ROUND(("amount")::numeric, 0) = ROUND(($3)::numeric, 0)
+            AND COALESCE("status", 'DRAFT') != 'CANCELLED'
+          LIMIT 1
+        `,
+        input.order.id,
+        payment.paymentSourceId,
+        payment.amount,
+      );
+
+      if (existed.length) continue;
+
+      const voucherCode = await this.generateOrderCashVoucherCode(tx, "RECEIPT");
+      const id = `cv_pos_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      const createdByName =
+        input.user?.name ||
+        input.user?.code ||
+        input.user?.username ||
+        input.user?.email ||
+        input.order.createdByStaffName ||
+        null;
+      const partnerName = input.customerName || input.order.customerName || "Khách POS";
+      const partnerPhone = input.customerPhone || input.order.customerPhone || null;
+      const sourceName = payment.source?.name || payment.source?.code || "Nguồn tiền";
+      const title = `Thu bán lẻ POS ${input.order.orderCode}`;
+
+      await tx.$executeRawUnsafe(
+        `
+          INSERT INTO "CashVoucher" (
+            "id", "code", "voucherCode", "direction", "voucherType", "type", "status",
+            "branchId", "paymentSourceId", "amount", "category", "title",
+            "partnerName", "partnerPhone", "customerName", "customerPhone",
+            "refType", "refId", "note",
+            "createdById", "createdByName", "staffId", "staffName",
+            "confirmedById", "confirmedByName", "confirmedAt",
+            "createdAt", "updatedAt"
+          )
+          VALUES (
+            $1, $2, $2, 'IN', 'Thu bán hàng POS', 'RECEIPT', 'CONFIRMED',
+            $3, $4, $5, 'Thu bán hàng POS', $6,
+            $7, $8, $7, $8,
+            'ORDER', $9, $10,
+            $11, $12, $11, $12,
+            $11, $12, NOW(),
+            NOW(), NOW()
+          )
+        `,
+        id,
+        voucherCode,
+        input.branchId,
+        payment.paymentSourceId,
+        payment.amount,
+        title,
+        partnerName,
+        partnerPhone,
+        input.order.id,
+        [`Đơn POS ${input.order.orderCode}`, `Nguồn tiền: ${sourceName}`, payment.note || ""]
+          .filter(Boolean)
+          .join(" | "),
+        input.user?.id || input.order.createdByStaffId || null,
+        createdByName,
+      );
+    }
+  }
+
+
   async createOrder(body: any, user?: any) {
     const mode = this.resolveMode(body);
     const modeConfig = this.getModeConfig(mode);
@@ -1550,6 +1846,18 @@ export class OrderService {
               };
             }),
           });
+
+          if (isInstantCounterSale) {
+            await this.createPosCashVouchers(tx, {
+              order,
+              payments: cleanedPayments,
+              paymentSourceMap,
+              branchId,
+              user,
+              customerName,
+              customerPhone,
+            });
+          }
         }
 
         if (modeConfig.deductStockNow || shouldCompleteCounterSale) {

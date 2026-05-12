@@ -215,6 +215,67 @@ export class FinanceService {
       orderBy: { createdAt: "desc" },
     });
 
+    await this.ensureCashVoucherTable();
+
+    const voucherValues: any[] = [from, to];
+    const voucherWhere: string[] = [
+      `v."createdAt" BETWEEN $1 AND $2`,
+      `COALESCE(v."type", CASE WHEN UPPER(COALESCE(v."direction", '')) IN ('OUT', 'PAYMENT', 'CHI', 'CASH_OUT') THEN 'PAYMENT' ELSE 'RECEIPT' END) = 'RECEIPT'`,
+      `COALESCE(v."status", 'DRAFT') = 'CONFIRMED'`,
+    ];
+
+    if (params.paymentSourceId && params.paymentSourceId !== "ALL") {
+      voucherValues.push(params.paymentSourceId);
+      voucherWhere.push(`v."paymentSourceId" = $${voucherValues.length}`);
+    }
+
+    if (params.branchId && params.branchId !== "ALL") {
+      voucherValues.push(params.branchId);
+      voucherWhere.push(`v."branchId" = $${voucherValues.length}`);
+    }
+
+    if (params.q?.trim()) {
+      voucherValues.push(`%${params.q.trim()}%`);
+      voucherWhere.push(`(
+        COALESCE(v."voucherCode", v."code", '') ILIKE $${voucherValues.length}
+        OR COALESCE(v."title", '') ILIKE $${voucherValues.length}
+        OR COALESCE(v."partnerName", v."customerName", '') ILIKE $${voucherValues.length}
+        OR COALESCE(v."partnerPhone", v."customerPhone", '') ILIKE $${voucherValues.length}
+        OR COALESCE(v."note", '') ILIKE $${voucherValues.length}
+      )`);
+    }
+
+    const cashVouchers = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+        SELECT
+          v.*,
+          COALESCE(v."voucherCode", v."code") AS "voucherCode",
+          COALESCE(v."title", v."note", v."voucherType", '') AS "title",
+          COALESCE(v."partnerName", v."customerName", '') AS "partnerName",
+          COALESCE(v."partnerPhone", v."customerPhone", '') AS "partnerPhone",
+          ps."name" AS "paymentSourceName",
+          ps."code" AS "paymentSourceCode",
+          ps."type" AS "paymentSourceType",
+          b."name" AS "branchName"
+        FROM "CashVoucher" v
+        LEFT JOIN "PaymentSource" ps ON ps."id" = v."paymentSourceId"
+        LEFT JOIN "Branch" b ON b."id" = v."branchId"
+        WHERE ${voucherWhere.join(" AND ")}
+        ORDER BY v."createdAt" DESC
+      `,
+      ...voucherValues,
+    );
+
+    const paymentDedupKeys = new Set(
+      payments.map((payment) =>
+        [
+          payment.orderId || "",
+          payment.paymentSourceId || "",
+          this.toNumber(payment.amount),
+        ].join("|"),
+      ),
+    );
+
     const bySource = new Map<string, any>();
 
     let totalPaid = 0;
@@ -285,6 +346,79 @@ export class FinanceService {
       totalAll += amount;
     }
 
+    const mappedCashVouchers: any[] = [];
+
+    for (const voucher of cashVouchers) {
+      const amount = this.toNumber(voucher.amount);
+      if (amount <= 0) continue;
+
+      const dedupKey = [
+        String(voucher.refId || ""),
+        String(voucher.paymentSourceId || ""),
+        amount,
+      ].join("|");
+
+      // POS tạo cả Payment và CashVoucher để lưu phiếu thu.
+      // Tổng quan dòng tiền chỉ tính 1 lần: nếu đã có Payment cùng đơn/nguồn/số tiền thì bỏ voucher khỏi tổng.
+      if (String(voucher.refType || "").toUpperCase() === "ORDER" && paymentDedupKeys.has(dedupKey)) {
+        continue;
+      }
+
+      const key = voucher.paymentSourceId || "NO_SOURCE";
+      const sourceName = voucher.paymentSourceName || voucher.paymentSourceCode || "Tiền mặt";
+      const sourceCode = voucher.paymentSourceCode || "NO_SOURCE";
+      const sourceType = voucher.paymentSourceType || "CASH";
+
+      if (!bySource.has(key)) {
+        bySource.set(key, {
+          paymentSourceId: voucher.paymentSourceId,
+          sourceName,
+          sourceCode,
+          sourceType,
+          paidAmount: 0,
+          codPendingAmount: 0,
+          partialAmount: 0,
+          collectedAmount: 0,
+          refundedAmount: 0,
+          failedAmount: 0,
+          totalAmount: 0,
+          count: 0,
+        });
+      }
+
+      const row = bySource.get(key);
+      row.count += 1;
+      row.totalAmount += amount;
+      row.paidAmount += amount;
+      row.collectedAmount += amount;
+
+      totalPaid += amount;
+      totalCollected += amount;
+      totalAll += amount;
+
+      mappedCashVouchers.push({
+        id: voucher.id,
+        orderId: voucher.refId || null,
+        orderCode: voucher.refType === "ORDER" ? voucher.refId : voucher.voucherCode,
+        voucherCode: voucher.voucherCode,
+        branchId: voucher.branchId || "—",
+        customerName: voucher.partnerName || "Khách lẻ",
+        customerPhone: voucher.partnerPhone || "—",
+        orderStatus: null,
+        orderPaymentStatus: null,
+        amount,
+        status: "PAID",
+        method: sourceName,
+        sourceName,
+        sourceCode,
+        sourceType,
+        note: voucher.note || voucher.title || "Phiếu thu",
+        createdAt: voucher.createdAt,
+        paidAt: voucher.confirmedAt || voucher.createdAt,
+        recordType: "CASH_VOUCHER",
+      });
+    }
+
     const bySourceRows = Array.from(bySource.values()).sort(
       (a, b) => b.totalAmount - a.totalAmount
     );
@@ -303,12 +437,15 @@ export class FinanceService {
         totalRefunded,
         totalFailed,
         totalAll,
-        totalPayments: payments.length,
+        totalPayments: payments.length + mappedCashVouchers.length,
         averagePayment:
-          payments.length > 0 ? Math.round(totalAll / payments.length) : 0,
+          payments.length + mappedCashVouchers.length > 0
+            ? Math.round(totalAll / (payments.length + mappedCashVouchers.length))
+            : 0,
       },
       bySource: bySourceRows,
-      payments: payments.map((p) => ({
+      payments: [
+        ...payments.map((p) => ({
         id: p.id,
         orderId: p.orderId,
         orderCode: p.order?.orderCode || "—",
@@ -326,7 +463,10 @@ export class FinanceService {
         note: p.note || "",
         createdAt: p.createdAt,
         paidAt: p.paidAt,
+        recordType: "PAYMENT",
       })),
+        ...mappedCashVouchers,
+      ].sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()),
     };
   }
 
