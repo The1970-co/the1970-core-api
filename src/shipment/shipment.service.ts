@@ -1191,6 +1191,53 @@ export class ShipmentService {
     };
   }
 
+  async getGhnTrackingByCode(trackingCode: string) {
+    const code = String(trackingCode || "").trim();
+
+    if (!code) {
+      throw new BadRequestException("Thiếu mã vận đơn GHN");
+    }
+
+    const raw = await ((this.ghnClient as any).getOrderDetailWithPublicTracking
+      ? (this.ghnClient as any).getOrderDetailWithPublicTracking(code)
+      : this.ghnClient.getOrderDetail(code));
+
+    const syntheticShipment = {
+      id: `external-${code}`,
+      orderId: null,
+      carrier: "GHN",
+      trackingCode: code,
+      shippingStatus: raw?.status || raw?.status_name || raw?.current_status || "UNKNOWN",
+      partnerStatus: raw?.status_name || raw?.current_status || raw?.status || null,
+      codAmount: raw?.cod_amount || 0,
+      shippingFee: raw?.total_fee || 0,
+      fromName: raw?.from_name || "",
+      fromPhone: raw?.from_phone || "",
+      fromAddress: raw?.from_address || "",
+      toName: raw?.to_name || "",
+      toPhone: raw?.to_phone || "",
+      toAddress: raw?.to_address || "",
+      updatedAt: raw?.updated_date || raw?.updated_at || new Date(),
+    };
+
+    const normalized = this.normalizeTracking(raw, syntheticShipment);
+
+    return {
+      source: "ghn_live_by_code",
+      cached: false,
+      shipment: {
+        id: syntheticShipment.id,
+        trackingCode: code,
+        carrier: "GHN",
+        shippingStatus: normalized.shippingStatus,
+        partnerStatus: normalized.partnerStatus,
+      },
+      tracking: normalized,
+      timeline: normalized.timeline || [],
+      raw,
+    };
+  }
+
   async getShipmentTrackingByOrder(orderId: string, force = false) {
     const shipment = await this.prisma.shipment.findUnique({
       where: { orderId },

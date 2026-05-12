@@ -76,14 +76,125 @@ export class OrderService {
     return s;
   }
 
+  private normalizePartialReturnExchangeItem(item: any) {
+    const qty = Number(item?.qty || item?.quantity || 0);
+    const unitPrice = this.toNumber(item?.unitPrice ?? item?.refundPrice ?? 0);
+    return {
+      id: item?.id,
+      orderItemId: item?.orderItemId || null,
+      variantId: item?.variantId || null,
+      productName: item?.productName || item?.sku || "Sản phẩm",
+      sku: item?.sku || "",
+      color: item?.color || null,
+      size: item?.size || null,
+      qty,
+      returnedQty: qty,
+      deliveredQty: 0,
+      unitPrice,
+      lineTotal: this.toNumber(item?.lineTotal || unitPrice * qty),
+      actionType: String(item?.itemType || "RETURN").toUpperCase() === "EXCHANGE" ? "EXCHANGE" : "RETURNED",
+      sourceType: "RETURN_EXCHANGE",
+    };
+  }
+
+  private getPartialReturnExchange(record: any) {
+    return record?._returnExchange || record?.returnExchange || record?.returnTicket || null;
+  }
+
   private mapPartialDeliveryRecord(record: any) {
     if (!record) return null;
 
     const items = Array.isArray(record.items) ? record.items : [];
+    const sourceOrderItems = Array.isArray(record.order?.items) ? record.order.items : [];
     const returnShipment = record.returnOrder?.shipment || null;
+    const returnExchange = this.getPartialReturnExchange(record);
+    const returnExchangeItems = Array.isArray(returnExchange?.items) ? returnExchange.items : [];
+    const returnTicketStatus = String(returnExchange?.status || "").toUpperCase();
+
     const returnStatus = this.mapPartialReturnStatus(
-      returnShipment?.shippingStatus || record.returnStatus,
+      returnTicketStatus === "COMPLETED"
+        ? "RETURNED"
+        : record.returnTracking?.shippingStatus ||
+          record.returnTracking?.partnerStatus ||
+          returnShipment?.shippingStatus ||
+          record.returnStatus,
     );
+
+    const normalizedItems = items.map((item: any) => ({
+      ...item,
+      orderedQty: Number(item.orderedQty || 0),
+      deliveredQty: Number(item.deliveredQty || 0),
+      returnedQty: Number(item.returnedQty ?? Math.max(0, Number(item.orderedQty || 0) - Number(item.deliveredQty || 0))),
+      unitPrice: this.toNumber(item.unitPrice),
+      lineTotal: this.toNumber(item.lineTotal),
+    }));
+
+    const returnTicketReturnedItems = returnExchangeItems
+      .filter((item: any) => String(item?.itemType || "RETURN").toUpperCase() !== "EXCHANGE")
+      .map((item: any) => this.normalizePartialReturnExchangeItem(item));
+
+    const exchangeItems = returnExchangeItems
+      .filter((item: any) => String(item?.itemType || "").toUpperCase() === "EXCHANGE")
+      .map((item: any) => this.normalizePartialReturnExchangeItem(item));
+
+    const returnedItems = returnTicketReturnedItems.length
+      ? returnTicketReturnedItems
+      : normalizedItems
+        .filter((item: any) => String(item.actionType || "") === "RETURNED" || Number(item.returnedQty || 0) > 0)
+        .map((item: any) => ({
+          ...item,
+          qty: Number(item.returnedQty || 0),
+          unitPrice: this.toNumber(item.unitPrice),
+          lineTotal: this.toNumber(item.lineTotal),
+        }));
+
+    const returnedQtyByKey = new Map<string, number>();
+    returnedItems.forEach((item: any) => {
+      const keys = [item.orderItemId, item.variantId, item.sku]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+      keys.forEach((key) => returnedQtyByKey.set(key, Math.max(returnedQtyByKey.get(key) || 0, Number(item.qty || item.returnedQty || 0))));
+    });
+
+    const keptItemsFromOrder = sourceOrderItems
+      .map((item: any) => {
+        const orderedQty = Number(item.qty || item.quantity || 0);
+        const returnedQty = Math.max(
+          returnedQtyByKey.get(String(item.id || "")) || 0,
+          returnedQtyByKey.get(String(item.variantId || "")) || 0,
+          returnedQtyByKey.get(String(item.sku || "")) || 0,
+        );
+        const qty = Math.max(0, orderedQty - returnedQty);
+        return {
+          id: item.id,
+          orderItemId: item.id,
+          variantId: item.variantId || null,
+          productName: item.productName || item.sku || "Sản phẩm",
+          sku: item.sku || "",
+          color: item.color || null,
+          size: item.size || null,
+          orderedQty,
+          deliveredQty: qty,
+          returnedQty,
+          qty,
+          unitPrice: this.toNumber(item.unitPrice),
+          lineTotal: this.toNumber(item.unitPrice) * qty,
+          actionType: "KEPT",
+          sourceType: "ORDER_MINUS_RETURN_EXCHANGE",
+        };
+      })
+      .filter((item: any) => Number(item.qty || 0) > 0);
+
+    const keptItems = keptItemsFromOrder.length
+      ? keptItemsFromOrder
+      : normalizedItems
+        .filter((item: any) => String(item.actionType || "KEPT") === "KEPT")
+        .map((item: any) => ({
+          ...item,
+          qty: Number(item.deliveredQty || 0),
+          unitPrice: this.toNumber(item.unitPrice),
+          lineTotal: this.toNumber(item.lineTotal),
+        }));
 
     return {
       ...record,
@@ -92,6 +203,23 @@ export class OrderService {
       shippingFee: this.toNumber(record.shippingFee),
       handledAt: record.handledAt || record.createdAt || null,
       returnStatus,
+      returnOrderCode: record.returnTrackingCode || record.returnOrderCode || record.returnOrder?.orderCode || null,
+      returnTrackingCode: record.returnTrackingCode || record.returnOrderCode || record.returnTracking?.trackingCode || null,
+      returnTicket: returnExchange
+        ? {
+          id: returnExchange.id,
+          code: returnExchange.code,
+          status: returnExchange.status,
+          type: returnExchange.type,
+          returnAmount: this.toNumber(returnExchange.returnAmount),
+          exchangeAmount: this.toNumber(returnExchange.exchangeAmount),
+          differenceAmount: this.toNumber(returnExchange.differenceAmount),
+          refundAmount: this.toNumber(returnExchange.refundAmount),
+          extraChargeAmount: this.toNumber(returnExchange.extraChargeAmount),
+          createdAt: returnExchange.createdAt,
+          updatedAt: returnExchange.updatedAt,
+        }
+        : null,
       returnOrder: record.returnOrder
         ? {
           id: record.returnOrder.id,
@@ -109,31 +237,149 @@ export class OrderService {
             : null,
         }
         : null,
-      items: items.map((item: any) => ({
-        ...item,
-        orderedQty: Number(item.orderedQty || 0),
-        deliveredQty: Number(item.deliveredQty || 0),
-        returnedQty: Number(item.returnedQty ?? Math.max(0, Number(item.orderedQty || 0) - Number(item.deliveredQty || 0))),
-        unitPrice: this.toNumber(item.unitPrice),
-        lineTotal: this.toNumber(item.lineTotal),
-      })),
-      keptItems: items
-        .filter((item: any) => String(item.actionType || "KEPT") === "KEPT")
-        .map((item: any) => ({
-          ...item,
-          qty: Number(item.deliveredQty || 0),
-          unitPrice: this.toNumber(item.unitPrice),
-          lineTotal: this.toNumber(item.lineTotal),
-        })),
-      returnedItems: items
-        .filter((item: any) => String(item.actionType || "") === "RETURNED" || Number(item.returnedQty || 0) > 0)
-        .map((item: any) => ({
-          ...item,
-          qty: Number(item.returnedQty || 0),
-          unitPrice: this.toNumber(item.unitPrice),
-          lineTotal: this.toNumber(item.lineTotal),
-        })),
+      returnTracking: record.returnTracking || null,
+      returnTimeline: record.returnTimeline || [],
+      items: normalizedItems,
+      keptItems,
+      returnedItems,
+      exchangeItems,
     };
+  }
+
+  private buildPartialReturnTrackingCode(record: any, sourceOrder?: any) {
+    const explicit = String(record?.returnTrackingCode || "").trim();
+    if (explicit) return explicit;
+
+    const baseTrackingCode = String(
+      record?.ghnTrackingCode ||
+      sourceOrder?.shipment?.trackingCode ||
+      sourceOrder?.trackingCode ||
+      ""
+    ).trim();
+
+    if (!baseTrackingCode) return "";
+    return baseTrackingCode.endsWith("_PR") ? baseTrackingCode : `${baseTrackingCode}_PR`;
+  }
+
+  private async attachPartialReturnTracking(record: any, sourceOrder?: any) {
+    if (!record) return record;
+
+    const returnTrackingCode = this.buildPartialReturnTrackingCode(record, sourceOrder);
+    if (!returnTrackingCode) return record;
+
+    try {
+      const live = await (this.shipmentService as any).getGhnTrackingByCode(returnTrackingCode);
+      const tracking = live?.tracking || null;
+      const returnStatus = this.mapPartialReturnStatus(
+        tracking?.shippingStatus || tracking?.partnerStatus || record.returnStatus,
+      );
+
+      await this.prisma.partialDeliveryRecord.update({
+        where: { id: record.id },
+        data: {
+          returnTrackingCode,
+          returnOrderCode: record.returnOrderCode || returnTrackingCode,
+          returnStatus,
+          returnReceivedAt:
+            returnStatus === "RETURNED"
+              ? record.returnReceivedAt || new Date()
+              : record.returnReceivedAt || null,
+        },
+      }).catch(() => null);
+
+      return {
+        ...record,
+        returnTrackingCode,
+        returnOrderCode: record.returnOrderCode || returnTrackingCode,
+        returnStatus,
+        returnReceivedAt:
+          returnStatus === "RETURNED"
+            ? record.returnReceivedAt || new Date()
+            : record.returnReceivedAt || null,
+        returnTracking: tracking
+          ? {
+            ...tracking,
+            trackingCode: returnTrackingCode,
+            carrier: tracking.carrier || "GHN",
+          }
+          : null,
+        returnTimeline: live?.timeline || tracking?.timeline || [],
+      };
+    } catch {
+      return {
+        ...record,
+        returnTrackingCode,
+        returnOrderCode: record.returnOrderCode || returnTrackingCode,
+      };
+    }
+  }
+
+  private async attachPartialReturnExchange(record: any, sourceOrder?: any) {
+    if (!record) return record;
+    const orderId = String(record?.orderId || sourceOrder?.id || "").trim();
+    if (!orderId) return record;
+
+    try {
+      const orderCode = String(record?.orderCode || sourceOrder?.orderCode || "").trim();
+      const originalOrderCandidates = Array.from(
+        new Set(
+          [orderId, orderCode]
+            .map((value) => String(value || "").trim())
+            .filter(Boolean),
+        ),
+      );
+
+      const returnExchange = await (this.prisma as any).returnExchange.findFirst({
+        where: {
+          OR: originalOrderCandidates.map((value) => ({ originalOrderId: value })),
+        },
+        include: { items: true },
+        orderBy: { createdAt: "desc" },
+      });
+
+      if (!returnExchange) return record;
+
+      const nextStatus = this.mapPartialReturnStatus(
+        String(returnExchange.status || "").toUpperCase() === "COMPLETED"
+          ? "RETURNED"
+          : record.returnStatus,
+      );
+
+      if (nextStatus === "RETURNED" && record.id) {
+        await this.prisma.partialDeliveryRecord.update({
+          where: { id: record.id },
+          data: {
+            returnStatus: nextStatus,
+            returnReceivedAt: record.returnReceivedAt || new Date(),
+          },
+        }).catch(() => null);
+      }
+
+      return {
+        ...record,
+        order: record.order || sourceOrder || null,
+        _returnExchange: returnExchange,
+        returnStatus: nextStatus,
+        returnReceivedAt:
+          nextStatus === "RETURNED"
+            ? record.returnReceivedAt || new Date()
+            : record.returnReceivedAt || null,
+      };
+    } catch {
+      return record;
+    }
+  }
+
+  private async attachPartialReturnContext(records: any[], sourceOrder?: any) {
+    if (!Array.isArray(records) || !records.length) return records || [];
+
+    const withTracking = await Promise.all(
+      records.map((record) => this.attachPartialReturnTracking(record, sourceOrder)),
+    );
+
+    return Promise.all(
+      withTracking.map((record) => this.attachPartialReturnExchange(record, sourceOrder)),
+    );
   }
 
   private isOwner(user?: any) {
@@ -1767,7 +2013,17 @@ export class OrderService {
     }
 
     const [orderWithAssignedStaff] = await this.attachAssignedStaffFields([order]);
-    return this.mapOrderResponse(orderWithAssignedStaff);
+    const partialDeliveries = await this.attachPartialReturnContext(
+      Array.isArray(orderWithAssignedStaff.partialDeliveries)
+        ? orderWithAssignedStaff.partialDeliveries
+        : [],
+      orderWithAssignedStaff,
+    );
+
+    return this.mapOrderResponse({
+      ...orderWithAssignedStaff,
+      partialDeliveries,
+    });
   }
 
   async updateOrder(orderId: string, body: any, user?: any) {
@@ -2037,7 +2293,11 @@ export class OrderService {
     const originalCod = Number(body?.originalCod ?? existing.shipment?.codAmount ?? existing.finalAmount ?? 0);
     const adjustedCod = Number(body?.adjustedCod ?? 0);
     const code = this.partialDeliveryCode();
-    const returnOrderCodeBase = `${existing.orderCode}_PR`;
+    const baseGhnTrackingCode = String(existing.shipment?.trackingCode || body?.ghnTrackingCode || "").trim();
+    const returnTrackingCode = String(
+      body?.returnTrackingCode || (baseGhnTrackingCode ? `${baseGhnTrackingCode}_PR` : "")
+    ).trim() || null;
+    const returnOrderCodeBase = returnTrackingCode || `${existing.orderCode}_PR`;
 
     const result = await this.prisma.$transaction(async (tx) => {
       let returnOrder = await tx.order.findFirst({
@@ -2116,8 +2376,8 @@ export class OrderService {
           approvedById: user?.id ? String(user.id) : null,
           handledAt: new Date(),
           returnOrderId: returnOrder.id,
-          returnOrderCode: returnOrder.orderCode,
-          returnTrackingCode: returnOrder.shipment?.trackingCode || null,
+          returnOrderCode: returnTrackingCode || returnOrder.orderCode,
+          returnTrackingCode,
           returnStatus: this.mapPartialReturnStatus(returnOrder.shipment?.shippingStatus || returnOrder.fulfillmentStatus),
           items: {
             create: normalizedItems.flatMap((item) => {
@@ -2191,14 +2451,21 @@ export class OrderService {
       where: { id },
       include: {
         items: true,
-        order: true,
+        order: {
+          include: {
+            items: true,
+            shipment: true,
+          },
+        },
         returnOrder: { include: { shipment: true, items: true } },
       },
     });
 
     if (!record) throw new BadRequestException("Không tìm thấy phiếu giao hàng 1 phần.");
     this.ensureBranchAccess(user, record.order?.branchId || null);
-    return this.mapPartialDeliveryRecord(record);
+
+    const [recordWithContext] = await this.attachPartialReturnContext([record], record.order);
+    return this.mapPartialDeliveryRecord(recordWithContext);
   }
 
   async updateOrderStatus(orderId: string, status: OrderStatus, user?: any) {
