@@ -115,9 +115,9 @@ export class OrderService {
       returnTicketStatus === "COMPLETED"
         ? "RETURNED"
         : record.returnTracking?.shippingStatus ||
-          record.returnTracking?.partnerStatus ||
-          returnShipment?.shippingStatus ||
-          record.returnStatus,
+        record.returnTracking?.partnerStatus ||
+        returnShipment?.shippingStatus ||
+        record.returnStatus,
     );
 
     const normalizedItems = items.map((item: any) => ({
@@ -156,45 +156,21 @@ export class OrderService {
       keys.forEach((key) => returnedQtyByKey.set(key, Math.max(returnedQtyByKey.get(key) || 0, Number(item.qty || item.returnedQty || 0))));
     });
 
-    const keptItemsFromOrder = sourceOrderItems
-      .map((item: any) => {
-        const orderedQty = Number(item.qty || item.quantity || 0);
-        const returnedQty = Math.max(
-          returnedQtyByKey.get(String(item.id || "")) || 0,
-          returnedQtyByKey.get(String(item.variantId || "")) || 0,
-          returnedQtyByKey.get(String(item.sku || "")) || 0,
-        );
-        const qty = Math.max(0, orderedQty - returnedQty);
-        return {
-          id: item.id,
-          orderItemId: item.id,
-          variantId: item.variantId || null,
-          productName: item.productName || item.sku || "Sản phẩm",
-          sku: item.sku || "",
-          color: item.color || null,
-          size: item.size || null,
-          orderedQty,
-          deliveredQty: qty,
-          returnedQty,
-          qty,
-          unitPrice: this.toNumber(item.unitPrice),
-          lineTotal: this.toNumber(item.unitPrice) * qty,
-          actionType: "KEPT",
-          sourceType: "ORDER_MINUS_RETURN_EXCHANGE",
-        };
-      })
-      .filter((item: any) => Number(item.qty || 0) > 0);
-
-    const keptItems = keptItemsFromOrder.length
-      ? keptItemsFromOrder
-      : normalizedItems
-        .filter((item: any) => String(item.actionType || "KEPT") === "KEPT")
-        .map((item: any) => ({
-          ...item,
-          qty: Number(item.deliveredQty || 0),
-          unitPrice: this.toNumber(item.unitPrice),
-          lineTotal: this.toNumber(item.lineTotal),
-        }));
+    const keptItems = normalizedItems
+      .filter(
+        (item: any) =>
+          String(item.actionType || "").toUpperCase() === "KEPT" &&
+          Number(item.deliveredQty || item.qty || 0) > 0,
+      )
+      .map((item: any) => ({
+        ...item,
+        qty: Number(item.deliveredQty || item.qty || 0),
+        unitPrice: this.toNumber(item.unitPrice),
+        lineTotal:
+          this.toNumber(item.unitPrice) *
+          Number(item.deliveredQty || item.qty || 0),
+        sourceType: "PARTIAL_DELIVERY_RECORD",
+      }));
 
     return {
       ...record,
