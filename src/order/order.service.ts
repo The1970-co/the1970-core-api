@@ -1839,17 +1839,8 @@ export class OrderService {
             }),
           });
 
-          if (isInstantCounterSale) {
-            await this.createPosCashVouchers(tx, {
-              order,
-              payments: cleanedPayments,
-              paymentSourceMap,
-              branchId,
-              user,
-              customerName,
-              customerPhone,
-            });
-          }
+          // POS cash voucher sync chạy sau khi transaction tạo đơn commit.
+          // Không chạy trong transaction chính để tránh lỗi phiếu thu làm rollback đơn POS.
         }
 
         if (modeConfig.deductStockNow || shouldCompleteCounterSale) {
@@ -2047,6 +2038,76 @@ export class OrderService {
 
       if (reloadedOrder) {
         finalOrder = reloadedOrder;
+      }
+    }
+
+    const finalOrderAny = finalOrder as any;
+    const finalSalesChannel = String(finalOrderAny?.salesChannel || "").toUpperCase();
+    const finalStatus = String(finalOrderAny?.status || "").toUpperCase();
+
+    if (finalSalesChannel === "POS" && finalStatus === "COMPLETED" && finalOrderAny?.branchId) {
+      try {
+        const finalOrderWithPayments = await this.prisma.order.findUnique({
+          where: { id: finalOrderAny.id },
+          include: {
+            payments: {
+              include: { paymentSource: true },
+              orderBy: { createdAt: "asc" },
+            },
+          },
+        });
+
+        const finalOrderPayments = Array.isArray((finalOrderWithPayments as any)?.payments)
+          ? (finalOrderWithPayments as any).payments
+          : [];
+
+        const paidPayments = finalOrderPayments
+          .filter((payment: any) => {
+            const sourceType = String(
+              payment?.paymentSource?.type ||
+                payment?.sourceType ||
+                ""
+            ).toUpperCase();
+
+            return (
+              payment?.paymentSourceId &&
+              payment?.status === PaymentStatus.PAID &&
+              sourceType !== "COD" &&
+              this.toNumber(payment?.amount) > 0
+            );
+          })
+          .map((payment: any) => ({
+            paymentSourceId: payment.paymentSourceId,
+            amount: this.toNumber(payment.amount),
+            note: payment.note || null,
+          }));
+
+        if (paidPayments.length) {
+          const paymentSourceMap = new Map<string, any>(
+            finalOrderPayments
+              .filter((payment: any) => payment?.paymentSourceId)
+              .map((payment: any) => [
+                String(payment.paymentSourceId),
+                payment.paymentSource || {
+                  id: payment.paymentSourceId,
+                  name: payment.method,
+                  type: payment.sourceType || "CASH",
+                },
+              ])
+          );
+
+          await this.createPosCashVouchers(this.prisma, {
+            order: finalOrderWithPayments || finalOrderAny,
+            payments: paidPayments,
+            paymentSourceMap,
+            branchId: String(finalOrderAny.branchId),
+            user,
+            customerName: finalOrderAny.customerName,
+            customerPhone: finalOrderAny.customerPhone,
+          });
+        }
+      } catch (error) {
+        console.error("[POS_CASH_VOUCHER_SYNC_FAILED]", error);
       }
     }
 
