@@ -105,6 +105,7 @@ export class ViettelPostClient {
     const token = this.stripBearer(options.token);
     if (token) {
       headers.Token = token;
+      headers.Authorization = `Bearer ${token}`;
     }
 
     const url = `${this.baseUrl}${path}`;
@@ -303,65 +304,103 @@ export class ViettelPostClient {
     );
   }
 
-  listInventories() {
-    const endpoints = Array.from(
+  async listInventories() {
+    const token = await this.getToken();
+    const configuredPath = this.endpoint("INVENTORIES", "/user/listInventory");
+    const paths = Array.from(
       new Set([
-        this.endpoint("INVENTORIES", "/user/listInventory"),
-        this.endpoint("INVENTORIES_ALT", "/user/listInventoryV2"),
-        this.endpoint("INVENTORIES_SETTING", "/setting/listInventory"),
-        this.endpoint("INVENTORIES_ADDRESS", "/setting/listAddress"),
+        configuredPath,
+        "/user/listInventory",
+        "/user/getListInventory",
+        "/user/listInventoryV2",
+        "/setting/listInventory",
+        "/setting/listAddress",
+        "/setting/listAllInventory",
+        "/user/listAddress",
       ])
     );
 
-    const countRows = (input: any): number => {
-      const candidates = [
-        input,
-        input?.data,
-        input?.DATA,
-        input?.result,
-        input?.RESULT,
-        input?.items,
-        input?.rows,
-        input?.list,
-        input?.LIST,
-        input?.data?.data,
-        input?.data?.items,
-        input?.data?.rows,
-        input?.data?.list,
+    const collectArrays = (payload: any, depth = 0): any[] => {
+      if (!payload || depth > 8) return [];
+      if (Array.isArray(payload)) return payload;
+      if (typeof payload !== "object") return [];
+
+      const keys = [
+        "data",
+        "DATA",
+        "result",
+        "RESULT",
+        "items",
+        "ITEMS",
+        "rows",
+        "ROWS",
+        "list",
+        "LIST",
+        "inventories",
+        "inventory",
+        "listInventory",
+        "listInventories",
+        "ownInventory",
+        "ownInventories",
+        "warehouses",
+        "warehouse",
+        "addresses",
+        "address",
       ];
 
-      for (const item of candidates) {
-        if (Array.isArray(item)) return item.length;
+      const rows: any[] = [];
+      for (const key of keys) {
+        const value = payload?.[key];
+        if (Array.isArray(value)) rows.push(...value);
+        else if (value && typeof value === "object") rows.push(...collectArrays(value, depth + 1));
       }
 
-      return 0;
+      if (rows.length) return rows;
+
+      for (const value of Object.values(payload)) {
+        rows.push(...collectArrays(value, depth + 1));
+      }
+
+      return rows;
     };
 
-    return (async () => {
-      let lastError = "";
-      let lastData: any = null;
+    const allRows: any[] = [];
+    const errors: string[] = [];
 
-      for (const path of endpoints) {
-        try {
-          const data = await this.request<any>(path);
-          const count = countRows(data);
+    for (const path of paths) {
+      try {
+        const payload = await this.rawRequest<any>(path, {
+          method: "GET",
+          token,
+        });
+        const rows = collectArrays(payload);
 
-          this.logger.log(`[VIETTELPOST_INVENTORIES] ${path} => ${count}`);
+        this.logger.log(`[VIETTELPOST_INVENTORIES] ${path} => ${rows.length}`);
 
-          if (count > 0) return data;
-          lastData = data;
-        } catch (error) {
-          lastError = error instanceof Error ? error.message : String(error);
-          this.logger.error(`[VIETTELPOST_INVENTORIES_ERROR] ${path} | ${lastError}`);
+        if (rows.length) {
+          allRows.push(
+            ...rows.map((row: any) => ({
+              ...row,
+              __viettelEndpoint: path,
+            }))
+          );
         }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : JSON.stringify(error);
+        errors.push(`${path}: ${message}`);
+        this.logger.warn(`[VIETTELPOST_INVENTORIES_ERROR] ${path} => ${message}`);
       }
+    }
 
-      if (lastData) return lastData;
+    if (!allRows.length && errors.length) {
+      this.logger.warn(`[VIETTELPOST_INVENTORIES_EMPTY] ${errors.join(" | ")}`);
+    }
 
-      throw new BadRequestException(
-        `Không lấy được danh sách kho ViettelPost${lastError ? `: ${lastError}` : ""}`,
-      );
-    })();
+    return {
+      data: allRows,
+      rawCount: allRows.length,
+      errors,
+    };
   }
 
   getPrice(payload: any) {
