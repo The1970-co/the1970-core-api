@@ -1249,23 +1249,37 @@ export class OrderService {
     `);
   }
 
-  private async generateOrderCashVoucherCode(tx: any, type: "RECEIPT" | "PAYMENT") {
-    const prefix = type === "RECEIPT" ? "PT" : "PC";
-    const today = new Date();
-    const ymd = [
-      today.getFullYear(),
-      String(today.getMonth() + 1).padStart(2, "0"),
-      String(today.getDate()).padStart(2, "0"),
-    ].join("");
+private async generateOrderCashVoucherCode(tx: any, type: "RECEIPT" | "PAYMENT") {
+  const prefix = type === "RECEIPT" ? "PT" : "PC";
+  const now = new Date();
 
-    const rows = await tx.$queryRawUnsafe(
-      `SELECT COUNT(*)::int AS count FROM "CashVoucher" WHERE COALESCE("voucherCode", "code", '') LIKE $1`,
-      `${prefix}${ymd}%`,
+  const ymd = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+  ].join("");
+
+  const time = [
+    String(now.getHours()).padStart(2, "0"),
+    String(now.getMinutes()).padStart(2, "0"),
+    String(now.getSeconds()).padStart(2, "0"),
+    String(now.getMilliseconds()).padStart(3, "0"),
+  ].join("");
+
+  for (let i = 0; i < 10; i += 1) {
+    const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
+    const code = `${prefix}${ymd}-${time}-${rand}`;
+
+    const existed = await tx.$queryRawUnsafe(
+      `SELECT "id" FROM "CashVoucher" WHERE "code" = $1 OR "voucherCode" = $1 LIMIT 1`,
+      code,
     );
 
-    const count = Number((rows as Array<{ count: bigint | number | string }>)?.[0]?.count || 0) + 1;
-    return `${prefix}${ymd}-${String(count).padStart(4, "0")}`;
+    if (!Array.isArray(existed) || !existed.length) return code;
   }
+
+  return `${prefix}${ymd}-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+}
 
   private async createPosCashVouchers(
     tx: any,
