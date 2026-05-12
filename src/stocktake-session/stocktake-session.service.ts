@@ -1117,6 +1117,10 @@ export class StocktakeSessionService {
     if (status && status !== "ALL") {
       if (status === "MISMATCH" || status === "DISCREPANCY") {
         rows = rows.filter((row) => row.status === "MISMATCH");
+      } else if (status === "COUNTED" || status === "SCANNED") {
+        rows = rows.filter(
+          (row) => row.isCounted || Number(row.countedQty || 0) > 0,
+        );
       } else if (status === "MATCHED") {
         rows = rows.filter((row) => row.status === "MATCH");
       } else {

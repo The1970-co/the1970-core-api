@@ -28,12 +28,68 @@ import { UpdateAutoRebalanceConfigDto } from "./dto/update-auto-rebalance-config
 export class StockTransferController {
   constructor(private readonly stockTransferService: StockTransferService) {}
 
-  private hasPermission(user: any, permission: string) {
-    const permissions = Array.isArray(user?.permissions)
-      ? user.permissions.map((item: any) => String(item || "").trim())
+  private normalizeId(value: any) {
+    return String(value || "").trim();
+  }
+
+  private getScopedPermissionRows(user: any) {
+    const rows = Array.isArray(user?.branchPermissions)
+      ? user.branchPermissions
       : [];
 
-    return permissions.includes("*") || permissions.includes(permission);
+    const branchId = this.normalizeId(
+      user?.branchId ||
+        user?.workingBranchId ||
+        user?.currentBranchId ||
+        user?.branch?.id ||
+        user?.branchCode,
+    );
+
+    if (!branchId) return rows;
+
+    const scoped = rows.filter(
+      (row: any) => this.normalizeId(row?.branchId) === branchId,
+    );
+
+    return scoped.length ? scoped : rows;
+  }
+
+  private getEffectivePermissionKeys(user: any) {
+    const keys = new Set<string>();
+    const denied = new Set<string>();
+
+    const add = (items: any) => {
+      if (!Array.isArray(items)) return;
+      items.forEach((item: any) => {
+        const value = String(item || "").trim();
+        if (value) keys.add(value);
+      });
+    };
+
+    add(user?.permissions);
+    add(user?.permissionKeys);
+    add(user?.extraPermissionKeys);
+
+    this.getScopedPermissionRows(user).forEach((row: any) => {
+      add(row?.permissionKeys);
+      add(row?.extraPermissionKeys);
+
+      if (Array.isArray(row?.deniedPermissionKeys)) {
+        row.deniedPermissionKeys.forEach((item: any) => {
+          const value = String(item || "").trim();
+          if (value) denied.add(value);
+        });
+      }
+    });
+
+    denied.forEach((key) => keys.delete(key));
+
+    return keys;
+  }
+
+  private hasPermission(user: any, permission: string) {
+    const permissions = this.getEffectivePermissionKeys(user);
+    return permissions.has("*") || permissions.has(permission);
   }
 
   private assertPermission(user: any, permission: string) {
