@@ -638,16 +638,25 @@ export class FinanceService {
     await this.prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS "CashVoucher" (
         "id" TEXT PRIMARY KEY,
-        "voucherCode" TEXT NOT NULL UNIQUE,
-        "type" TEXT NOT NULL,
-        "status" TEXT NOT NULL DEFAULT 'DRAFT',
-        "branchId" TEXT,
-        "paymentSourceId" TEXT,
+        "code" TEXT UNIQUE,
+        "voucherCode" TEXT UNIQUE,
+        "direction" TEXT,
+        "voucherType" TEXT,
+        "type" TEXT,
+        "status" TEXT DEFAULT 'DRAFT',
         "amount" NUMERIC(18,2) NOT NULL DEFAULT 0,
+        "paymentSourceId" TEXT,
+        "branchId" TEXT,
+        "staffId" TEXT,
+        "staffName" TEXT,
+        "customerName" TEXT,
+        "customerPhone" TEXT,
         "category" TEXT,
-        "title" TEXT NOT NULL,
+        "title" TEXT,
         "partnerName" TEXT,
         "partnerPhone" TEXT,
+        "refType" TEXT,
+        "refId" TEXT,
         "note" TEXT,
         "createdById" TEXT,
         "createdByName" TEXT,
@@ -660,6 +669,72 @@ export class FinanceService {
         "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
         "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW()
       );
+    `);
+
+    await this.prisma.$executeRawUnsafe(`
+      ALTER TABLE "CashVoucher"
+      ADD COLUMN IF NOT EXISTS "code" TEXT,
+      ADD COLUMN IF NOT EXISTS "voucherCode" TEXT,
+      ADD COLUMN IF NOT EXISTS "direction" TEXT,
+      ADD COLUMN IF NOT EXISTS "voucherType" TEXT,
+      ADD COLUMN IF NOT EXISTS "type" TEXT,
+      ADD COLUMN IF NOT EXISTS "status" TEXT DEFAULT 'DRAFT',
+      ADD COLUMN IF NOT EXISTS "category" TEXT,
+      ADD COLUMN IF NOT EXISTS "title" TEXT,
+      ADD COLUMN IF NOT EXISTS "partnerName" TEXT,
+      ADD COLUMN IF NOT EXISTS "partnerPhone" TEXT,
+      ADD COLUMN IF NOT EXISTS "createdById" TEXT,
+      ADD COLUMN IF NOT EXISTS "createdByName" TEXT,
+      ADD COLUMN IF NOT EXISTS "confirmedById" TEXT,
+      ADD COLUMN IF NOT EXISTS "confirmedByName" TEXT,
+      ADD COLUMN IF NOT EXISTS "cancelledById" TEXT,
+      ADD COLUMN IF NOT EXISTS "cancelledByName" TEXT,
+      ADD COLUMN IF NOT EXISTS "confirmedAt" TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS "cancelledAt" TIMESTAMP;
+    `);
+
+    await this.prisma.$executeRawUnsafe(`
+      UPDATE "CashVoucher"
+      SET
+        "voucherCode" = COALESCE("voucherCode", "code"),
+        "code" = COALESCE("code", "voucherCode"),
+        "type" = COALESCE(
+          "type",
+          CASE
+            WHEN UPPER(COALESCE("direction", '')) IN ('OUT', 'PAYMENT', 'CHI', 'CASH_OUT') THEN 'PAYMENT'
+            ELSE 'RECEIPT'
+          END
+        ),
+        "direction" = COALESCE(
+          "direction",
+          CASE
+            WHEN COALESCE("type", '') = 'PAYMENT' THEN 'OUT'
+            ELSE 'IN'
+          END
+        ),
+        "status" = COALESCE("status", 'DRAFT'),
+        "category" = COALESCE("category", "voucherType"),
+        "voucherType" = COALESCE("voucherType", "category"),
+        "title" = COALESCE("title", "note", "voucherType", 'Phiếu thu/chi'),
+        "partnerName" = COALESCE("partnerName", "customerName"),
+        "partnerPhone" = COALESCE("partnerPhone", "customerPhone"),
+        "customerName" = COALESCE("customerName", "partnerName"),
+        "customerPhone" = COALESCE("customerPhone", "partnerPhone"),
+        "createdById" = COALESCE("createdById", "staffId"),
+        "createdByName" = COALESCE("createdByName", "staffName")
+      WHERE
+        "voucherCode" IS NULL
+        OR "code" IS NULL
+        OR "type" IS NULL
+        OR "direction" IS NULL
+        OR "status" IS NULL
+        OR "title" IS NULL;
+    `);
+
+    await this.prisma.$executeRawUnsafe(`
+      CREATE UNIQUE INDEX IF NOT EXISTS "CashVoucher_voucherCode_key"
+      ON "CashVoucher" ("voucherCode")
+      WHERE "voucherCode" IS NOT NULL;
     `);
 
     await this.prisma.$executeRawUnsafe(`
@@ -690,7 +765,7 @@ export class FinanceService {
     ].join("");
 
     const rows = await this.prisma.$queryRawUnsafe<Array<{ count: bigint | number | string }>>(
-      `SELECT COUNT(*)::int AS count FROM "CashVoucher" WHERE "voucherCode" LIKE $1`,
+      `SELECT COUNT(*)::int AS count FROM "CashVoucher" WHERE COALESCE("voucherCode", "code", '') LIKE $1`,
       `${prefix}${ymd}%`,
     );
 
@@ -709,6 +784,14 @@ export class FinanceService {
     return type === "PAYMENT" ? "PAYMENT" : "RECEIPT";
   }
 
+  private cashVoucherDirection(type: "RECEIPT" | "PAYMENT") {
+    return type === "PAYMENT" ? "OUT" : "IN";
+  }
+
+  private cashVoucherTypeSql() {
+    return `COALESCE(v."type", CASE WHEN UPPER(COALESCE(v."direction", '')) IN ('OUT', 'PAYMENT', 'CHI', 'CASH_OUT') THEN 'PAYMENT' ELSE 'RECEIPT' END)`;
+  }
+
   async getCashVouchers(params: {
     type?: "RECEIPT" | "PAYMENT" | "ALL";
     dateFrom?: string;
@@ -720,17 +803,24 @@ export class FinanceService {
   }, user?: any) {
     await this.ensureCashVoucherTable();
 
-    const { from, to, dateFrom, dateTo } = this.makeDateRange(
-      params.dateFrom,
-      params.dateTo,
-    );
+    const values: any[] = [];
+    const where: string[] = [];
 
-    const values: any[] = [from, to];
-    const where: string[] = [`v."createdAt" BETWEEN $1 AND $2`];
+    // Mặc định lấy theo khoảng ngày nếu FE truyền, nhưng nới thêm 1 ngày hai đầu để tránh lệch timezone/server.
+    if (params.dateFrom || params.dateTo) {
+      const { from, to } = this.makeDateRange(params.dateFrom, params.dateTo);
+      const fromBuffer = new Date(from);
+      fromBuffer.setDate(fromBuffer.getDate() - 1);
+      const toBuffer = new Date(to);
+      toBuffer.setDate(toBuffer.getDate() + 1);
+
+      values.push(fromBuffer, toBuffer);
+      where.push(`v."createdAt" BETWEEN $1 AND $2`);
+    }
 
     if (params.type && params.type !== "ALL") {
       values.push(params.type);
-      where.push(`v."type" = $${values.length}`);
+      where.push(`${this.cashVoucherTypeSql()} = $${values.length}`);
     }
 
     const scopedBranchId = this.scopedBranchId(user, params.branchId);
@@ -746,24 +836,33 @@ export class FinanceService {
 
     if (params.status && params.status !== "ALL") {
       values.push(params.status);
-      where.push(`v."status" = $${values.length}`);
+      where.push(`COALESCE(v."status", 'DRAFT') = $${values.length}`);
     }
 
     if (params.q?.trim()) {
       values.push(`%${params.q.trim()}%`);
       where.push(`(
-        v."voucherCode" ILIKE $${values.length}
-        OR v."title" ILIKE $${values.length}
-        OR COALESCE(v."partnerName", '') ILIKE $${values.length}
-        OR COALESCE(v."partnerPhone", '') ILIKE $${values.length}
+        COALESCE(v."voucherCode", v."code", '') ILIKE $${values.length}
+        OR COALESCE(v."title", '') ILIKE $${values.length}
+        OR COALESCE(v."partnerName", v."customerName", '') ILIKE $${values.length}
+        OR COALESCE(v."partnerPhone", v."customerPhone", '') ILIKE $${values.length}
         OR COALESCE(v."note", '') ILIKE $${values.length}
       )`);
     }
+
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
     const rows = await this.prisma.$queryRawUnsafe<any[]>(
       `
         SELECT
           v.*,
+          COALESCE(v."voucherCode", v."code") AS "voucherCode",
+          ${this.cashVoucherTypeSql()} AS "type",
+          COALESCE(v."status", 'DRAFT') AS "status",
+          COALESCE(v."title", v."note", v."voucherType", '') AS "title",
+          COALESCE(v."category", v."voucherType", '') AS "category",
+          COALESCE(v."partnerName", v."customerName", '') AS "partnerName",
+          COALESCE(v."partnerPhone", v."customerPhone", '') AS "partnerPhone",
           b."name" AS "branchName",
           ps."name" AS "paymentSourceName",
           ps."code" AS "paymentSourceCode",
@@ -771,7 +870,7 @@ export class FinanceService {
         FROM "CashVoucher" v
         LEFT JOIN "Branch" b ON b."id" = v."branchId"
         LEFT JOIN "PaymentSource" ps ON ps."id" = v."paymentSourceId"
-        WHERE ${where.join(" AND ")}
+        ${whereSql}
         ORDER BY v."createdAt" DESC
       `,
       ...values,
@@ -790,19 +889,15 @@ export class FinanceService {
       if (row.type === "RECEIPT") totalReceipt += amount;
       if (row.type === "PAYMENT") totalPayment += amount;
 
-      if (row.status === "CONFIRMED" && row.type === "RECEIPT") {
-        confirmedReceipt += amount;
-      }
-      if (row.status === "CONFIRMED" && row.type === "PAYMENT") {
-        confirmedPayment += amount;
-      }
+      if (row.status === "CONFIRMED" && row.type === "RECEIPT") confirmedReceipt += amount;
+      if (row.status === "CONFIRMED" && row.type === "PAYMENT") confirmedPayment += amount;
       if (row.status === "DRAFT") pendingAmount += amount;
       if (row.status === "CANCELLED") cancelledAmount += amount;
     }
 
     return {
-      dateFrom,
-      dateTo,
+      dateFrom: params.dateFrom,
+      dateTo: params.dateTo,
       summary: {
         totalReceipt,
         totalPayment,
@@ -853,30 +948,47 @@ export class FinanceService {
     const branchId = this.scopedBranchId(user, body.branchId || null);
     const voucherCode = await this.generateCashVoucherCode(type);
     const id = `cv_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    const direction = this.cashVoucherDirection(type);
+    const category = body.category?.trim() || (type === "RECEIPT" ? "Thu khác" : "Chi khác");
+    const title = body.title.trim();
 
     const rows = await this.prisma.$queryRawUnsafe<any[]>(
       `
         INSERT INTO "CashVoucher" (
-          "id", "voucherCode", "type", "status", "branchId", "paymentSourceId",
-          "amount", "category", "title", "partnerName", "partnerPhone", "note",
-          "createdById", "createdByName", "createdAt", "updatedAt"
+          "id", "code", "voucherCode", "direction", "voucherType", "type", "status",
+          "branchId", "paymentSourceId", "amount", "category", "title",
+          "partnerName", "partnerPhone", "customerName", "customerPhone", "note",
+          "createdById", "createdByName", "staffId", "staffName", "createdAt", "updatedAt"
         )
-        VALUES ($1, $2, $3, 'DRAFT', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
-        RETURNING *
+        VALUES (
+          $1, $2, $2, $3, $4, $5, 'DRAFT',
+          $6, $7, $8, $4, $9,
+          $10, $11, $10, $11, $12,
+          $13, $14, $13, $14, NOW(), NOW()
+        )
+        RETURNING *,
+          COALESCE("voucherCode", "code") AS "voucherCode",
+          COALESCE("type", $5) AS "type",
+          COALESCE("status", 'DRAFT') AS "status",
+          COALESCE("title", "note", "voucherType", '') AS "title",
+          COALESCE("category", "voucherType", '') AS "category",
+          COALESCE("partnerName", "customerName", '') AS "partnerName",
+          COALESCE("partnerPhone", "customerPhone", '') AS "partnerPhone"
       `,
       id,
       voucherCode,
+      direction,
+      category,
       type,
       branchId || null,
       body.paymentSourceId || null,
       amount,
-      body.category?.trim() || null,
-      body.title.trim(),
+      title,
       body.partnerName?.trim() || null,
       body.partnerPhone?.trim() || null,
       body.note?.trim() || null,
-      body.createdById || null,
-      body.createdByName || null,
+      body.createdById || user?.id || null,
+      body.createdByName || user?.name || user?.username || user?.email || null,
     );
 
     return rows[0];
@@ -899,19 +1011,15 @@ export class FinanceService {
     await this.ensureCashVoucherTable();
 
     const current = await this.prisma.$queryRawUnsafe<any[]>(
-      `SELECT * FROM "CashVoucher" WHERE "id" = $1 LIMIT 1`,
+      `SELECT *, COALESCE("status", 'DRAFT') AS "status" FROM "CashVoucher" WHERE "id" = $1 LIMIT 1`,
       id,
     );
 
-    if (!current.length) {
-      throw new NotFoundException("Không tìm thấy phiếu thu/chi.");
-    }
+    if (!current.length) throw new NotFoundException("Không tìm thấy phiếu thu/chi.");
 
     this.ensureBranchScope(user, current[0].branchId);
 
-    if (body.branchId !== undefined) {
-      this.ensureBranchScope(user, body.branchId || null);
-    }
+    if (body.branchId !== undefined) this.ensureBranchScope(user, body.branchId || null);
 
     if (current[0].status !== "DRAFT") {
       throw new BadRequestException("Chỉ sửa được phiếu đang nháp.");
@@ -926,6 +1034,11 @@ export class FinanceService {
       throw new BadRequestException("Số tiền phiếu phải lớn hơn 0.");
     }
 
+    const nextCategory = body.category !== undefined ? body.category?.trim() || null : current[0].category || current[0].voucherType || null;
+    const nextTitle = body.title !== undefined ? body.title?.trim() || current[0].title || current[0].note || "Phiếu thu/chi" : current[0].title || current[0].note || "Phiếu thu/chi";
+    const nextPartnerName = body.partnerName !== undefined ? body.partnerName?.trim() || null : current[0].partnerName || current[0].customerName || null;
+    const nextPartnerPhone = body.partnerPhone !== undefined ? body.partnerPhone?.trim() || null : current[0].partnerPhone || current[0].customerPhone || null;
+
     const rows = await this.prisma.$queryRawUnsafe<any[]>(
       `
         UPDATE "CashVoucher"
@@ -934,22 +1047,32 @@ export class FinanceService {
           "paymentSourceId" = $3,
           "amount" = $4,
           "category" = $5,
+          "voucherType" = $5,
           "title" = $6,
           "partnerName" = $7,
           "partnerPhone" = $8,
+          "customerName" = $7,
+          "customerPhone" = $8,
           "note" = $9,
           "updatedAt" = NOW()
         WHERE "id" = $1
-        RETURNING *
+        RETURNING *,
+          COALESCE("voucherCode", "code") AS "voucherCode",
+          ${this.cashVoucherTypeSql()} AS "type",
+          COALESCE("status", 'DRAFT') AS "status",
+          COALESCE("title", "note", "voucherType", '') AS "title",
+          COALESCE("category", "voucherType", '') AS "category",
+          COALESCE("partnerName", "customerName", '') AS "partnerName",
+          COALESCE("partnerPhone", "customerPhone", '') AS "partnerPhone"
       `,
       id,
       body.branchId !== undefined ? body.branchId || null : current[0].branchId,
       body.paymentSourceId !== undefined ? body.paymentSourceId || null : current[0].paymentSourceId,
       amount,
-      body.category !== undefined ? body.category?.trim() || null : current[0].category,
-      body.title !== undefined ? body.title?.trim() || current[0].title : current[0].title,
-      body.partnerName !== undefined ? body.partnerName?.trim() || null : current[0].partnerName,
-      body.partnerPhone !== undefined ? body.partnerPhone?.trim() || null : current[0].partnerPhone,
+      nextCategory,
+      nextTitle,
+      nextPartnerName,
+      nextPartnerPhone,
       body.note !== undefined ? body.note?.trim() || null : current[0].note,
     );
 
@@ -968,13 +1091,11 @@ export class FinanceService {
     await this.ensureCashVoucherTable();
 
     const current = await this.prisma.$queryRawUnsafe<any[]>(
-      `SELECT * FROM "CashVoucher" WHERE "id" = $1 LIMIT 1`,
+      `SELECT *, COALESCE("status", 'DRAFT') AS "status" FROM "CashVoucher" WHERE "id" = $1 LIMIT 1`,
       id,
     );
 
-    if (!current.length) {
-      throw new NotFoundException("Không tìm thấy phiếu thu/chi.");
-    }
+    if (!current.length) throw new NotFoundException("Không tìm thấy phiếu thu/chi.");
 
     this.ensureBranchScope(user, current[0].branchId);
 
@@ -988,12 +1109,19 @@ export class FinanceService {
           "confirmedByName" = $3,
           "note" = COALESCE($4, "note"),
           "updatedAt" = NOW()
-        WHERE "id" = $1 AND "status" = 'DRAFT'
-        RETURNING *
+        WHERE "id" = $1 AND COALESCE("status", 'DRAFT') = 'DRAFT'
+        RETURNING *,
+          COALESCE("voucherCode", "code") AS "voucherCode",
+          ${this.cashVoucherTypeSql()} AS "type",
+          COALESCE("status", 'DRAFT') AS "status",
+          COALESCE("title", "note", "voucherType", '') AS "title",
+          COALESCE("category", "voucherType", '') AS "category",
+          COALESCE("partnerName", "customerName", '') AS "partnerName",
+          COALESCE("partnerPhone", "customerPhone", '') AS "partnerPhone"
       `,
       id,
-      body.confirmedById || null,
-      body.confirmedByName || null,
+      body.confirmedById || user?.id || null,
+      body.confirmedByName || user?.name || user?.username || user?.email || null,
       body.note?.trim() || null,
     );
 
@@ -1016,13 +1144,11 @@ export class FinanceService {
     await this.ensureCashVoucherTable();
 
     const current = await this.prisma.$queryRawUnsafe<any[]>(
-      `SELECT * FROM "CashVoucher" WHERE "id" = $1 LIMIT 1`,
+      `SELECT *, COALESCE("status", 'DRAFT') AS "status" FROM "CashVoucher" WHERE "id" = $1 LIMIT 1`,
       id,
     );
 
-    if (!current.length) {
-      throw new NotFoundException("Không tìm thấy phiếu thu/chi.");
-    }
+    if (!current.length) throw new NotFoundException("Không tìm thấy phiếu thu/chi.");
 
     this.ensureBranchScope(user, current[0].branchId);
 
@@ -1036,12 +1162,19 @@ export class FinanceService {
           "cancelledByName" = $3,
           "note" = COALESCE($4, "note"),
           "updatedAt" = NOW()
-        WHERE "id" = $1 AND "status" != 'CANCELLED'
-        RETURNING *
+        WHERE "id" = $1 AND COALESCE("status", 'DRAFT') != 'CANCELLED'
+        RETURNING *,
+          COALESCE("voucherCode", "code") AS "voucherCode",
+          ${this.cashVoucherTypeSql()} AS "type",
+          COALESCE("status", 'DRAFT') AS "status",
+          COALESCE("title", "note", "voucherType", '') AS "title",
+          COALESCE("category", "voucherType", '') AS "category",
+          COALESCE("partnerName", "customerName", '') AS "partnerName",
+          COALESCE("partnerPhone", "customerPhone", '') AS "partnerPhone"
       `,
       id,
-      body.cancelledById || null,
-      body.cancelledByName || null,
+      body.cancelledById || user?.id || null,
+      body.cancelledByName || user?.name || user?.username || user?.email || null,
       body.note?.trim() || null,
     );
 
@@ -1051,6 +1184,4 @@ export class FinanceService {
 
     return rows[0];
   }
-
-
 }

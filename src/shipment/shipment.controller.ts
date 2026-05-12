@@ -171,6 +171,11 @@ export class ShipmentController {
     );
   }
 
+  @Get("pickup-locations")
+  getPickupLocations() {
+    return this.shipmentService.listPickupLocations();
+  }
+
   @Post("ghn/track")
   track(@Body() dto: TrackShipmentDto) {
     return this.shipmentService.track(dto);

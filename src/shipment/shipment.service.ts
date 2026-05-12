@@ -1235,17 +1235,120 @@ export class ShipmentService {
   }
 
 
+
+  async listPickupLocations() {
+    const items: any[] = [];
+
+    const ghnDistrictId = Number(process.env.GHN_FROM_DISTRICT_ID || 0);
+    const ghnWardCode = process.env.GHN_FROM_WARD_CODE || "";
+    const ghnAddress = process.env.GHN_RETURN_ADDRESS || this.returnAddress || "";
+    const ghnName = process.env.GHN_RETURN_NAME || this.returnName || "The 1970";
+    const ghnPhone = process.env.GHN_RETURN_PHONE || this.returnPhone || "";
+
+    if (ghnDistrictId || ghnAddress || ghnPhone) {
+      items.push({
+        id: "ghn-default",
+        carrier: "ghn",
+        label: `${ghnName || "GHN"}${ghnPhone ? ` · ${ghnPhone}` : ""}${ghnAddress ? ` · ${ghnAddress}` : ""}`,
+        name: ghnName,
+        phone: ghnPhone,
+        address: ghnAddress,
+        isDefault: true,
+        source: "env",
+        ghnShopId: process.env.GHN_SHOP_ID || undefined,
+        ghnFromDistrictId: ghnDistrictId || undefined,
+        ghnFromWardCode: ghnWardCode || undefined,
+        raw: {
+          shopId: process.env.GHN_SHOP_ID || undefined,
+          fromDistrictId: ghnDistrictId || undefined,
+          fromWardCode: ghnWardCode || undefined,
+        },
+      });
+    }
+
+    const ahamoveName = process.env.AHAMOVE_FROM_NAME || this.returnName || "The 1970";
+    const ahamovePhone = process.env.AHAMOVE_FROM_PHONE || this.returnPhone || "";
+    const ahamoveAddress = process.env.AHAMOVE_FROM_ADDRESS || this.returnAddress || "";
+
+    if (ahamoveAddress || ahamovePhone) {
+      items.push({
+        id: "ahamove-default",
+        carrier: "ahamove",
+        label: `${ahamoveName || "AhaMove"}${ahamovePhone ? ` · ${ahamovePhone}` : ""}${ahamoveAddress ? ` · ${ahamoveAddress}` : ""}`,
+        name: ahamoveName,
+        phone: ahamovePhone,
+        address: ahamoveAddress,
+        isDefault: true,
+        source: "env",
+        raw: {
+          fromName: ahamoveName,
+          fromPhone: ahamovePhone,
+          fromAddress: ahamoveAddress,
+        },
+      });
+    }
+
+    const viettelInventories = await this.listViettelPostInventories().catch(() => [] as any[]);
+    for (const inventory of viettelInventories) {
+      const groupId = Number(inventory.groupAddressId || inventory.group_address_id || 0);
+      items.push({
+        id: `viettelpost-${groupId || inventory.address || items.length}`,
+        carrier: "viettelpost",
+        label: `${inventory.name || "Kho ViettelPost"}${inventory.phone ? ` · ${inventory.phone}` : ""}${inventory.address ? ` · ${inventory.address}` : ""}`,
+        name: inventory.name || process.env.VIETTELPOST_SENDER_NAME || this.returnName,
+        phone: inventory.phone || process.env.VIETTELPOST_SENDER_PHONE || this.returnPhone,
+        address: inventory.address || process.env.VIETTELPOST_SENDER_ADDRESS || this.returnAddress,
+        isDefault: groupId === Number(process.env.VIETTELPOST_SENDER_GROUP_ADDRESS_ID || 0),
+        source: "viettelpost",
+        viettelGroupAddressId: groupId || undefined,
+        viettelProvinceId: Number(inventory.provinceId || 0) || undefined,
+        viettelDistrictId: Number(inventory.districtId || 0) || undefined,
+        viettelWardId: Number(inventory.wardId || 0) || undefined,
+        raw: inventory,
+      });
+    }
+
+    if (!items.some((item) => item.carrier === "viettelpost")) {
+      const groupId = Number(process.env.VIETTELPOST_SENDER_GROUP_ADDRESS_ID || 0);
+      const address = process.env.VIETTELPOST_SENDER_ADDRESS || this.returnAddress || "";
+      const name = process.env.VIETTELPOST_SENDER_NAME || this.returnName || "ViettelPost";
+      const phone = process.env.VIETTELPOST_SENDER_PHONE || this.returnPhone || "";
+      if (groupId || address || phone) {
+        items.push({
+          id: "viettelpost-default",
+          carrier: "viettelpost",
+          label: `${name}${phone ? ` · ${phone}` : ""}${address ? ` · ${address}` : ""}`,
+          name,
+          phone,
+          address,
+          isDefault: true,
+          source: "env",
+          viettelGroupAddressId: groupId || undefined,
+          viettelProvinceId: Number(process.env.VIETTELPOST_SENDER_PROVINCE_ID || 0) || undefined,
+          viettelDistrictId: Number(process.env.VIETTELPOST_SENDER_DISTRICT_ID || 0) || undefined,
+          viettelWardId: Number(process.env.VIETTELPOST_SENDER_WARD_ID || 0) || undefined,
+          raw: {},
+        });
+      }
+    }
+
+    return items;
+  }
+
   async quote(dto: QuoteShipmentDto) {
-    if (!this.fromDistrictId) {
+    const fromDistrictId = Number((dto as any)?.fromDistrictId || this.fromDistrictId || 0);
+    const fromWardCode = String((dto as any)?.fromWardCode || this.fromWardCode || "");
+
+    if (!fromDistrictId) {
       throw new BadRequestException("Thiếu GHN_FROM_DISTRICT_ID");
     }
 
-    if (!this.fromWardCode) {
+    if (!fromWardCode) {
       throw new BadRequestException("Thiếu GHN_FROM_WARD_CODE");
     }
 
     const services = await this.ghnClient.getAvailableServices(
-      this.fromDistrictId,
+      fromDistrictId,
       dto.toDistrictId
     );
 
@@ -1262,8 +1365,8 @@ export class ShipmentService {
           service_id: serviceId,
           service_type_id: serviceTypeId,
           insurance_value: dto.insuranceValue || 0,
-          from_district_id: this.fromDistrictId,
-          from_ward_code: this.fromWardCode,
+          from_district_id: fromDistrictId,
+          from_ward_code: fromWardCode,
           to_district_id: dto.toDistrictId,
           to_ward_code: dto.toWardCode,
           length: dto.length,
@@ -1292,8 +1395,8 @@ export class ShipmentService {
 
         const leadtime = await this.ghnClient.getLeadTime({
           service_id: serviceId,
-          from_district_id: this.fromDistrictId,
-          from_ward_code: this.fromWardCode,
+          from_district_id: fromDistrictId,
+          from_ward_code: fromWardCode,
           to_district_id: dto.toDistrictId,
           to_ward_code: dto.toWardCode,
         });
@@ -1334,17 +1437,23 @@ export class ShipmentService {
         };
       }
 
+      const fromDistrictId = Number((dto as any)?.fromDistrictId || this.fromDistrictId || 0);
+      const fromWardCode = String((dto as any)?.fromWardCode || this.fromWardCode || "");
+      const fromName = String((dto as any)?.fromName || this.returnName || "The 1970");
+      const fromPhone = String((dto as any)?.fromPhone || this.returnPhone || "");
+      const fromAddress = String((dto as any)?.fromAddress || this.returnAddress || "");
+
       if (
-        !this.fromDistrictId ||
-        !this.fromWardCode ||
-        !this.returnPhone ||
-        !this.returnAddress
+        !fromDistrictId ||
+        !fromWardCode ||
+        !fromPhone ||
+        !fromAddress
       ) {
         throw new BadRequestException("Thiếu cấu hình GHN đầu gửi");
       }
 
       const services = await this.ghnClient.getAvailableServices(
-        this.fromDistrictId,
+        fromDistrictId,
         dto.toDistrictId
       );
 
@@ -1378,16 +1487,16 @@ export class ShipmentService {
         payment_type_id: 1,
         note: shipmentNote,
         required_note: requiredNote,
-        return_phone: this.returnPhone,
-        return_address: this.returnAddress,
-        return_district_id: this.fromDistrictId,
-        return_ward_code: this.fromWardCode,
+        return_phone: fromPhone,
+        return_address: fromAddress,
+        return_district_id: fromDistrictId,
+        return_ward_code: fromWardCode,
         client_order_code: dto.clientOrderCode,
-        from_name: this.returnName,
-        from_phone: this.returnPhone,
-        from_address: this.returnAddress,
-        from_district_id: this.fromDistrictId,
-        from_ward_code: this.fromWardCode,
+        from_name: fromName,
+        from_phone: fromPhone,
+        from_address: fromAddress,
+        from_district_id: fromDistrictId,
+        from_ward_code: fromWardCode,
         to_name: dto.toName,
         to_phone: dto.toPhone,
         to_address: dto.toAddress,
@@ -1430,9 +1539,9 @@ export class ShipmentService {
           codAmount,
           shippingFee: created.total_fee ?? null,
           weight: dto.weight,
-          fromName: this.returnName,
-          fromPhone: this.returnPhone,
-          fromAddress: this.returnAddress,
+          fromName,
+          fromPhone,
+          fromAddress,
           toName: dto.toName,
           toPhone: dto.toPhone,
           toAddress: dto.toAddress,
@@ -1447,9 +1556,9 @@ export class ShipmentService {
           codAmount,
           shippingFee: created.total_fee ?? null,
           weight: dto.weight,
-          fromName: this.returnName,
-          fromPhone: this.returnPhone,
-          fromAddress: this.returnAddress,
+          fromName,
+          fromPhone,
+          fromAddress,
           toName: dto.toName,
           toPhone: dto.toPhone,
           toAddress: dto.toAddress,
