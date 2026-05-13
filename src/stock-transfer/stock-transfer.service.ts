@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
@@ -39,6 +40,70 @@ export class StockTransferService {
   private assertAdminUser(user?: any) {
     if (!this.isAdminUser(user)) {
       throw new BadRequestException("Chỉ admin/owner được xoá phiếu chuyển kho");
+    }
+  }
+
+  private normalizeBranchId(value: any) {
+    return String(value || "").trim();
+  }
+
+  private getUserBranchId(user?: any) {
+    return this.normalizeBranchId(
+      user?.branchId ||
+        user?.workingBranchId ||
+        user?.currentBranchId ||
+        user?.branch?.id ||
+        user?.branchCode ||
+        user?.branches?.[0]?.id ||
+        user?.assignedBranches?.[0]?.id,
+    );
+  }
+
+  private getActorId(user?: any, dto?: UpdateStockTransferStatusDto) {
+    return String(
+      dto?.confirmedById ||
+        user?.id ||
+        user?.userId ||
+        user?.sub ||
+        user?.staffId ||
+        "",
+    ).trim();
+  }
+
+  private getActorName(user?: any, dto?: UpdateStockTransferStatusDto) {
+    return String(
+      dto?.confirmedByName ||
+        user?.name ||
+        user?.fullName ||
+        user?.displayName ||
+        user?.email ||
+        "",
+    ).trim();
+  }
+
+  private assertStatusActorScope(
+    transfer: { fromBranchId: string; toBranchId: string },
+    status: TransferStatus,
+    user?: any,
+  ) {
+    if (this.isAdminUser(user)) return;
+
+    const userBranchId = this.getUserBranchId(user);
+
+    if (!userBranchId) {
+      throw new ForbiddenException("Không xác định được chi nhánh của nhân viên");
+    }
+
+    if (status === TransferStatus.CONFIRMED && transfer.fromBranchId !== userBranchId) {
+      throw new ForbiddenException("Chỉ kho gửi mới được xác nhận gửi hàng");
+    }
+
+    if (status === TransferStatus.COMPLETED && transfer.toBranchId !== userBranchId) {
+      throw new ForbiddenException("Chỉ kho nhận mới được xác nhận hàng đã về kho mình");
+    }
+
+    if (status === TransferStatus.CANCELLED && transfer.fromBranchId !== userBranchId) {
+      throw new ForbiddenException("Chỉ kho gửi mới được huỷ phiếu chuyển kho");
     }
   }
 
@@ -1015,7 +1080,8 @@ const suggestions = result.suggestions.filter(
         size: string | null;
       }[];
     },
-    dto: UpdateStockTransferStatusDto
+    dto: UpdateStockTransferStatusDto,
+    actorName?: string,
   ) {
     for (const item of transfer.items) {
       const fromInventory = await tx.inventoryItem.findUnique({
@@ -1040,12 +1106,11 @@ const suggestions = result.suggestions.filter(
         );
       }
 
-      await tx.inventoryItem.update({
+      const sourceUpdate = await tx.inventoryItem.updateMany({
         where: {
-          variantId_branchId: {
-            variantId: item.variantId,
-            branchId: transfer.fromBranchId,
-          },
+          variantId: item.variantId,
+          branchId: transfer.fromBranchId,
+          availableQty: { gte: item.qty },
         },
         data: {
           availableQty: {
@@ -1053,6 +1118,13 @@ const suggestions = result.suggestions.filter(
           },
         },
       });
+
+      if (sourceUpdate.count !== 1) {
+        throw new BadRequestException(
+          `Không đủ tồn để chuyển: ${item.productName ?? item.sku ?? item.variantId}. ` +
+            `Vui lòng tải lại phiếu và kiểm tra tồn kho gửi.`
+        );
+      }
 
       await tx.inventoryItem.upsert({
         where: {
@@ -1083,8 +1155,9 @@ const suggestions = result.suggestions.filter(
           qty: -item.qty,
           refType: "STOCK_TRANSFER_OUT",
           refId: transfer.id,
-          note: `Chuyển kho ${transfer.transferCode}: xuất từ ${transfer.fromBranchId} sang ${transfer.toBranchId}`,
-          createdById: dto.confirmedById,
+          note: `Chuyển kho ${transfer.transferCode}: xuất từ ${transfer.fromBranchId} sang ${transfer.toBranchId}${
+            actorName ? ` · Người xác nhận: ${actorName}` : ""
+          }`,
         },
       });
 
@@ -1096,14 +1169,15 @@ const suggestions = result.suggestions.filter(
           qty: item.qty,
           refType: "STOCK_TRANSFER_IN",
           refId: transfer.id,
-          note: `Chuyển kho ${transfer.transferCode}: nhập từ ${transfer.fromBranchId} sang ${transfer.toBranchId}`,
-          createdById: dto.confirmedById,
+          note: `Chuyển kho ${transfer.transferCode}: nhập từ ${transfer.fromBranchId} sang ${transfer.toBranchId}${
+            actorName ? ` · Người xác nhận: ${actorName}` : ""
+          }`,
         },
       });
     }
   }
 
-  async updateStatus(id: string, dto: UpdateStockTransferStatusDto) {
+  async updateStatus(id: string, dto: UpdateStockTransferStatusDto, user?: any) {
     const transfer = await this.prisma.stockTransfer.findUnique({
       where: { id },
       include: {
@@ -1116,6 +1190,11 @@ const suggestions = result.suggestions.filter(
     if (!transfer) {
       throw new NotFoundException("Không tìm thấy phiếu chuyển kho");
     }
+
+    this.assertStatusActorScope(transfer, dto.status, user);
+
+    const actorId = this.getActorId(user, dto);
+    const actorName = this.getActorName(user, dto);
 
     if (transfer.status === TransferStatus.COMPLETED) {
       throw new BadRequestException("Phiếu đã hoàn thành, không thể cập nhật trạng thái");
@@ -1143,37 +1222,43 @@ const suggestions = result.suggestions.filter(
       throw new BadRequestException("Phiếu đã xác nhận chuyển, không được huỷ trực tiếp. Nếu cần, tạo phiếu điều chỉnh/hoàn chuyển riêng.");
     }
 
-    const updated = await this.prisma.$transaction(async (tx) => {
-      // IMPORTANT: không trừ/cộng kho khi người gửi bấm xác nhận chuyển.
-      // Chỉ khi bên nhận bấm xác nhận đã nhận đủ (COMPLETED) mới ghi inventory.
-      if (dto.status === TransferStatus.COMPLETED) {
-        await this.finalizeReceivedInventoryTransfer(tx, transfer, dto);
-      }
+    const updated = await this.prisma.$transaction(
+      async (tx) => {
+        // IMPORTANT: không trừ/cộng kho khi người gửi bấm xác nhận chuyển.
+        // Chỉ khi bên nhận bấm xác nhận đã nhận đủ (COMPLETED) mới ghi inventory.
+        if (dto.status === TransferStatus.COMPLETED) {
+          await this.finalizeReceivedInventoryTransfer(tx, transfer, dto, actorName);
+        }
 
-      const updateData: Prisma.StockTransferUpdateInput = {
-        status: dto.status,
-      };
+        const updateData: Prisma.StockTransferUpdateInput = {
+          status: dto.status,
+        };
 
-      if (dto.status === TransferStatus.CONFIRMED) {
-        updateData.confirmedById = dto.confirmedById;
-        updateData.confirmedByName = dto.confirmedByName;
-        updateData.confirmedAt = new Date();
-      }
+        if (dto.status === TransferStatus.CONFIRMED) {
+          updateData.confirmedById = actorId || dto.confirmedById;
+          updateData.confirmedByName = actorName || dto.confirmedByName;
+          updateData.confirmedAt = new Date();
+        }
 
-      if (dto.status === TransferStatus.COMPLETED) {
-        updateData.completedAt = new Date();
-      }
+        if (dto.status === TransferStatus.COMPLETED) {
+          updateData.completedAt = new Date();
+        }
 
-      return tx.stockTransfer.update({
-        where: { id },
-        data: updateData,
-        include: {
-          items: true,
-          fromBranch: true,
-          toBranch: true,
-        },
-      });
-    });
+        return tx.stockTransfer.update({
+          where: { id },
+          data: updateData,
+          include: {
+            items: true,
+            fromBranch: true,
+            toBranch: true,
+          },
+        });
+      },
+      {
+        timeout: 20000,
+        maxWait: 20000,
+      },
+    );
 
     if (
       dto.status === TransferStatus.CONFIRMED &&

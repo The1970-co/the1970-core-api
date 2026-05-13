@@ -197,7 +197,7 @@ export class StockTransferController {
     @Req() req: any,
   ) {
     this.assertPermission(req.user, this.permissionForStatus(body));
-    return this.stockTransferService.updateStatus(id, body);
+    return this.stockTransferService.updateStatus(id, body, req.user);
   }
 
   @Delete("bulk-delete")
