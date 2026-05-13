@@ -3502,6 +3502,11 @@ export class ShipmentService {
     const heightCm = Math.max(1, Number(body?.heightCm || body?.height || 10));
 
     const buildPayload = (serviceId: string) => ({
+      payment_method:
+        body?.payment_method ||
+        body?.paymentMethod ||
+        process.env.AHAMOVE_PAYMENT_METHOD ||
+        "BALANCE",
       order_time: Number(body?.order_time ?? body?.orderTime ?? 0),
       path: [
         {

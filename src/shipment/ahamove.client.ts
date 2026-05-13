@@ -9,11 +9,27 @@ export class AhamoveClient {
   private readonly accountPhone =
     (process.env.AHAMOVE_ACCOUNT_PHONE || process.env.AHAMOVE_PHONE) || "";
 
-  private readonly baseUrl =
-    process.env.AHAMOVE_BASE_URL ||
-    "https://partner-apistg.ahamove.com";
+  private readonly baseUrl = this.resolveBaseUrl();
 
   private accessToken: string | null = null;
+
+  private resolveBaseUrl() {
+    const explicit = String(process.env.AHAMOVE_BASE_URL || "").trim();
+    if (explicit) return explicit.replace(/\/$/, "");
+
+    const env = String(process.env.AHAMOVE_ENV || process.env.AHAMOVE_MODE || "").trim().toLowerCase();
+    if (env === "sandbox" || env === "staging" || env === "test") {
+      return "https://partner-apistg.ahamove.com";
+    }
+
+    return "https://partner-api.ahamove.com";
+  }
+
+  private maskPhone(phone: string) {
+    const clean = String(phone || "").replace(/\D/g, "");
+    if (clean.length <= 4) return clean || "missing";
+    return `${"*".repeat(Math.max(0, clean.length - 4))}${clean.slice(-4)}`;
+  }
 
   private async getAccessToken() {
     if (this.accessToken) {
@@ -33,7 +49,7 @@ export class AhamoveClient {
     const url = `${this.baseUrl}/v3/accounts/token`;
 
     this.logger.log(
-      `[AHAMOVE AUTH] request token | phone=${this.accountPhone}`
+      `[AHAMOVE AUTH] request token | baseUrl=${this.baseUrl} | phone=${this.maskPhone(this.accountPhone)}`
     );
 
     const res = await fetch(url, {
@@ -97,7 +113,7 @@ export class AhamoveClient {
     const url = `${this.baseUrl}${path}`;
 
     this.logger.log(
-      `[AHAMOVE] ${method} ${path} | body=${JSON.stringify(body || {})}`
+      `[AHAMOVE] ${method} ${this.baseUrl}${path} | body=${JSON.stringify(body || {})}`
     );
 
     const headers = await this.getHeaders();
@@ -117,10 +133,13 @@ export class AhamoveClient {
         )}`
       );
 
-      throw new BadRequestException(
+      const message =
         json?.message ||
-          json?.description ||
-          `Ahamove request failed: ${path}`
+        json?.description ||
+        `Ahamove request failed: ${path}`;
+
+      throw new BadRequestException(
+        `${message} | baseUrl=${this.baseUrl} | phone=${this.maskPhone(this.accountPhone)}`
       );
     }
 
