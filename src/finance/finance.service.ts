@@ -224,9 +224,16 @@ export class FinanceService {
     const voucherValues: any[] = [from, to];
     const voucherWhere: string[] = [
       `v."createdAt" BETWEEN $1 AND $2`,
-      `COALESCE(v."type", CASE WHEN UPPER(COALESCE(v."direction", '')) IN ('OUT', 'PAYMENT', 'CHI', 'CASH_OUT') THEN 'PAYMENT' ELSE 'RECEIPT' END) = 'RECEIPT'`,
       `COALESCE(v."status", 'DRAFT') = 'CONFIRMED'`,
     ];
+
+    if (params.status && params.status !== "ALL") {
+      const requestedVoucherType = String(params.status).toUpperCase();
+      if (requestedVoucherType === "RECEIPT" || requestedVoucherType === "PAYMENT") {
+        voucherValues.push(requestedVoucherType);
+        voucherWhere.push(`${this.cashVoucherTypeSql()} = $${voucherValues.length}`);
+      }
+    }
 
     if (params.paymentSourceId && params.paymentSourceId !== "ALL") {
       voucherValues.push(params.paymentSourceId);
@@ -254,6 +261,7 @@ export class FinanceService {
         SELECT
           v.*,
           COALESCE(v."voucherCode", v."code") AS "voucherCode",
+          ${this.cashVoucherTypeSql()} AS "voucherFlowType",
           COALESCE(v."title", v."note", v."voucherType", '') AS "title",
           COALESCE(v."partnerName", v."customerName", '') AS "partnerName",
           COALESCE(v."partnerPhone", v."customerPhone", '') AS "partnerPhone",
@@ -373,15 +381,24 @@ export class FinanceService {
       const amount = this.toNumber(voucher.amount);
       if (amount <= 0) continue;
 
+      const voucherType = String(voucher.voucherFlowType || voucher.type || "").toUpperCase() === "PAYMENT"
+        ? "PAYMENT"
+        : "RECEIPT";
+
       const dedupKey = [
         String(voucher.refId || ""),
         String(voucher.paymentSourceId || ""),
         amount,
       ].join("|");
 
-      // POS tạo cả Payment và CashVoucher để lưu phiếu thu.
-      // Tổng quan dòng tiền chỉ tính 1 lần: nếu đã có Payment cùng đơn/nguồn/số tiền thì bỏ voucher khỏi tổng.
-      if (String(voucher.refType || "").toUpperCase() === "ORDER" && paymentDedupKeys.has(dedupKey)) {
+      // POS/ORDER tạo cả Payment và CashVoucher để lưu phiếu thu.
+      // Tổng quan dòng tiền chỉ tính 1 lần: nếu đã có Payment cùng đơn/nguồn/số tiền thì bỏ voucher thu khỏi tổng.
+      // Phiếu chi không dedup với Payment vì Payment là trạng thái đơn hàng, CashVoucher mới là dòng tiền ra.
+      if (
+        voucherType === "RECEIPT" &&
+        String(voucher.refType || "").toUpperCase() === "ORDER" &&
+        paymentDedupKeys.has(dedupKey)
+      ) {
         continue;
       }
 
@@ -400,6 +417,8 @@ export class FinanceService {
           codPendingAmount: 0,
           partialAmount: 0,
           collectedAmount: 0,
+          paymentAmount: 0,
+          spentAmount: 0,
           refundedAmount: 0,
           failedAmount: 0,
           totalAmount: 0,
@@ -409,13 +428,24 @@ export class FinanceService {
 
       const row = bySource.get(key);
       row.count += 1;
-      row.totalAmount += amount;
-      row.paidAmount += amount;
-      row.collectedAmount += amount;
 
-      totalPaid += amount;
-      totalCollected += amount;
-      totalAll += amount;
+      if (voucherType === "PAYMENT") {
+        row.paymentAmount = (row.paymentAmount || 0) + amount;
+        row.spentAmount = (row.spentAmount || 0) + amount;
+        row.refundedAmount += amount;
+        row.totalAmount -= amount;
+
+        totalRefunded += amount;
+        totalAll += amount;
+      } else {
+        row.totalAmount += amount;
+        row.paidAmount += amount;
+        row.collectedAmount += amount;
+
+        totalPaid += amount;
+        totalCollected += amount;
+        totalAll += amount;
+      }
 
       mappedCashVouchers.push({
         id: voucher.id,
@@ -423,17 +453,22 @@ export class FinanceService {
         orderCode: voucher.refType === "ORDER" ? voucher.refId : voucher.voucherCode,
         voucherCode: voucher.voucherCode,
         branchId: voucher.branchId || "—",
+        branchName: voucher.branchName || voucher.branchId || "—",
         customerName: voucher.partnerName || "Khách lẻ",
         customerPhone: voucher.partnerPhone || "—",
         orderStatus: null,
         orderPaymentStatus: null,
         amount,
-        status: "PAID",
+        flowType: voucherType,
+        type: voucherType,
+        status: "CONFIRMED",
         method: sourceName,
         sourceName,
         sourceCode,
         sourceType,
-        note: voucher.note || voucher.title || "Phiếu thu",
+        title: voucher.title || "",
+        category: voucher.category || "",
+        note: voucher.note || voucher.title || (voucherType === "PAYMENT" ? "Phiếu chi" : "Phiếu thu"),
         createdAt: voucher.createdAt,
         paidAt: voucher.confirmedAt || voucher.createdAt,
         recordType: "CASH_VOUCHER",
@@ -441,7 +476,7 @@ export class FinanceService {
     }
 
     const bySourceRows = Array.from(bySource.values()).sort(
-      (a, b) => b.totalAmount - a.totalAmount
+      (a, b) => Math.abs(b.totalAmount || 0) - Math.abs(a.totalAmount || 0)
     );
 
     return {
@@ -453,6 +488,10 @@ export class FinanceService {
         totalPaid: totalCollected,
         totalCollected,
         totalPaymentPaid: totalPaid,
+        totalReceipt: totalCollected,
+        totalPayment: totalRefunded,
+        totalSpent: totalRefunded,
+        netCashFlow: totalCollected - totalRefunded,
         totalCodPending,
         totalPartial,
         totalRefunded,
@@ -476,6 +515,8 @@ export class FinanceService {
         orderStatus: p.order?.status || null,
         orderPaymentStatus: p.order?.paymentStatus || null,
         amount: this.toNumber(p.amount),
+        flowType: "RECEIPT",
+        type: "RECEIPT",
         status: p.status,
         method: p.method,
         sourceName: p.paymentSource?.name || p.method || "Chưa rõ",
