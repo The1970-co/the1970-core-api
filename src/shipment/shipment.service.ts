@@ -3526,11 +3526,6 @@ export class ShipmentService {
           requests: Array.isArray(body?.requests) ? body.requests : [],
         },
       ],
-      payment_method:
-        body?.payment_method ||
-        body?.paymentMethod ||
-        process.env.AHAMOVE_PAYMENT_METHOD ||
-        "BALANCE",
       remarks: body?.note || "",
       items: Array.isArray(body?.items)
         ? body.items.map((item: any, index: number) => ({

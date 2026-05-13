@@ -212,6 +212,8 @@ export class FinanceService {
             paymentStatus: true,
             status: true,
             salesChannel: true,
+            createdByStaffId: true,
+            createdByStaffName: true,
             createdAt: true,
           },
         },
@@ -261,7 +263,7 @@ export class FinanceService {
         SELECT
           v.*,
           COALESCE(v."voucherCode", v."code") AS "voucherCode",
-          ${this.cashVoucherTypeSql()} AS "voucherFlowType",
+          ${this.cashVoucherTypeSql("v")} AS "voucherFlowType",
           COALESCE(v."title", v."note", v."voucherType", '') AS "title",
           COALESCE(v."partnerName", v."customerName", '') AS "partnerName",
           COALESCE(v."partnerPhone", v."customerPhone", '') AS "partnerPhone",
@@ -456,6 +458,10 @@ export class FinanceService {
         branchName: voucher.branchName || voucher.branchId || "—",
         customerName: voucher.partnerName || "Khách lẻ",
         customerPhone: voucher.partnerPhone || "—",
+        createdById: voucher.createdById || voucher.staffId || null,
+        createdByName: voucher.createdByName || voucher.staffName || null,
+        staffId: voucher.staffId || voucher.createdById || null,
+        staffName: voucher.staffName || voucher.createdByName || null,
         orderStatus: null,
         orderPaymentStatus: null,
         amount,
@@ -512,6 +518,10 @@ export class FinanceService {
         branchId: p.order?.branchId || "—",
         customerName: p.order?.customerName || "Khách lẻ",
         customerPhone: p.order?.customerPhone || "—",
+        createdById: (p.order as any)?.createdByStaffId || null,
+        createdByName: (p.order as any)?.createdByStaffName || null,
+        staffId: (p.order as any)?.createdByStaffId || null,
+        staffName: (p.order as any)?.createdByStaffName || null,
         orderStatus: p.order?.status || null,
         orderPaymentStatus: p.order?.paymentStatus || null,
         amount: this.toNumber(p.amount),
@@ -992,8 +1002,9 @@ export class FinanceService {
     return type === "PAYMENT" ? "OUT" : "IN";
   }
 
-  private cashVoucherTypeSql() {
-    return `COALESCE(v."type", CASE WHEN UPPER(COALESCE(v."direction", '')) IN ('OUT', 'PAYMENT', 'CHI', 'CASH_OUT') THEN 'PAYMENT' ELSE 'RECEIPT' END)`;
+  private cashVoucherTypeSql(alias = "v") {
+    const prefix = alias ? `${alias}.` : "";
+    return `COALESCE(${prefix}"type", CASE WHEN UPPER(COALESCE(${prefix}"direction", '')) IN ('OUT', 'PAYMENT', 'CHI', 'CASH_OUT') THEN 'PAYMENT' ELSE 'RECEIPT' END)`;
   }
 
   async getCashVouchers(params: {
@@ -1061,7 +1072,7 @@ export class FinanceService {
         SELECT
           v.*,
           COALESCE(v."voucherCode", v."code") AS "voucherCode",
-          ${this.cashVoucherTypeSql()} AS "type",
+          ${this.cashVoucherTypeSql("v")} AS "type",
           COALESCE(v."status", 'DRAFT') AS "status",
           COALESCE(v."title", v."note", v."voucherType", '') AS "title",
           COALESCE(v."category", v."voucherType", '') AS "category",
@@ -1367,7 +1378,7 @@ export class FinanceService {
         WHERE "id" = $1
         RETURNING *,
           COALESCE("voucherCode", "code") AS "voucherCode",
-          ${this.cashVoucherTypeSql()} AS "type",
+          ${this.cashVoucherTypeSql("")} AS "type",
           COALESCE("status", 'DRAFT') AS "status",
           COALESCE("title", "note", "voucherType", '') AS "title",
           COALESCE("category", "voucherType", '') AS "category",
@@ -1421,7 +1432,7 @@ export class FinanceService {
         WHERE "id" = $1 AND COALESCE("status", 'DRAFT') = 'DRAFT'
         RETURNING *,
           COALESCE("voucherCode", "code") AS "voucherCode",
-          ${this.cashVoucherTypeSql()} AS "type",
+          ${this.cashVoucherTypeSql("")} AS "type",
           COALESCE("status", 'DRAFT') AS "status",
           COALESCE("title", "note", "voucherType", '') AS "title",
           COALESCE("category", "voucherType", '') AS "category",
@@ -1474,7 +1485,7 @@ export class FinanceService {
         WHERE "id" = $1 AND COALESCE("status", 'DRAFT') != 'CANCELLED'
         RETURNING *,
           COALESCE("voucherCode", "code") AS "voucherCode",
-          ${this.cashVoucherTypeSql()} AS "type",
+          ${this.cashVoucherTypeSql("")} AS "type",
           COALESCE("status", 'DRAFT') AS "status",
           COALESCE("title", "note", "voucherType", '') AS "title",
           COALESCE("category", "voucherType", '') AS "category",
@@ -1508,8 +1519,34 @@ export class FinanceService {
 
     this.ensureBranchScope(user, current[0].branchId);
 
-    if (current[0].status === "CONFIRMED") {
-      throw new BadRequestException("Phiếu đã xác nhận không được xoá. Hãy huỷ phiếu nếu cần điều chỉnh.");
+    const roleText = String(
+      user?.role ||
+      user?.userRole ||
+      user?.primaryRole ||
+      user?.appRole ||
+      user?.type ||
+      ""
+    ).toUpperCase();
+
+    const permissionKeys = [
+      ...(Array.isArray(user?.permissions) ? user.permissions : []),
+      ...(Array.isArray(user?.permissionKeys) ? user.permissionKeys : []),
+      ...(Array.isArray(user?.effectivePermissions) ? user.effectivePermissions : []),
+    ].map((permission: any) =>
+      typeof permission === "string"
+        ? permission
+        : permission?.key || permission?.code || permission?.name || ""
+    );
+
+    const canForceDelete =
+      roleText.includes("OWNER") ||
+      roleText.includes("ADMIN") ||
+      permissionKeys.includes("system.manage") ||
+      permissionKeys.includes("cash_voucher.delete_confirmed") ||
+      permissionKeys.includes("cash_voucher.delete");
+
+    if (current[0].status === "CONFIRMED" && !canForceDelete) {
+      throw new BadRequestException("Phiếu đã xác nhận chỉ admin/owner mới được xoá. Nhân viên vui lòng dùng thao tác huỷ phiếu.");
     }
 
     await this.prisma.$executeRawUnsafe(
