@@ -155,6 +155,12 @@ export class ProductController {
     return this.productService.getProductById(id);
   }
 
+  @Patch(":id/images")
+  @RequirePermissions("products.image.upload")
+  updateProductImages(@Param("id") id: string, @Body() body: any) {
+    return this.productService.updateProductImages(id, body);
+  }
+
   @Patch(":id")
   @RequirePermissions("products.edit")
   updateProduct(@Param("id") id: string, @Body() body: any) {

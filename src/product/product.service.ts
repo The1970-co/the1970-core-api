@@ -37,6 +37,9 @@ type UpdateProductInput = {
   sizes?: string[];
   branchStocks?: BranchStockMap;
   applyPriceToAllVariants?: boolean;
+  colorImages?: Record<string, string>;
+  imagesByColor?: Record<string, string>;
+  colorImageMap?: Record<string, string>;
 };
 type AddVariantInput = {
   color: string;
@@ -151,6 +154,67 @@ export class ProductService {
         .map(([key, value]) => [key, this.toNumber(value)]),
     );
   }
+  private normalizeColorKey(value: unknown) {
+    return String(value || "")
+      .trim()
+      .toUpperCase();
+  }
+
+  private normalizeColorImagesInput(input?: Record<string, unknown> | null) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      return {};
+    }
+
+    return Object.fromEntries(
+      Object.entries(input)
+        .map(([key, value]) => [
+          this.normalizeColorKey(key),
+          String(value || "").trim(),
+        ])
+        .filter(([key, value]) => key && value),
+    ) as Record<string, string>;
+  }
+
+  private buildColorImagesFromVariants(variants: Array<any>) {
+    const output: Record<string, string> = {};
+
+    for (const variant of variants || []) {
+      const colorKey = this.normalizeColorKey(variant?.color);
+      const image = String(
+        variant?.imageUrl || variant?.image || variant?.photoUrl || "",
+      ).trim();
+
+      if (colorKey && image && !output[colorKey]) {
+        output[colorKey] = image;
+      }
+    }
+
+    return output;
+  }
+
+  private async persistColorImagesToVariants(
+    productId: string,
+    colorImages: Record<string, string>,
+  ) {
+    const entries = Object.entries(colorImages).filter(
+      ([color, image]) => this.normalizeColorKey(color) && String(image || "").trim(),
+    );
+
+    if (!entries.length) return;
+
+    // Ảnh theo màu lưu xuống các variant cùng màu.
+    // Nếu schema cũ chưa có ProductVariant.imageUrl thì cần thêm field này trong Prisma schema.
+    for (const [color, imageUrl] of entries) {
+      await (this.prisma.productVariant.updateMany as any)({
+        where: {
+          productId,
+          color: { equals: String(color).trim(), mode: "insensitive" },
+        },
+        data: { imageUrl: String(imageUrl || "").trim() },
+      });
+    }
+  }
+
 
   private findValue(row: Record<string, unknown>, keys: string[]) {
     const rowKeys = Object.keys(row);
@@ -239,20 +303,125 @@ export class ProductService {
   }
 
   private getBranchStocksFromImportRow(row: Record<string, unknown>) {
-    // Mapping theo file DS sản phẩm SAPO:
-    // LC_CN1 = Chùa Láng, LC_CN2 = Xã Đàn, LC_CN3 = Kho Quốc Oai, LC_CN4 = Thái Hà.
-    // LC_CN5 tạm bỏ qua nếu hệ thống chưa có branch tương ứng.
-    const stocks: BranchStockMap = {
-      CL: this.toNumber(this.findValueByColumn(row, "AB")),
-      XD: this.toNumber(this.findValueByColumn(row, "AV")),
-      QO: this.toNumber(this.findValueByColumn(row, "AQ")),
-      TH: this.toNumber(this.findValueByColumn(row, "AL")),
+    // Ưu tiên các cột dễ nhập thủ công trong file import mới.
+    // Sau đó fallback về mapping cột SAPO cũ.
+    const namedStocks: BranchStockMap = {
+      CL: this.toNumber(
+        this.findRawValue(row, [
+          "CL",
+          "Chùa Láng",
+          "Chua Lang",
+          "Tồn CL",
+          "Ton CL",
+          "Tồn Chùa Láng",
+          "Ton Chua Lang",
+          "LC_CN1",
+        ]) || this.findValueByColumn(row, "AB"),
+      ),
+      XD: this.toNumber(
+        this.findRawValue(row, [
+          "XD",
+          "Xã Đàn",
+          "Xa Dan",
+          "Tồn XD",
+          "Ton XD",
+          "Tồn Xã Đàn",
+          "Ton Xa Dan",
+          "LC_CN2",
+        ]) || this.findValueByColumn(row, "AV"),
+      ),
+      QO: this.toNumber(
+        this.findRawValue(row, [
+          "QO",
+          "Quốc Oai",
+          "Quoc Oai",
+          "Kho QO",
+          "Tồn QO",
+          "Ton QO",
+          "Tồn Quốc Oai",
+          "Ton Quoc Oai",
+          "LC_CN3",
+        ]) || this.findValueByColumn(row, "AQ"),
+      ),
+      TH: this.toNumber(
+        this.findRawValue(row, [
+          "TH",
+          "Thái Hà",
+          "Thai Ha",
+          "Tồn TH",
+          "Ton TH",
+          "Tồn Thái Hà",
+          "Ton Thai Ha",
+          "LC_CN4",
+        ]) || this.findValueByColumn(row, "AL"),
+      ),
     };
 
     return Object.fromEntries(
-      Object.entries(stocks).filter(([, qty]) => Number.isFinite(qty)),
+      Object.entries(namedStocks).filter(([, qty]) => Number.isFinite(qty)),
     );
   }
+
+  private getImportMainImageUrl(row: Record<string, unknown>) {
+    return this.findValue(row, [
+      "Ảnh chính",
+      "Anh chinh",
+      "Link ảnh chính",
+      "Link anh chinh",
+      "Ảnh sản phẩm",
+      "Anh san pham",
+      "Ảnh đại diện",
+      "Anh dai dien",
+      "imageUrl",
+      "image url",
+      "main image",
+      "product image",
+    ]);
+  }
+
+  private getImportVariantImageUrl(row: Record<string, unknown>, color: string) {
+    const colorText = String(color || "").trim();
+    const colorKey = this.normalizeColorKey(colorText);
+
+    const directVariantImage = this.findValue(row, [
+      "Ảnh màu",
+      "Anh mau",
+      "Link ảnh màu",
+      "Link anh mau",
+      "Ảnh variant",
+      "Anh variant",
+      "Ảnh biến thể",
+      "Anh bien the",
+      "Variant image",
+      "Variant image url",
+      "Color image",
+      "Color image url",
+    ]);
+
+    if (directVariantImage) return directVariantImage;
+
+    if (!colorText && !colorKey) return "";
+
+    const dynamicKeys = Array.from(
+      new Set(
+        [colorText, colorKey]
+          .filter(Boolean)
+          .flatMap((label) => [
+            `Ảnh màu ${label}`,
+            `Anh mau ${label}`,
+            `Link ảnh màu ${label}`,
+            `Link anh mau ${label}`,
+            `Ảnh ${label}`,
+            `Anh ${label}`,
+            `${label} image`,
+            `${label} image url`,
+          ]),
+      ),
+    );
+
+    return this.findValue(row, dynamicKeys);
+  }
+
 
   private getMainSkuCode(sku: string) {
     return String(sku || "")
@@ -281,7 +450,10 @@ export class ProductService {
         joined.includes("ma sku") ||
         joined.includes("gia tri thuoc tinh 1") ||
         joined.includes("gia tri thuoc tinh 2") ||
-        joined.includes("pl gia ban le")
+        joined.includes("pl gia ban le") ||
+        joined.includes("anh chinh") ||
+        joined.includes("anh mau") ||
+        joined.includes("link anh")
       );
     });
   }
@@ -428,6 +600,8 @@ export class ProductService {
       data: products.map((product) => ({
         ...product,
         category: product.categoryRel?.name || product.category,
+        colorImages: this.buildColorImagesFromVariants(product.variants as any),
+        imagesByColor: this.buildColorImagesFromVariants(product.variants as any),
         variants: product.variants.map((variant) => {
           const inventoryByBranch = this.buildInventoryByBranch(
             variant.inventoryItems.map((item) => ({
@@ -484,6 +658,8 @@ async getProductById(id: string) {
   return {
     ...product,
     category: product.categoryRel?.name || product.category,
+    colorImages: this.buildColorImagesFromVariants(product.variants as any),
+    imagesByColor: this.buildColorImagesFromVariants(product.variants as any),
     variants: product.variants.map((variant) => {
       const inventoryByBranch = this.buildInventoryByBranch(
         variant.inventoryItems.map((item) => ({
@@ -755,6 +931,9 @@ async updateMissingCostBulk(
     }
 
     const branchStocks = this.normalizeBranchStocks(data.branchStocks);
+    const colorImages = this.normalizeColorImagesInput(
+      data.colorImages || data.imagesByColor || data.colorImageMap,
+    );
 
     type WantedCombo = {
       key: string;
@@ -909,6 +1088,10 @@ async updateMissingCostBulk(
       },
     );
 
+    if (Object.keys(colorImages).length > 0) {
+      await this.persistColorImagesToVariants(productId, colorImages);
+    }
+
     if (
       Object.keys(branchStocks).length > 0 &&
       result.inventoryVariantIds.length > 0
@@ -944,6 +1127,44 @@ async updateMissingCostBulk(
     return result.updatedProduct;
   }
 
+
+  async updateProductImages(
+    productId: string,
+    data: {
+      imageUrl?: string;
+      colorImages?: Record<string, string>;
+      imagesByColor?: Record<string, string>;
+      colorImageMap?: Record<string, string>;
+    },
+  ) {
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+      include: { variants: true },
+    });
+
+    if (!product) {
+      throw new BadRequestException("Không tìm thấy sản phẩm");
+    }
+
+    const colorImages = this.normalizeColorImagesInput(
+      data.colorImages || data.imagesByColor || data.colorImageMap,
+    );
+
+    await this.prisma.product.update({
+      where: { id: productId },
+      data: {
+        ...(data.imageUrl !== undefined
+          ? { imageUrl: String(data.imageUrl || "").trim() || null }
+          : {}),
+      },
+    });
+
+    if (Object.keys(colorImages).length > 0) {
+      await this.persistColorImagesToVariants(productId, colorImages);
+    }
+
+    return this.getProductById(productId);
+  }
 
   private looksLikePriceToken(value: string) {
     const clean = String(value || "").trim().toLowerCase();
@@ -1064,6 +1285,7 @@ async updateMissingCostBulk(
       description: string;
       brand: string;
       weight: number;
+      imageUrl: string;
       variants: VariantSeed[];
     };
 
@@ -1178,19 +1400,16 @@ async updateMissingCostBulk(
         }
 
         const productSlug = this.normalizeSlug(parentSku);
-        const imageUrl = this.findValue(row, [
-          "Ảnh đại diện",
-          "anh dai dien",
-          "image",
-          "image url",
-        ]);
-
         const retailPrice = this.getRetailPrice(row);
         const rawImportPrice = this.getImportPrice(row);
         const importPrice = rawImportPrice > 0 ? rawImportPrice : 0;
         const branchStocks = this.getBranchStocksFromImportRow(row);
 
         const parsedVariant = this.parseVariantOptionsFromImport(row, cleanSku);
+        const mainImageUrl = this.getImportMainImageUrl(row);
+        const variantImageUrl =
+          this.getImportVariantImageUrl(row, parsedVariant.color) || mainImageUrl;
+
         const productDisplayName = this.buildProductNameFromSkuImport(
           currentProductName,
           productName,
@@ -1206,6 +1425,7 @@ async updateMissingCostBulk(
             description: description || currentDescription || "",
             brand: brand || currentBrand || "The 1970",
             weight: weight || currentWeight || 0,
+            imageUrl: mainImageUrl || variantImageUrl || "",
             variants: [],
           });
         } else {
@@ -1223,6 +1443,9 @@ async updateMissingCostBulk(
           if (!seed.weight && (weight || currentWeight)) {
             seed.weight = weight || currentWeight;
           }
+          if (!seed.imageUrl && (mainImageUrl || variantImageUrl)) {
+            seed.imageUrl = mainImageUrl || variantImageUrl;
+          }
         }
 
         const productSeed = grouped.get(productSlug)!;
@@ -1230,7 +1453,7 @@ async updateMissingCostBulk(
           color: parsedVariant.color,
           size: parsedVariant.size,
           sku: cleanSku,
-          imageUrl,
+          imageUrl: variantImageUrl,
           retailPrice,
           importPrice,
           branchStocks,
@@ -1276,7 +1499,7 @@ async updateMissingCostBulk(
       existingVariants.map((variant) => [variant.sku, variant]),
     );
 
-    const variantsToCreate: Prisma.ProductVariantCreateManyInput[] = [];
+    const variantsToCreate: any[] = [];
     const variantsToUpdate: Array<{
       id: string;
       data: Prisma.ProductVariantUpdateInput;
@@ -1297,7 +1520,8 @@ async updateMissingCostBulk(
               productType: null,
               brand: productSeed.brand || "The 1970",
               weight: productSeed.weight || 0,
-              imageUrl: productSeed.variants[0]?.imageUrl || null,
+              imageUrl:
+                productSeed.imageUrl || productSeed.variants[0]?.imageUrl || null,
               description: productSeed.description || null,
               status: ProductStatus.ACTIVE,
             },
@@ -1314,7 +1538,10 @@ async updateMissingCostBulk(
               brand: productSeed.brand || "The 1970",
               weight: productSeed.weight || 0,
               imageUrl:
-                productSeed.variants[0]?.imageUrl || product.imageUrl || null,
+                productSeed.imageUrl ||
+                productSeed.variants[0]?.imageUrl ||
+                product.imageUrl ||
+                null,
               description: productSeed.description || null,
               status: ProductStatus.ACTIVE,
             },
@@ -1337,6 +1564,7 @@ async updateMissingCostBulk(
               size: variantSeed.size.trim(),
               price: new Prisma.Decimal(this.toNumber(variantSeed.retailPrice)),
               costPrice: new Prisma.Decimal(this.toNumber(variantSeed.importPrice)),
+              imageUrl: variantSeed.imageUrl || null,
               status: VariantStatus.ACTIVE,
             });
           } else if (overwrite) {
@@ -1352,6 +1580,9 @@ async updateMissingCostBulk(
                 costPrice: new Prisma.Decimal(
                   this.toNumber(variantSeed.importPrice),
                 ),
+                ...(variantSeed.imageUrl
+                  ? { imageUrl: variantSeed.imageUrl }
+                  : {}),
                 status: VariantStatus.ACTIVE,
               },
             });
@@ -1444,7 +1675,7 @@ async updateMissingCostBulk(
       createdVariants: variantsToCreate.length,
       updatedVariants: variantsToUpdate.length,
       inventoryRows,
-      note: "Import 1 bước: tạo/cập nhật sản phẩm + variant, giá nhập BB và tồn kho các chi nhánh từ file Excel.",
+      note: "Import 1 bước: tạo/cập nhật sản phẩm + variant + ảnh chính + ảnh theo màu + giá nhập/giá bán + tồn kho các chi nhánh từ file Excel.",
     };
   }
 

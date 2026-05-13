@@ -114,6 +114,12 @@ export class OrderController {
     );
   }
 
+
+  @Get("assignable-staff")
+  async getAssignableStaffForOrders(@Req() req: Request & { user?: any }) {
+    return this.orderService.getAssignableStaffForOrders(req.user);
+  }
+
   @Get(":id")
   async getOrderById(
     @Param("id") id: string,

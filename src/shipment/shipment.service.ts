@@ -3795,7 +3795,7 @@ export class ShipmentService {
         ahamove: created,
         shipment,
       };
-    });
+    }, { timeout: 20000, maxWait: 10000 });
   }
 
   async trackAhamoveByShipmentId(id: string) {

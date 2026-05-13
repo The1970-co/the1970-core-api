@@ -2570,6 +2570,64 @@ export class OrderService {
 
     return this.mapOrderResponse(updated);
   }
+  async getAssignableStaffForOrders(user?: any) {
+    if (!user) return [];
+
+    const isOwner = this.isOwner(user);
+    const branchRows = Array.isArray(user?.branchPermissions)
+      ? user.branchPermissions
+      : [];
+
+    const branchIds = Array.from(
+      new Set(
+        [
+          user?.branchId,
+          ...branchRows
+            .map((row: any) => row?.branchId)
+            .filter((branchId: any) =>
+              this.hasOrderActionPermission(user, "orders.edit", String(branchId || "")),
+            ),
+        ]
+          .map((value) => String(value || "").trim())
+          .filter(Boolean),
+      ),
+    );
+
+    if (!isOwner && !branchIds.length) return [];
+
+    const rows = await this.prisma.staffUser.findMany({
+      where: {
+        isActive: { not: false },
+        ...(isOwner
+          ? {}
+          : {
+              branchId: { in: branchIds },
+            }),
+      } as any,
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        branchId: true,
+        isActive: true,
+      },
+      orderBy: [
+        { branchId: "asc" },
+        { name: "asc" },
+      ] as any,
+    });
+
+    return rows.map((staff: any) => ({
+      id: staff.id,
+      code: staff.code,
+      name: staff.name,
+      fullName: staff.name,
+      branchId: staff.branchId || null,
+      branchName: staff.branchId || null,
+      isActive: staff.isActive !== false,
+    }));
+  }
+
   async assignStaffToOrder(
     orderId: string,
     assignedStaffId: string | null,
@@ -2589,10 +2647,9 @@ export class OrderService {
 
     this.assertOrderActionPermission(user, "orders.edit", existing.branchId || null);
 
-    if (!this.isOwner(user) && !this.hasOrderPermission(user, "orders.view", existing.branchId || null)) {
-      throw new ForbiddenException("Bạn không có quyền gán đơn cho nhân viên khác.");
-    }
-
+    // Chỉ cần quyền sửa đơn trong đúng chi nhánh để gán NV phụ trách.
+    // Không bắt buộc orders.view toàn chi nhánh, vì nhiều nhân viên chỉ được orders.view_own
+    // nhưng vẫn cần chuyển/gán đơn trong phạm vi được giao.
     let assignedStaffName: string | null = null;
 
     if (assignedStaffId) {

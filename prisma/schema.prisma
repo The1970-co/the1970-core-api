@@ -1429,15 +1429,18 @@ model CashVoucher {
   voucherType String
 
   // Legacy voucher fields already existing in DB. Keep them to avoid data loss/drop warnings.
-  voucherCode   String?
-  type          String?
-  category      String?
-  title         String?
-  status        String?
-  partnerName   String?
-  partnerPhone  String?
-  createdById   String?
-  createdByName String?
+  voucherCode     String?
+  type            String?
+  category        String?
+  title           String?
+  status          String?
+  partnerName     String?
+  partnerPhone    String?
+  createdById     String?
+  createdByName   String?
+  confirmedAt     DateTime?
+  confirmedById   String?
+  confirmedByName String?
 
   amount          Decimal         @default(0) @db.Decimal(14, 2)
   paymentSourceId String?
@@ -1463,6 +1466,38 @@ model CashVoucher {
   @@index([branchId])
   @@index([refType, refId])
   @@index([createdAt])
+}
+
+
+model DailyCashBalance {
+  id                String   @id @default(cuid())
+  date              DateTime @db.Date
+  branchId          String
+  paymentSourceId   String
+
+  openingBalance    Decimal  @default(0) @db.Decimal(18, 2)
+  totalReceipt      Decimal  @default(0) @db.Decimal(18, 2)
+  totalPayment      Decimal  @default(0) @db.Decimal(18, 2)
+  netAmount         Decimal  @default(0) @db.Decimal(18, 2)
+  closingBalance    Decimal  @default(0) @db.Decimal(18, 2)
+
+  countedAmount     Decimal? @db.Decimal(18, 2)
+  differenceAmount  Decimal? @db.Decimal(18, 2)
+
+  status            String   @default("OPEN")
+  note              String?
+  lockedAt          DateTime?
+  lockedById        String?
+  lockedByName      String?
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([date, branchId, paymentSourceId])
+  @@index([date])
+  @@index([branchId])
+  @@index([paymentSourceId])
+  @@index([status])
 }
 
 enum PromotionType {

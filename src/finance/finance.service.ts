@@ -1561,4 +1561,597 @@ export class FinanceService {
     };
   }
 
+
+  private dateKey(value: Date | string) {
+    const d = typeof value === "string" ? new Date(`${value}T00:00:00.000+07:00`) : value;
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  private addDays(dateText: string, days: number) {
+    const d = new Date(`${dateText}T00:00:00.000+07:00`);
+    d.setDate(d.getDate() + days);
+    return this.dateKey(d);
+  }
+
+  private daysBetween(dateFrom: string, dateTo: string) {
+    const result: string[] = [];
+    let cursor = dateFrom;
+    let guard = 0;
+
+    while (cursor <= dateTo && guard < 370) {
+      result.push(cursor);
+      cursor = this.addDays(cursor, 1);
+      guard += 1;
+    }
+
+    return result;
+  }
+
+  private async ensureDailyCashBalanceTable() {
+    await this.prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "DailyCashBalance" (
+        "id" TEXT PRIMARY KEY,
+        "date" DATE NOT NULL,
+        "branchId" TEXT NOT NULL,
+        "paymentSourceId" TEXT NOT NULL,
+        "openingBalance" NUMERIC(18,2) NOT NULL DEFAULT 0,
+        "totalReceipt" NUMERIC(18,2) NOT NULL DEFAULT 0,
+        "totalPayment" NUMERIC(18,2) NOT NULL DEFAULT 0,
+        "netAmount" NUMERIC(18,2) NOT NULL DEFAULT 0,
+        "closingBalance" NUMERIC(18,2) NOT NULL DEFAULT 0,
+        "countedAmount" NUMERIC(18,2),
+        "differenceAmount" NUMERIC(18,2),
+        "status" TEXT NOT NULL DEFAULT 'OPEN',
+        "note" TEXT,
+        "lockedAt" TIMESTAMP,
+        "lockedById" TEXT,
+        "lockedByName" TEXT,
+        "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
+        "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW(),
+        CONSTRAINT "DailyCashBalance_date_branchId_paymentSourceId_key" UNIQUE ("date", "branchId", "paymentSourceId")
+      );
+    `);
+
+    await this.prisma.$executeRawUnsafe(`
+      ALTER TABLE "DailyCashBalance"
+      ADD COLUMN IF NOT EXISTS "openingBalance" NUMERIC(18,2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "totalReceipt" NUMERIC(18,2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "totalPayment" NUMERIC(18,2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "netAmount" NUMERIC(18,2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "closingBalance" NUMERIC(18,2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "countedAmount" NUMERIC(18,2),
+      ADD COLUMN IF NOT EXISTS "differenceAmount" NUMERIC(18,2),
+      ADD COLUMN IF NOT EXISTS "status" TEXT NOT NULL DEFAULT 'OPEN',
+      ADD COLUMN IF NOT EXISTS "note" TEXT,
+      ADD COLUMN IF NOT EXISTS "lockedAt" TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS "lockedById" TEXT,
+      ADD COLUMN IF NOT EXISTS "lockedByName" TEXT,
+      ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
+      ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW();
+    `);
+
+    await this.prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "DailyCashBalance_date_idx" ON "DailyCashBalance" ("date");`);
+    await this.prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "DailyCashBalance_branchId_idx" ON "DailyCashBalance" ("branchId");`);
+    await this.prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "DailyCashBalance_paymentSourceId_idx" ON "DailyCashBalance" ("paymentSourceId");`);
+    await this.prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "DailyCashBalance_status_idx" ON "DailyCashBalance" ("status");`);
+  }
+
+  private ledgerKey(date: string, branchId: string, paymentSourceId: string) {
+    return `${date}|${branchId}|${paymentSourceId}`;
+  }
+
+  async getDailyLedger(params: {
+    dateFrom?: string;
+    dateTo?: string;
+    branchId?: string;
+    paymentSourceId?: string;
+  }, user?: any) {
+    await this.ensureDailyCashBalanceTable();
+    await this.ensureCashVoucherTable();
+
+    const { from, to, dateFrom, dateTo } = this.makeDateRange(params.dateFrom, params.dateTo);
+    const scopedBranchId = this.scopedBranchId(user, params.branchId);
+    const paymentSourceFilter = params.paymentSourceId && params.paymentSourceId !== "ALL"
+      ? params.paymentSourceId
+      : null;
+
+    const days = this.daysBetween(dateFrom, dateTo);
+
+    const branchRows = await this.prisma.branch.findMany({
+      where: scopedBranchId ? { id: scopedBranchId } : {},
+      select: { id: true, name: true },
+      orderBy: { name: "asc" },
+    });
+
+    const sourceRows = await this.prisma.paymentSource.findMany({
+      where: {
+        isActive: true,
+        ...(paymentSourceFilter ? { id: paymentSourceFilter } : {}),
+        ...(scopedBranchId ? { OR: [{ branchId: scopedBranchId }, { branchId: null }] } : {}),
+      },
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+    });
+
+    const paymentValues: any[] = [from, to];
+    const paymentWhere = [
+      `p."createdAt" BETWEEN $1 AND $2`,
+      `p."paymentSourceId" IS NOT NULL`,
+      `p."status" IN ('PAID', 'PARTIAL')`,
+      `COALESCE(ps."type", '') != 'COD'`,
+      `(COALESCE(o."salesChannel", '') != 'POS' OR o."status" = 'COMPLETED')`,
+    ];
+
+    if (scopedBranchId) {
+      paymentValues.push(scopedBranchId);
+      paymentWhere.push(`o."branchId" = $${paymentValues.length}`);
+    }
+
+    if (paymentSourceFilter) {
+      paymentValues.push(paymentSourceFilter);
+      paymentWhere.push(`p."paymentSourceId" = $${paymentValues.length}`);
+    }
+
+    const paymentGroups = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+        SELECT
+          TO_CHAR((p."createdAt" AT TIME ZONE 'Asia/Ho_Chi_Minh')::date, 'YYYY-MM-DD') AS "date",
+          o."branchId" AS "branchId",
+          COALESCE(b."name", o."branchId") AS "branchName",
+          p."paymentSourceId" AS "paymentSourceId",
+          COALESCE(ps."name", p."method", 'Chưa rõ') AS "paymentSourceName",
+          COALESCE(ps."code", p."paymentSourceId") AS "paymentSourceCode",
+          COALESCE(ps."type", '') AS "paymentSourceType",
+          COUNT(*)::int AS "paymentCount",
+          SUM(p."amount")::numeric AS "amount"
+        FROM "Payment" p
+        JOIN "Order" o ON o."id" = p."orderId"
+        LEFT JOIN "Branch" b ON b."id" = o."branchId"
+        LEFT JOIN "PaymentSource" ps ON ps."id" = p."paymentSourceId"
+        WHERE ${paymentWhere.join(" AND ")}
+        GROUP BY 1,2,3,4,5,6,7
+      `,
+      ...paymentValues,
+    );
+
+    const voucherValues: any[] = [from, to];
+    const voucherWhere = [
+      `v."createdAt" BETWEEN $1 AND $2`,
+      `COALESCE(v."status", 'DRAFT') = 'CONFIRMED'`,
+      `v."paymentSourceId" IS NOT NULL`,
+      `v."branchId" IS NOT NULL`,
+    ];
+
+    if (scopedBranchId) {
+      voucherValues.push(scopedBranchId);
+      voucherWhere.push(`v."branchId" = $${voucherValues.length}`);
+    }
+
+    if (paymentSourceFilter) {
+      voucherValues.push(paymentSourceFilter);
+      voucherWhere.push(`v."paymentSourceId" = $${voucherValues.length}`);
+    }
+
+    const voucherGroups = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+        SELECT
+          TO_CHAR((v."createdAt" AT TIME ZONE 'Asia/Ho_Chi_Minh')::date, 'YYYY-MM-DD') AS "date",
+          v."branchId" AS "branchId",
+          COALESCE(b."name", v."branchId") AS "branchName",
+          v."paymentSourceId" AS "paymentSourceId",
+          COALESCE(ps."name", ps."code", 'Tiền mặt') AS "paymentSourceName",
+          COALESCE(ps."code", v."paymentSourceId") AS "paymentSourceCode",
+          COALESCE(ps."type", '') AS "paymentSourceType",
+          ${this.cashVoucherTypeSql("v")} AS "type",
+          COUNT(*)::int AS "voucherCount",
+          SUM(v."amount")::numeric AS "amount"
+        FROM "CashVoucher" v
+        LEFT JOIN "Branch" b ON b."id" = v."branchId"
+        LEFT JOIN "PaymentSource" ps ON ps."id" = v."paymentSourceId"
+        WHERE ${voucherWhere.join(" AND ")}
+          AND NOT (
+            ${this.cashVoucherTypeSql("v")} = 'RECEIPT'
+            AND UPPER(COALESCE(v."refType", '')) = 'ORDER'
+            AND EXISTS (
+              SELECT 1
+              FROM "Payment" p2
+              WHERE p2."orderId" = v."refId"
+                AND p2."paymentSourceId" = v."paymentSourceId"
+                AND ROUND((p2."amount")::numeric, 0) = ROUND((v."amount")::numeric, 0)
+                AND p2."status" IN ('PAID', 'PARTIAL')
+            )
+          )
+        GROUP BY 1,2,3,4,5,6,7,8
+      `,
+      ...voucherValues,
+    );
+
+    const snapshotValues: any[] = [dateFrom, dateTo];
+    const snapshotWhere = [`d."date" BETWEEN $1::date AND $2::date`];
+    if (scopedBranchId) {
+      snapshotValues.push(scopedBranchId);
+      snapshotWhere.push(`d."branchId" = $${snapshotValues.length}`);
+    }
+    if (paymentSourceFilter) {
+      snapshotValues.push(paymentSourceFilter);
+      snapshotWhere.push(`d."paymentSourceId" = $${snapshotValues.length}`);
+    }
+
+    const snapshots = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+        SELECT
+          TO_CHAR(d."date", 'YYYY-MM-DD') AS "date",
+          d.*,
+          COALESCE(b."name", d."branchId") AS "branchName",
+          COALESCE(ps."name", ps."code", d."paymentSourceId") AS "paymentSourceName",
+          COALESCE(ps."code", d."paymentSourceId") AS "paymentSourceCode",
+          COALESCE(ps."type", '') AS "paymentSourceType"
+        FROM "DailyCashBalance" d
+        LEFT JOIN "Branch" b ON b."id" = d."branchId"
+        LEFT JOIN "PaymentSource" ps ON ps."id" = d."paymentSourceId"
+        WHERE ${snapshotWhere.join(" AND ")}
+      `,
+      ...snapshotValues,
+    );
+
+    const previousValues: any[] = [dateFrom];
+    const previousWhere = [`d."date" < $1::date`];
+    if (scopedBranchId) {
+      previousValues.push(scopedBranchId);
+      previousWhere.push(`d."branchId" = $${previousValues.length}`);
+    }
+    if (paymentSourceFilter) {
+      previousValues.push(paymentSourceFilter);
+      previousWhere.push(`d."paymentSourceId" = $${previousValues.length}`);
+    }
+
+    const previousSnapshots = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+        SELECT DISTINCT ON (d."branchId", d."paymentSourceId")
+          TO_CHAR(d."date", 'YYYY-MM-DD') AS "date",
+          d."branchId",
+          d."paymentSourceId",
+          d."closingBalance"
+        FROM "DailyCashBalance" d
+        WHERE ${previousWhere.join(" AND ")}
+        ORDER BY d."branchId", d."paymentSourceId", d."date" DESC
+      `,
+      ...previousValues,
+    );
+
+    const branchMap = new Map(branchRows.map((branch) => [String(branch.id), branch.name]));
+    const sourceMap = new Map<string, any>(sourceRows.map((source) => [String(source.id), source]));
+    const snapshotMap = new Map<string, any>();
+    const txnMap = new Map<string, any>();
+    const combos = new Map<string, any>();
+
+    const addCombo = (branchId: string, paymentSourceId: string, extra: any = {}) => {
+      if (!branchId || !paymentSourceId) return;
+      if (scopedBranchId && String(branchId) !== String(scopedBranchId)) return;
+      if (paymentSourceFilter && String(paymentSourceId) !== String(paymentSourceFilter)) return;
+      const key = `${branchId}|${paymentSourceId}`;
+      if (!combos.has(key)) {
+        const source = sourceMap.get(String(paymentSourceId));
+        combos.set(key, {
+          branchId,
+          branchName: extra.branchName || branchMap.get(String(branchId)) || branchId,
+          paymentSourceId,
+          paymentSourceName: extra.paymentSourceName || source?.name || paymentSourceId,
+          paymentSourceCode: extra.paymentSourceCode || source?.code || paymentSourceId,
+          paymentSourceType: extra.paymentSourceType || source?.type || "",
+        });
+      }
+    };
+
+    for (const source of sourceRows) {
+      if (source.branchId) {
+        addCombo(String(source.branchId), String(source.id), {
+          paymentSourceName: source.name,
+          paymentSourceCode: source.code,
+          paymentSourceType: source.type,
+        });
+      }
+    }
+
+    for (const row of paymentGroups) {
+      const key = this.ledgerKey(row.date, row.branchId, row.paymentSourceId);
+      const current = txnMap.get(key) || {
+        date: row.date,
+        branchId: row.branchId,
+        branchName: row.branchName,
+        paymentSourceId: row.paymentSourceId,
+        paymentSourceName: row.paymentSourceName,
+        paymentSourceCode: row.paymentSourceCode,
+        paymentSourceType: row.paymentSourceType,
+        posReceiptAmount: 0,
+        manualReceiptAmount: 0,
+        manualPaymentAmount: 0,
+        paymentCount: 0,
+        voucherReceiptCount: 0,
+        voucherPaymentCount: 0,
+      };
+      current.posReceiptAmount += this.toNumber(row.amount);
+      current.paymentCount += Number(row.paymentCount || 0);
+      txnMap.set(key, current);
+      addCombo(row.branchId, row.paymentSourceId, row);
+    }
+
+    for (const row of voucherGroups) {
+      const key = this.ledgerKey(row.date, row.branchId, row.paymentSourceId);
+      const current = txnMap.get(key) || {
+        date: row.date,
+        branchId: row.branchId,
+        branchName: row.branchName,
+        paymentSourceId: row.paymentSourceId,
+        paymentSourceName: row.paymentSourceName,
+        paymentSourceCode: row.paymentSourceCode,
+        paymentSourceType: row.paymentSourceType,
+        posReceiptAmount: 0,
+        manualReceiptAmount: 0,
+        manualPaymentAmount: 0,
+        paymentCount: 0,
+        voucherReceiptCount: 0,
+        voucherPaymentCount: 0,
+      };
+      if (String(row.type).toUpperCase() === "PAYMENT") {
+        current.manualPaymentAmount += this.toNumber(row.amount);
+        current.voucherPaymentCount += Number(row.voucherCount || 0);
+      } else {
+        current.manualReceiptAmount += this.toNumber(row.amount);
+        current.voucherReceiptCount += Number(row.voucherCount || 0);
+      }
+      txnMap.set(key, current);
+      addCombo(row.branchId, row.paymentSourceId, row);
+    }
+
+    for (const snapshot of snapshots) {
+      snapshotMap.set(this.ledgerKey(snapshot.date, snapshot.branchId, snapshot.paymentSourceId), snapshot);
+      addCombo(snapshot.branchId, snapshot.paymentSourceId, snapshot);
+    }
+
+    const previousClosing = new Map<string, number>();
+    for (const snapshot of previousSnapshots) {
+      previousClosing.set(`${snapshot.branchId}|${snapshot.paymentSourceId}`, this.toNumber(snapshot.closingBalance));
+      addCombo(snapshot.branchId, snapshot.paymentSourceId, snapshot);
+    }
+
+    const rows: any[] = [];
+
+    for (const date of days) {
+      const comboList = Array.from(combos.values()).sort((a, b) =>
+        String(a.branchName || "").localeCompare(String(b.branchName || ""), "vi") ||
+        String(a.paymentSourceName || "").localeCompare(String(b.paymentSourceName || ""), "vi")
+      );
+
+      for (const combo of comboList) {
+        const key = this.ledgerKey(date, combo.branchId, combo.paymentSourceId);
+        const comboKey = `${combo.branchId}|${combo.paymentSourceId}`;
+        const txn = txnMap.get(key) || {};
+        const snapshot = snapshotMap.get(key);
+        const isLocked = String(snapshot?.status || "OPEN").toUpperCase() === "LOCKED";
+
+        const openingBalance = snapshot
+          ? this.toNumber(snapshot.openingBalance)
+          : this.toNumber(previousClosing.get(comboKey) || 0);
+
+        const liveReceipt = this.toNumber(txn.posReceiptAmount) + this.toNumber(txn.manualReceiptAmount);
+        const livePayment = this.toNumber(txn.manualPaymentAmount);
+        const liveNet = liveReceipt - livePayment;
+        const liveClosing = openingBalance + liveNet;
+
+        const totalReceipt = isLocked ? this.toNumber(snapshot.totalReceipt) : liveReceipt;
+        const totalPayment = isLocked ? this.toNumber(snapshot.totalPayment) : livePayment;
+        const netAmount = isLocked ? this.toNumber(snapshot.netAmount) : totalReceipt - totalPayment;
+        const closingBalance = isLocked ? this.toNumber(snapshot.closingBalance) : openingBalance + netAmount;
+        const countedAmount = snapshot?.countedAmount == null ? null : this.toNumber(snapshot.countedAmount);
+        const differenceAmount = countedAmount == null ? null : countedAmount - closingBalance;
+
+        previousClosing.set(comboKey, closingBalance);
+
+        const hasActivity =
+          totalReceipt !== 0 ||
+          totalPayment !== 0 ||
+          openingBalance !== 0 ||
+          closingBalance !== 0 ||
+          Boolean(snapshot);
+
+        if (!hasActivity && days.length > 31) continue;
+
+        rows.push({
+          id: snapshot?.id || key,
+          date,
+          branchId: combo.branchId,
+          branchName: combo.branchName,
+          paymentSourceId: combo.paymentSourceId,
+          paymentSourceName: combo.paymentSourceName,
+          paymentSourceCode: combo.paymentSourceCode,
+          paymentSourceType: combo.paymentSourceType,
+          openingBalance,
+          posReceiptAmount: isLocked ? null : this.toNumber(txn.posReceiptAmount),
+          manualReceiptAmount: isLocked ? null : this.toNumber(txn.manualReceiptAmount),
+          manualPaymentAmount: isLocked ? null : this.toNumber(txn.manualPaymentAmount),
+          totalReceipt,
+          totalPayment,
+          netAmount,
+          closingBalance,
+          countedAmount,
+          differenceAmount,
+          status: snapshot?.status || "OPEN",
+          note: snapshot?.note || null,
+          lockedAt: snapshot?.lockedAt || null,
+          lockedById: snapshot?.lockedById || null,
+          lockedByName: snapshot?.lockedByName || null,
+          paymentCount: Number(txn.paymentCount || 0),
+          voucherReceiptCount: Number(txn.voucherReceiptCount || 0),
+          voucherPaymentCount: Number(txn.voucherPaymentCount || 0),
+        });
+      }
+    }
+
+    const summary = rows.reduce(
+      (acc, row) => {
+        acc.openingBalance += this.toNumber(row.openingBalance);
+        acc.totalReceipt += this.toNumber(row.totalReceipt);
+        acc.totalPayment += this.toNumber(row.totalPayment);
+        acc.netAmount += this.toNumber(row.netAmount);
+        acc.closingBalance += this.toNumber(row.closingBalance);
+        if (row.status === "LOCKED") acc.lockedRows += 1;
+        if (row.differenceAmount !== null && row.differenceAmount !== 0) acc.diffRows += 1;
+        return acc;
+      },
+      {
+        openingBalance: 0,
+        totalReceipt: 0,
+        totalPayment: 0,
+        netAmount: 0,
+        closingBalance: 0,
+        lockedRows: 0,
+        diffRows: 0,
+        totalRows: rows.length,
+      }
+    );
+
+    summary.totalRows = rows.length;
+
+    return {
+      dateFrom,
+      dateTo,
+      summary,
+      rows,
+    };
+  }
+
+  async closeDailyLedger(body: {
+    date: string;
+    branchId: string;
+    paymentSourceId: string;
+    countedAmount?: number;
+    note?: string;
+    lockedById?: string;
+    lockedByName?: string;
+  }, user?: any) {
+    if (!body.date || !body.branchId || !body.paymentSourceId) {
+      throw new BadRequestException("Thiếu ngày, chi nhánh hoặc nguồn tiền cần chốt.");
+    }
+
+    this.ensureBranchScope(user, body.branchId);
+    await this.ensureDailyCashBalanceTable();
+
+    const data = await this.getDailyLedger({
+      dateFrom: body.date,
+      dateTo: body.date,
+      branchId: body.branchId,
+      paymentSourceId: body.paymentSourceId,
+    }, user);
+
+    const row = data.rows.find((item: any) =>
+      item.date === body.date &&
+      String(item.branchId) === String(body.branchId) &&
+      String(item.paymentSourceId) === String(body.paymentSourceId)
+    );
+
+    if (!row) {
+      throw new BadRequestException("Không tìm thấy dòng sổ quỹ cần chốt.");
+    }
+
+    const countedAmount = body.countedAmount === undefined || body.countedAmount === null || body.countedAmount === ("" as any)
+      ? null
+      : this.toNumber(body.countedAmount);
+    const closingBalance = this.toNumber(row.closingBalance);
+    const differenceAmount = countedAmount === null ? null : countedAmount - closingBalance;
+    const id = row.id && !String(row.id).includes("|") ? row.id : `dcb_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+
+    const rows = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+        INSERT INTO "DailyCashBalance" (
+          "id", "date", "branchId", "paymentSourceId",
+          "openingBalance", "totalReceipt", "totalPayment", "netAmount", "closingBalance",
+          "countedAmount", "differenceAmount", "status", "note",
+          "lockedAt", "lockedById", "lockedByName", "createdAt", "updatedAt"
+        ) VALUES (
+          $1, $2::date, $3, $4,
+          $5, $6, $7, $8, $9,
+          $10, $11, 'LOCKED', $12,
+          NOW(), $13, $14, NOW(), NOW()
+        )
+        ON CONFLICT ("date", "branchId", "paymentSourceId") DO UPDATE SET
+          "openingBalance" = EXCLUDED."openingBalance",
+          "totalReceipt" = EXCLUDED."totalReceipt",
+          "totalPayment" = EXCLUDED."totalPayment",
+          "netAmount" = EXCLUDED."netAmount",
+          "closingBalance" = EXCLUDED."closingBalance",
+          "countedAmount" = EXCLUDED."countedAmount",
+          "differenceAmount" = EXCLUDED."differenceAmount",
+          "status" = 'LOCKED',
+          "note" = EXCLUDED."note",
+          "lockedAt" = NOW(),
+          "lockedById" = EXCLUDED."lockedById",
+          "lockedByName" = EXCLUDED."lockedByName",
+          "updatedAt" = NOW()
+        RETURNING *
+      `,
+      id,
+      body.date,
+      body.branchId,
+      body.paymentSourceId,
+      this.toNumber(row.openingBalance),
+      this.toNumber(row.totalReceipt),
+      this.toNumber(row.totalPayment),
+      this.toNumber(row.netAmount),
+      closingBalance,
+      countedAmount,
+      differenceAmount,
+      body.note?.trim() || null,
+      body.lockedById || user?.id || null,
+      body.lockedByName || user?.name || user?.username || user?.email || null,
+    );
+
+    return rows[0];
+  }
+
+  async reopenDailyLedger(body: {
+    date: string;
+    branchId: string;
+    paymentSourceId: string;
+    note?: string;
+  }, user?: any) {
+    if (!body.date || !body.branchId || !body.paymentSourceId) {
+      throw new BadRequestException("Thiếu ngày, chi nhánh hoặc nguồn tiền cần mở lại.");
+    }
+
+    this.ensureBranchScope(user, body.branchId);
+    await this.ensureDailyCashBalanceTable();
+
+    const rows = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+        UPDATE "DailyCashBalance"
+        SET
+          "status" = 'OPEN',
+          "countedAmount" = NULL,
+          "differenceAmount" = NULL,
+          "lockedAt" = NULL,
+          "lockedById" = NULL,
+          "lockedByName" = NULL,
+          "note" = COALESCE($4, "note"),
+          "updatedAt" = NOW()
+        WHERE "date" = $1::date
+          AND "branchId" = $2
+          AND "paymentSourceId" = $3
+        RETURNING *
+      `,
+      body.date,
+      body.branchId,
+      body.paymentSourceId,
+      body.note?.trim() || null,
+    );
+
+    if (!rows.length) {
+      throw new NotFoundException("Không tìm thấy dòng sổ quỹ đã chốt để mở lại.");
+    }
+
+    return rows[0];
+  }
+
 }

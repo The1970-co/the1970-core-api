@@ -123,6 +123,57 @@ export class FinanceController {
     });
   }
 
+
+  @Get("daily-ledger")
+  @RequirePermissions("finance.view")
+  getDailyLedger(
+    @Req() req: any,
+    @Query("dateFrom") dateFrom?: string,
+    @Query("dateTo") dateTo?: string,
+    @Query("branchId") branchId?: string,
+    @Query("paymentSourceId") paymentSourceId?: string
+  ) {
+    return this.financeService.getDailyLedger({
+      dateFrom,
+      dateTo,
+      branchId,
+      paymentSourceId,
+    }, req.user);
+  }
+
+  @Post("daily-ledger/close")
+  closeDailyLedger(
+    @Req() req: any,
+    @Body()
+    body: {
+      date: string;
+      branchId: string;
+      paymentSourceId: string;
+      countedAmount?: number;
+      note?: string;
+      lockedById?: string;
+      lockedByName?: string;
+    }
+  ) {
+    this.ensureAnyPermission(req.user, ["finance.manage", "system.manage", "cash_voucher.confirm_receipt", "cash_voucher.confirm_payment"]);
+    return this.financeService.closeDailyLedger(body, req.user);
+  }
+
+  @Post("daily-ledger/reopen")
+  reopenDailyLedger(
+    @Req() req: any,
+    @Body()
+    body: {
+      date: string;
+      branchId: string;
+      paymentSourceId: string;
+      note?: string;
+    }
+  ) {
+    this.ensureAnyPermission(req.user, ["finance.manage", "system.manage"]);
+    return this.financeService.reopenDailyLedger(body, req.user);
+  }
+
   @Get("cash-vouchers")
   getCashVouchers(
     @Req() req: any,
