@@ -1010,6 +1010,34 @@ export class OrderService {
     }
   }
 
+
+  private calculatePaidAmountFromPayments(order: any) {
+    const payments = Array.isArray(order?.payments) ? order.payments : [];
+
+    return payments.reduce((sum: number, payment: any) => {
+      const sourceType = String(
+        payment?.paymentSource?.type || payment?.sourceType || ""
+      ).toUpperCase();
+      const status = String(payment?.status || "").toUpperCase();
+
+      if (sourceType === "COD" || status === "PENDING_COD") {
+        return sum;
+      }
+
+      if (status !== "PAID" && status !== "PARTIAL") {
+        return sum;
+      }
+
+      return sum + this.toNumber(payment?.amount);
+    }, 0);
+  }
+
+  private calculateRemainingCodAmount(order: any) {
+    const finalAmount = this.toNumber(order?.finalAmount);
+    const paidAmount = this.calculatePaidAmountFromPayments(order);
+    return Math.max(0, Math.round(finalAmount - paidAmount));
+  }
+
   private async createShipmentIfNeeded(order: any, body: any) {
     const mode = this.resolveMode(body);
     if (mode !== "ship") return null;
@@ -1163,7 +1191,7 @@ export class OrderService {
       toAddress: snapshot.shippingAddressLine1,
       toWardCode: snapshot.ghnWardCode,
       toDistrictId: Number(snapshot.ghnDistrictId),
-      codAmount: this.toNumber(order.finalAmount),
+      codAmount: this.calculateRemainingCodAmount(order),
       content: `Đơn hàng ${order.orderCode}`,
       note: snapshot.shippingNote || snapshot.note || body?.paymentNote || "",
       requiredNote: snapshot.requiredNote || "KHONGCHOXEMHANG",
@@ -2953,6 +2981,11 @@ export class OrderService {
       include: {
         items: true,
         shipment: true,
+        payments: {
+          include: {
+            paymentSource: true,
+          },
+        },
       },
     });
 
@@ -2978,7 +3011,7 @@ export class OrderService {
         trackingCode,
         shippingStatus: "SHIPPED",
         shippingFee: new Prisma.Decimal(shippingFee),
-        codAmount: new Prisma.Decimal(this.toNumber(order.finalAmount)),
+        codAmount: new Prisma.Decimal(this.calculateRemainingCodAmount(order)),
       },
       create: {
         orderId: id,
@@ -2986,7 +3019,7 @@ export class OrderService {
         trackingCode,
         shippingStatus: "SHIPPED",
         shippingFee: new Prisma.Decimal(shippingFee),
-        codAmount: new Prisma.Decimal(this.toNumber(order.finalAmount)),
+        codAmount: new Prisma.Decimal(this.calculateRemainingCodAmount(order)),
       },
     });
 
