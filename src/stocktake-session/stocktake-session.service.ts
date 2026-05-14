@@ -108,7 +108,15 @@ export class StocktakeSessionService {
       return { created: 0, skipped: existing };
     }
 
-    const inventoryItems = await this.prisma.inventoryItem.findMany({
+        const sessionForSnapshot = await this.prisma.stocktakeSession.findUnique({
+      where: { id: sessionId },
+      select: { branchId: true },
+    });
+if (!branchId) {
+      throw new Error('Phiên kiểm chưa có chi nhánh, không thể tạo snapshot kiểm kho.');
+    }
+
+const inventoryItems = await this.prisma.inventoryItem.findMany({
       where: { branchId },
       select: {
         variantId: true,

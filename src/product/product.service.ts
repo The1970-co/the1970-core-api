@@ -51,11 +51,12 @@ type AddVariantInput = {
 
 @Injectable()
 export class ProductService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(private readonly prisma: PrismaService) {}
 
   private toNumber(value: unknown) {
     if (value === null || value === undefined || value === "") return 0;
-    if (typeof value === "number") return Number.isFinite(value) ? Math.round(value) : 0;
+    if (typeof value === "number")
+      return Number.isFinite(value) ? Math.round(value) : 0;
 
     let raw = String(value).trim().replace(/\s/g, "");
     if (!raw) return 0;
@@ -197,7 +198,8 @@ export class ProductService {
     colorImages: Record<string, string>,
   ) {
     const entries = Object.entries(colorImages).filter(
-      ([color, image]) => this.normalizeColorKey(color) && String(image || "").trim(),
+      ([color, image]) =>
+        this.normalizeColorKey(color) && String(image || "").trim(),
     );
 
     if (!entries.length) return;
@@ -214,7 +216,6 @@ export class ProductService {
       });
     }
   }
-
 
   private findValue(row: Record<string, unknown>, keys: string[]) {
     const rowKeys = Object.keys(row);
@@ -237,7 +238,6 @@ export class ProductService {
     return "";
   }
 
-
   private findRawValue(row: Record<string, unknown>, keys: string[]) {
     const rowKeys = Object.keys(row);
     for (const key of keys) {
@@ -247,7 +247,11 @@ export class ProductService {
       );
       if (matched) {
         const value = row[matched];
-        if (value !== undefined && value !== null && String(value).trim() !== "") {
+        if (
+          value !== undefined &&
+          value !== null &&
+          String(value).trim() !== ""
+        ) {
           return value;
         }
       }
@@ -257,7 +261,9 @@ export class ProductService {
 
   private excelColumnToIndex(column: string) {
     let result = 0;
-    const clean = String(column || "").trim().toUpperCase();
+    const clean = String(column || "")
+      .trim()
+      .toUpperCase();
     for (const char of clean) {
       const code = char.charCodeAt(0);
       if (code < 65 || code > 90) continue;
@@ -283,8 +289,8 @@ export class ProductService {
         "costPrice",
         "cost price",
       ]) ||
-      this.findValueByColumn(row, "BB") ||
-      this.findValueByColumn(row, "BD"),
+        this.findValueByColumn(row, "BB") ||
+        this.findValueByColumn(row, "BD"),
     );
   }
 
@@ -302,80 +308,22 @@ export class ProductService {
     );
   }
 
-  private getImportRawByHeaderOrColumn(
-    row: Record<string, unknown>,
-    keys: string[],
-    column?: string,
-  ) {
-    const byHeader = this.findRawValue(row, keys);
-    if (byHeader !== "") return byHeader;
-
-    if (column) {
-      const byColumn = this.findValueByColumn(row, column);
-      if (byColumn !== undefined && byColumn !== null && String(byColumn).trim() !== "") {
-        return byColumn;
-      }
-    }
-
-    return "";
-  }
-
-  private hasImportValue(
-    row: Record<string, unknown>,
-    keys: string[],
-    column?: string,
-  ) {
-    return this.getImportRawByHeaderOrColumn(row, keys, column) !== "";
-  }
-
-  private getOptionalRetailPrice(row: Record<string, unknown>) {
-    const keys = [
-      "PL_Giá bán lẻ",
-      "PL Gia ban le",
-      "Giá bán lẻ",
-      "Gia ban le",
-      "Giá bán",
-      "Gia ban",
-      "price",
-    ];
-
-    const raw = this.getImportRawByHeaderOrColumn(row, keys, "BA");
-    return raw === "" ? undefined : this.toNumber(raw);
-  }
-
-  private getOptionalImportPrice(row: Record<string, unknown>) {
-    const keys = [
-      "Giá nhập",
-      "Gia nhap",
-      "Giá vốn",
-      "Gia von",
-      "costPrice",
-      "cost price",
-      "PL_Giá nhập",
-      "PL Gia nhap",
-      "PL_Giá vốn",
-      "PL Gia von",
-    ];
-
-    const raw =
-      this.getImportRawByHeaderOrColumn(row, keys, "BB") ||
-      this.getImportRawByHeaderOrColumn(row, keys, "BD");
-
-    return raw === "" ? undefined : this.toNumber(raw);
+  private hasAnyImportValue(row: Record<string, unknown>, keys: string[]) {
+    return Boolean(this.findRawValue(row, keys));
   }
 
   private getBranchStocksFromImportRow(row: Record<string, unknown>) {
-    // Chỉ cập nhật tồn kho nếu file thật sự có cột tồn kho.
-    // File chỉ dùng sửa SKU / thêm màu / dán ảnh không có cột tồn thì không được xoá hoặc đưa tồn cũ về 0.
-    const stockFields: Array<{
-      key: "CL" | "XD" | "QO" | "TH";
+    // Quan trọng: chỉ cập nhật tồn kho nếu file THỰC SỰ có cột tồn.
+    // Không tự suy diễn cột trống thành 0, tránh xoá/mất tồn khi chỉ import SKU/ảnh.
+    const branchConfigs: Array<{
+      branchKey: string;
       column: string;
-      labels: string[];
+      keys: string[];
     }> = [
       {
-        key: "CL",
+        branchKey: "CL",
         column: "AB",
-        labels: [
+        keys: [
           "CL",
           "Chùa Láng",
           "Chua Lang",
@@ -384,14 +332,12 @@ export class ProductService {
           "Tồn Chùa Láng",
           "Ton Chua Lang",
           "LC_CN1",
-          "LC_CN1_Tồn kho ban đầu",
-          "LC_CN1_Ton kho ban dau",
         ],
       },
       {
-        key: "XD",
+        branchKey: "XD",
         column: "AV",
-        labels: [
+        keys: [
           "XD",
           "Xã Đàn",
           "Xa Dan",
@@ -400,14 +346,12 @@ export class ProductService {
           "Tồn Xã Đàn",
           "Ton Xa Dan",
           "LC_CN2",
-          "LC_CN2_Tồn kho ban đầu",
-          "LC_CN2_Ton kho ban dau",
         ],
       },
       {
-        key: "QO",
+        branchKey: "QO",
         column: "AQ",
-        labels: [
+        keys: [
           "QO",
           "Quốc Oai",
           "Quoc Oai",
@@ -417,14 +361,12 @@ export class ProductService {
           "Tồn Quốc Oai",
           "Ton Quoc Oai",
           "LC_CN3",
-          "LC_CN3_Tồn kho ban đầu",
-          "LC_CN3_Ton kho ban dau",
         ],
       },
       {
-        key: "TH",
+        branchKey: "TH",
         column: "AL",
-        labels: [
+        keys: [
           "TH",
           "Thái Hà",
           "Thai Ha",
@@ -433,29 +375,22 @@ export class ProductService {
           "Tồn Thái Hà",
           "Ton Thai Ha",
           "LC_CN4",
-          "LC_CN4_Tồn kho ban đầu",
-          "LC_CN4_Ton kho ban dau",
         ],
       },
     ];
 
     const output: BranchStockMap = {};
 
-    for (const field of stockFields) {
-      const raw = this.getImportRawByHeaderOrColumn(row, field.labels, field.column);
-      if (raw === "") continue;
-      output[field.key] = this.toNumber(raw);
+    for (const config of branchConfigs) {
+      const rawByName = this.findRawValue(row, config.keys);
+      const rawByColumn = this.findValueByColumn(row, config.column);
+      const raw = rawByName !== "" ? rawByName : rawByColumn;
+
+      if (raw === "" || raw === undefined || raw === null) continue;
+      output[config.branchKey] = this.toNumber(raw);
     }
 
     return output;
-  }
-
-  private normalizeVariantMatchPart(value: unknown) {
-    return this.normalizeHeader(value).replace(/\s+/g, "");
-  }
-
-  private buildVariantMatchKey(color: unknown, size: unknown) {
-    return `${this.normalizeVariantMatchPart(color)}__${this.normalizeVariantMatchPart(size)}`;
   }
 
   private getImportMainImageUrl(row: Record<string, unknown>) {
@@ -475,7 +410,10 @@ export class ProductService {
     ]);
   }
 
-  private getImportVariantImageUrl(row: Record<string, unknown>, color: string) {
+  private getImportVariantImageUrl(
+    row: Record<string, unknown>,
+    color: string,
+  ) {
     const colorText = String(color || "").trim();
     const colorKey = this.normalizeColorKey(colorText);
 
@@ -517,7 +455,6 @@ export class ProductService {
 
     return this.findValue(row, dynamicKeys);
   }
-
 
   private getMainSkuCode(sku: string) {
     return String(sku || "")
@@ -634,17 +571,17 @@ export class ProductService {
         : { status: status as ProductStatus }),
       ...(q
         ? {
-          OR: [
-            { name: { contains: q, mode: "insensitive" } },
-            { slug: { contains: q, mode: "insensitive" } },
-            { category: { contains: q, mode: "insensitive" } },
-            {
-              variants: {
-                some: { sku: { contains: q, mode: "insensitive" } },
+            OR: [
+              { name: { contains: q, mode: "insensitive" } },
+              { slug: { contains: q, mode: "insensitive" } },
+              { category: { contains: q, mode: "insensitive" } },
+              {
+                variants: {
+                  some: { sku: { contains: q, mode: "insensitive" } },
+                },
               },
-            },
-          ],
-        }
+            ],
+          }
         : {}),
     };
 
@@ -697,7 +634,9 @@ export class ProductService {
         ...product,
         category: product.categoryRel?.name || product.category,
         colorImages: this.buildColorImagesFromVariants(product.variants as any),
-        imagesByColor: this.buildColorImagesFromVariants(product.variants as any),
+        imagesByColor: this.buildColorImagesFromVariants(
+          product.variants as any,
+        ),
         variants: product.variants.map((variant) => {
           const inventoryByBranch = this.buildInventoryByBranch(
             variant.inventoryItems.map((item) => ({
@@ -733,103 +672,100 @@ export class ProductService {
     };
   }
 
-async getProductById(id: string) {
-  const product = await this.prisma.product.findUnique({
-    where: { id },
-    include: {
-      categoryRel: true,
-      variants: {
-        include: {
-          inventoryItems: true,
+  async getProductById(id: string) {
+    const product = await this.prisma.product.findUnique({
+      where: { id },
+      include: {
+        categoryRel: true,
+        variants: {
+          include: {
+            inventoryItems: true,
+          },
+          orderBy: { createdAt: "asc" },
         },
-        orderBy: { createdAt: "asc" },
       },
-    },
-  });
-
-  if (!product) {
-    return null;
-  }
-
-  return {
-    ...product,
-    category: product.categoryRel?.name || product.category,
-    colorImages: this.buildColorImagesFromVariants(product.variants as any),
-    imagesByColor: this.buildColorImagesFromVariants(product.variants as any),
-    variants: product.variants.map((variant) => {
-      const inventoryByBranch = this.buildInventoryByBranch(
-        variant.inventoryItems.map((item) => ({
-          branchId: item.branchId,
-          availableQty: Number(item.availableQty || 0),
-          reservedQty: Number(item.reservedQty || 0),
-          incomingQty: Number(item.incomingQty || 0),
-        })),
-      );
-
-      const stock = variant.inventoryItems.reduce(
-        (sum, item) => sum + Number(item.availableQty || 0),
-        0,
-      );
-
-      const price = Number(variant.price || 0);
-      const costPrice = Number(variant.costPrice || 0);
-
-      return {
-        ...variant,
-        price,
-        costPrice,
-        stock,
-        inventoryByBranch,
-        inventorySaleValue: price * stock,
-        inventoryCostValue: costPrice * stock,
-      };
-    }),
-  };
-}
-async getMissingCostProducts() {
-  const variants = await this.prisma.productVariant.findMany({
-    where: {
-      OR: [
-        { costPrice: null },
-        { costPrice: 0 },
-      ],
-    },
-    include: {
-      product: true,
-    },
-    take: 1000,
-  });
-
-  return {
-    success: true,
-    total: variants.length,
-    data: variants,
-  };
-}
-
-async updateMissingCostBulk(
-  items: Array<{ variantId: string; sku?: string; costPrice: number }>,
-) {
-  if (!Array.isArray(items) || items.length === 0) {
-    return { success: true, updated: 0 };
-  }
-
-  let updated = 0;
-
-  for (const item of items) {
-    const costPrice = this.toNumber(item.costPrice);
-    if (!item.variantId || costPrice <= 0) continue;
-
-    await this.prisma.productVariant.update({
-      where: { id: item.variantId },
-      data: { costPrice: new Prisma.Decimal(costPrice) },
     });
 
-    updated += 1;
+    if (!product) {
+      return null;
+    }
+
+    return {
+      ...product,
+      category: product.categoryRel?.name || product.category,
+      colorImages: this.buildColorImagesFromVariants(product.variants as any),
+      imagesByColor: this.buildColorImagesFromVariants(product.variants as any),
+      variants: product.variants.map((variant) => {
+        const inventoryByBranch = this.buildInventoryByBranch(
+          variant.inventoryItems.map((item) => ({
+            branchId: item.branchId,
+            availableQty: Number(item.availableQty || 0),
+            reservedQty: Number(item.reservedQty || 0),
+            incomingQty: Number(item.incomingQty || 0),
+          })),
+        );
+
+        const stock = variant.inventoryItems.reduce(
+          (sum, item) => sum + Number(item.availableQty || 0),
+          0,
+        );
+
+        const price = Number(variant.price || 0);
+        const costPrice = Number(variant.costPrice || 0);
+
+        return {
+          ...variant,
+          price,
+          costPrice,
+          stock,
+          inventoryByBranch,
+          inventorySaleValue: price * stock,
+          inventoryCostValue: costPrice * stock,
+        };
+      }),
+    };
+  }
+  async getMissingCostProducts() {
+    const variants = await this.prisma.productVariant.findMany({
+      where: {
+        OR: [{ costPrice: null }, { costPrice: 0 }],
+      },
+      include: {
+        product: true,
+      },
+      take: 1000,
+    });
+
+    return {
+      success: true,
+      total: variants.length,
+      data: variants,
+    };
   }
 
-  return { success: true, updated };
-}
+  async updateMissingCostBulk(
+    items: Array<{ variantId: string; sku?: string; costPrice: number }>,
+  ) {
+    if (!Array.isArray(items) || items.length === 0) {
+      return { success: true, updated: 0 };
+    }
+
+    let updated = 0;
+
+    for (const item of items) {
+      const costPrice = this.toNumber(item.costPrice);
+      if (!item.variantId || costPrice <= 0) continue;
+
+      await this.prisma.productVariant.update({
+        where: { id: item.variantId },
+        data: { costPrice: new Prisma.Decimal(costPrice) },
+      });
+
+      updated += 1;
+    }
+
+    return { success: true, updated };
+  }
 
   async createProduct(data: CreateProductInput) {
     if (!data.name?.trim()) {
@@ -1004,23 +940,23 @@ async updateMissingCostBulk(
       Array.isArray(data.colors) && data.colors.length
         ? data.colors.map((x) => String(x).trim()).filter(Boolean)
         : Array.from(
-          new Set(
-            existing.variants
-              .map((v) => String(v.color || "").trim())
-              .filter(Boolean),
-          ),
-        );
+            new Set(
+              existing.variants
+                .map((v) => String(v.color || "").trim())
+                .filter(Boolean),
+            ),
+          );
 
     const sizes =
       Array.isArray(data.sizes) && data.sizes.length
         ? data.sizes.map((x) => String(x).trim()).filter(Boolean)
         : Array.from(
-          new Set(
-            existing.variants
-              .map((v) => String(v.size || "").trim())
-              .filter(Boolean),
-          ),
-        );
+            new Set(
+              existing.variants
+                .map((v) => String(v.size || "").trim())
+                .filter(Boolean),
+            ),
+          );
 
     if (!colors.length || !sizes.length) {
       throw new BadRequestException("Cần ít nhất 1 màu và 1 size");
@@ -1071,23 +1007,24 @@ async updateMissingCostBulk(
           variantId: found.id,
           color: combo.color,
           size: combo.size,
-          // Không tự build lại SKU cho variant đã tồn tại.
-          // SKU trong hệ thống hoặc SKU import Excel là mã chuẩn, tránh lỗi AK862-X-S bị đổi thành AK862-XANHĐẬM-S.
-          sku: found.sku,
+          sku: combo.sku,
         };
       })
       .filter(Boolean) as Array<{
-        variantId: string;
-        color: string;
-        size: string;
-        sku: string;
-      }>;
+      variantId: string;
+      color: string;
+      size: string;
+      sku: string;
+    }>;
 
     const wantedKeys = new Set(wantedCombos.map((combo) => combo.key));
 
-    // Không xoá variant chỉ vì màu/size không xuất hiện trong form hiện tại.
-    // Việc import Excel / sửa ảnh / sửa vài màu không được làm mất SKU cũ.
-    const variantsToDelete: typeof existing.variants = [];
+    const variantsToDelete = existing.variants.filter(
+      (variant) =>
+        !wantedKeys.has(
+          `${String(variant.color || "").trim()}__${String(variant.size || "").trim()}`,
+        ),
+    );
 
     const result = await this.prisma.$transaction(
       async (tx) => {
@@ -1116,17 +1053,17 @@ async updateMissingCostBulk(
               color: item.color,
               size: item.size,
               ...(data.applyPriceToAllVariants &&
-                data.defaultPrice !== undefined
+              data.defaultPrice !== undefined
                 ? {
-                  price: new Prisma.Decimal(this.toNumber(data.defaultPrice)),
-                }
+                    price: new Prisma.Decimal(this.toNumber(data.defaultPrice)),
+                  }
                 : {}),
               ...(data.defaultCostPrice !== undefined
                 ? {
-                  costPrice: new Prisma.Decimal(
-                    this.toNumber(data.defaultCostPrice),
-                  ),
-                }
+                    costPrice: new Prisma.Decimal(
+                      this.toNumber(data.defaultCostPrice),
+                    ),
+                  }
                 : {}),
             },
           });
@@ -1138,9 +1075,9 @@ async updateMissingCostBulk(
           const created = await tx.productVariant.create({
             data: {
               productId,
-              sku: item.sku,
               color: item.color,
               size: item.size,
+              sku: item.sku,
               price: new Prisma.Decimal(this.toNumber(data.defaultPrice)),
               costPrice: new Prisma.Decimal(
                 this.toNumber(data.defaultCostPrice),
@@ -1152,21 +1089,8 @@ async updateMissingCostBulk(
           createdVariantIds.push(created.id);
         }
 
-        if (variantsToDelete.length > 0) {
-          const deleteIds = variantsToDelete.map((item) => item.id);
-
-          await tx.inventoryItem.deleteMany({
-            where: {
-              variantId: { in: deleteIds },
-            },
-          });
-
-          await tx.productVariant.deleteMany({
-            where: {
-              id: { in: deleteIds },
-            },
-          });
-        }
+        // Không xoá variant chỉ vì form/file hiện tại không liệt kê đủ màu/size.
+        // Tránh mất SKU/tồn kho khi người dùng chỉ muốn cập nhật một phần.
 
         return {
           updatedProduct,
@@ -1221,7 +1145,6 @@ async updateMissingCostBulk(
     return result.updatedProduct;
   }
 
-
   async updateProductImages(
     productId: string,
     data: {
@@ -1261,12 +1184,20 @@ async updateMissingCostBulk(
   }
 
   private looksLikePriceToken(value: string) {
-    const clean = String(value || "").trim().toLowerCase();
+    const clean = String(value || "")
+      .trim()
+      .toLowerCase();
     if (!clean) return false;
-    return /\d/.test(clean) && (clean.includes("đ") || clean.includes(".") || clean.includes(","));
+    return (
+      /\d/.test(clean) &&
+      (clean.includes("đ") || clean.includes(".") || clean.includes(","))
+    );
   }
 
-  private parseVariantOptionsFromImport(row: Record<string, unknown>, sku: string) {
+  private parseVariantOptionsFromImport(
+    row: Record<string, unknown>,
+    sku: string,
+  ) {
     const explicitColor = this.findValue(row, [
       "Giá trị thuộc tính 1",
       "gia tri thuoc tinh 1",
@@ -1329,6 +1260,8 @@ async updateMissingCostBulk(
       color: this.normalizeVariantOption(color, "DEFAULT"),
       size: this.normalizeVariantOption(size, "DEFAULT"),
       variantName,
+      hasExplicitColor: Boolean(String(explicitColor || "").trim()),
+      hasExplicitSize: Boolean(String(explicitSize || "").trim()),
     };
   }
 
@@ -1344,13 +1277,58 @@ async updateMissingCostBulk(
     const cleanVariantName = String(variantName || "").trim();
     if (!cleanVariantName) return parentSku;
 
-    const parentIndex = cleanVariantName.toUpperCase().indexOf(parentSku.toUpperCase());
+    const parentIndex = cleanVariantName
+      .toUpperCase()
+      .indexOf(parentSku.toUpperCase());
     if (parentIndex >= 0) {
       const end = parentIndex + parentSku.length;
       return cleanVariantName.slice(0, end).trim();
     }
 
     return cleanVariantName;
+  }
+
+  private normalizeComboKey(color: unknown, size: unknown) {
+    return `${this.normalizeHeader(color)}__${this.normalizeHeader(size)}`;
+  }
+
+  private getVariantTotalStockForImport(variant: any) {
+    const items = Array.isArray(variant?.inventoryItems)
+      ? variant.inventoryItems
+      : [];
+    return items.reduce(
+      (sum: number, item: any) => sum + this.toNumber(item?.availableQty),
+      0,
+    );
+  }
+
+  private hasRetailPriceInput(row: Record<string, unknown>) {
+    return Boolean(
+      this.findRawValue(row, [
+        "PL_Giá bán lẻ",
+        "PL Gia ban le",
+        "Giá bán lẻ",
+        "Gia ban le",
+        "Giá bán",
+        "Gia ban",
+        "price",
+      ]) || this.findValueByColumn(row, "BA"),
+    );
+  }
+
+  private hasImportPriceInput(row: Record<string, unknown>) {
+    return Boolean(
+      this.findRawValue(row, [
+        "Giá nhập",
+        "Gia nhap",
+        "Giá vốn",
+        "Gia von",
+        "costPrice",
+        "cost price",
+      ]) ||
+      this.findValueByColumn(row, "BB") ||
+      this.findValueByColumn(row, "BD"),
+    );
   }
 
   async importProducts(files: Express.Multer.File[], overwrite = true) {
@@ -1363,13 +1341,20 @@ async updateMissingCostBulk(
     const errors: string[] = [];
 
     type VariantSeed = {
+      variantName: string;
       color: string;
       size: string;
       sku: string;
       imageUrl: string;
-      retailPrice?: number;
-      importPrice?: number;
+      retailPrice: number;
+      importPrice: number;
       branchStocks: BranchStockMap;
+      hasExplicitColor: boolean;
+      hasExplicitSize: boolean;
+      hasRetailPrice: boolean;
+      hasImportPrice: boolean;
+      hasBranchStocks: boolean;
+      allowCreate: boolean;
     };
 
     type ProductSeed = {
@@ -1383,9 +1368,8 @@ async updateMissingCostBulk(
       variants: VariantSeed[];
     };
 
-    // Product = mã SKU chính, ví dụ AK862 / SM936 / AB797.
-    // Variant = full SKU, ví dụ AK862-X-S.
-    // Import kiểu PATCH: file có cột nào thì cập nhật cột đó, không có thì giữ nguyên dữ liệu cũ.
+    // Product = mã SKU chính, ví dụ SM936 / SP151 / AB797.
+    // Variant = full SKU, ví dụ SM936-N-M / SP151-L / AB797-XG-X.
     const grouped = new Map<string, ProductSeed>();
 
     for (const file of files) {
@@ -1453,8 +1437,9 @@ async updateMissingCostBulk(
         ]);
 
         const brand = this.findValue(row, ["Nhãn hiệu", "nhan hieu", "brand"]);
-        const weightRaw = this.findRawValue(row, ["Khối lượng", "khoi luong", "weight"]);
-        const weight = weightRaw === "" ? 0 : this.toNumber(weightRaw);
+        const weight = this.toNumber(
+          this.findValue(row, ["Khối lượng", "khoi luong", "weight"]),
+        );
 
         if (productName) currentProductName = productName;
         if (category) currentCategory = category;
@@ -1494,14 +1479,19 @@ async updateMissingCostBulk(
         }
 
         const productSlug = this.normalizeSlug(parentSku);
-        const retailPrice = this.getOptionalRetailPrice(row);
-        const importPrice = this.getOptionalImportPrice(row);
+        const hasRetailPrice = this.hasRetailPriceInput(row);
+        const hasImportPrice = this.hasImportPriceInput(row);
+        const retailPrice = hasRetailPrice ? this.getRetailPrice(row) : 0;
+        const rawImportPrice = hasImportPrice ? this.getImportPrice(row) : 0;
+        const importPrice = rawImportPrice > 0 ? rawImportPrice : 0;
         const branchStocks = this.getBranchStocksFromImportRow(row);
+        const hasBranchStocks = Object.keys(branchStocks).length > 0;
 
         const parsedVariant = this.parseVariantOptionsFromImport(row, cleanSku);
         const mainImageUrl = this.getImportMainImageUrl(row);
         const variantImageUrl =
-          this.getImportVariantImageUrl(row, parsedVariant.color) || mainImageUrl;
+          this.getImportVariantImageUrl(row, parsedVariant.color) ||
+          mainImageUrl;
 
         const productDisplayName = this.buildProductNameFromSkuImport(
           currentProductName,
@@ -1516,7 +1506,7 @@ async updateMissingCostBulk(
             slug: productSlug,
             category: category || currentCategory || "",
             description: description || currentDescription || "",
-            brand: brand || currentBrand || "",
+            brand: brand || currentBrand || "The 1970",
             weight: weight || currentWeight || 0,
             imageUrl: mainImageUrl || variantImageUrl || "",
             variants: [],
@@ -1542,7 +1532,17 @@ async updateMissingCostBulk(
         }
 
         const productSeed = grouped.get(productSlug)!;
+        const allowCreate =
+          Boolean(
+            parsedVariant.hasExplicitColor || parsedVariant.hasExplicitSize,
+          ) ||
+          hasRetailPrice ||
+          hasImportPrice ||
+          hasBranchStocks ||
+          Boolean(mainImageUrl || variantImageUrl);
+
         const variantSeed: VariantSeed = {
+          variantName: parsedVariant.variantName,
           color: parsedVariant.color,
           size: parsedVariant.size,
           sku: cleanSku,
@@ -1550,6 +1550,12 @@ async updateMissingCostBulk(
           retailPrice,
           importPrice,
           branchStocks,
+          hasExplicitColor: parsedVariant.hasExplicitColor,
+          hasExplicitSize: parsedVariant.hasExplicitSize,
+          hasRetailPrice,
+          hasImportPrice,
+          hasBranchStocks,
+          allowCreate,
         };
 
         const existingVariantIndex = productSeed.variants.findIndex(
@@ -1564,11 +1570,32 @@ async updateMissingCostBulk(
       }
     }
 
+    const slugs = Array.from(grouped.keys());
+    const allSkus = Array.from(
+      new Set(
+        Array.from(grouped.values()).flatMap((product) =>
+          product.variants.map((variant) => variant.sku.trim()),
+        ),
+      ),
+    );
+
+    const existingProducts = await this.prisma.product.findMany({
+      where: { slug: { in: slugs } },
+      select: { id: true, slug: true, imageUrl: true },
+    });
+
+    const productBySlug = new Map(
+      existingProducts.map((product) => [product.slug, product]),
+    );
+
     let createdVariants = 0;
     let updatedVariants = 0;
+    let fixedSkuVariants = 0;
+    let removedDuplicateVariants = 0;
+    let skippedCreates = 0;
     let inventoryRows = 0;
 
-    const knownBranchIds = new Set(
+    const branchIds = new Set(
       (await this.prisma.branch.findMany({ select: { id: true } })).map(
         (branch) => branch.id,
       ),
@@ -1576,10 +1603,7 @@ async updateMissingCostBulk(
 
     for (const [, productSeed] of grouped.entries()) {
       try {
-        let product = await this.prisma.product.findUnique({
-          where: { slug: productSeed.slug },
-          select: { id: true, slug: true, imageUrl: true },
-        });
+        let product = productBySlug.get(productSeed.slug);
 
         if (!product) {
           product = await this.prisma.product.create({
@@ -1591,154 +1615,221 @@ async updateMissingCostBulk(
               brand: productSeed.brand || "The 1970",
               weight: productSeed.weight || 0,
               imageUrl:
-                productSeed.imageUrl || productSeed.variants[0]?.imageUrl || null,
+                productSeed.imageUrl ||
+                productSeed.variants[0]?.imageUrl ||
+                null,
               description: productSeed.description || null,
               status: ProductStatus.ACTIVE,
             },
             select: { id: true, slug: true, imageUrl: true },
           });
+
+          productBySlug.set(product.slug, product);
         } else if (overwrite) {
-          const productPatch: Prisma.ProductUpdateInput = {
+          const productUpdateData: Prisma.ProductUpdateInput = {
             status: ProductStatus.ACTIVE,
           };
 
-          // Chỉ update field nào thật sự có trong file, không đưa field thiếu về null/0.
-          if (productSeed.name) productPatch.name = productSeed.name;
-          if (productSeed.category) productPatch.category = productSeed.category;
-          if (productSeed.brand) productPatch.brand = productSeed.brand;
-          if (productSeed.weight) productPatch.weight = productSeed.weight;
-          if (productSeed.imageUrl) productPatch.imageUrl = productSeed.imageUrl;
-          if (productSeed.description) productPatch.description = productSeed.description;
+          // PATCH an toàn: file có field nào thì mới cập nhật field đó.
+          // Không có category/brand/weight/description/image thì giữ nguyên DB.
+          if (productSeed.name) productUpdateData.name = productSeed.name;
+          if (productSeed.category)
+            productUpdateData.category = productSeed.category;
+          if (productSeed.brand) productUpdateData.brand = productSeed.brand;
+          if (productSeed.weight > 0)
+            productUpdateData.weight = productSeed.weight;
+          if (productSeed.imageUrl)
+            productUpdateData.imageUrl = productSeed.imageUrl;
+          if (productSeed.description) {
+            productUpdateData.description = productSeed.description;
+          }
 
           product = await this.prisma.product.update({
             where: { id: product.id },
-            data: productPatch,
+            data: productUpdateData,
             select: { id: true, slug: true, imageUrl: true },
           });
+
+          productBySlug.set(product.slug, product);
         }
 
-        const productVariants = await this.prisma.productVariant.findMany({
-          where: { productId: product.id },
-          select: {
-            id: true,
-            sku: true,
-            productId: true,
-            color: true,
-            size: true,
-          },
-        });
-
-        const variantBySku = new Map(
-          productVariants.map((variant) => [variant.sku.trim(), variant]),
-        );
-        const variantByCombo = new Map(
-          productVariants.map((variant) => [
-            this.buildVariantMatchKey(variant.color, variant.size),
-            variant,
-          ]),
-        );
-
         for (const variantSeed of productSeed.variants) {
-          const cleanSku = variantSeed.sku.trim();
-          const comboKey = this.buildVariantMatchKey(variantSeed.color, variantSeed.size);
-          let existingVariant = variantBySku.get(cleanSku) || variantByCombo.get(comboKey);
+          const desiredSku = variantSeed.sku.trim();
+          if (!desiredSku) continue;
 
-          if (!existingVariant) {
-            const created = await this.prisma.productVariant.create({
-              data: {
-                productId: product.id,
-                sku: cleanSku,
-                color: variantSeed.color.trim(),
-                size: variantSeed.size.trim(),
-                price: new Prisma.Decimal(this.toNumber(variantSeed.retailPrice ?? 0)),
-                costPrice: new Prisma.Decimal(this.toNumber(variantSeed.importPrice ?? 0)),
-                imageUrl: variantSeed.imageUrl || null,
-                status: VariantStatus.ACTIVE,
-              },
-              select: {
-                id: true,
-                sku: true,
-                productId: true,
-                color: true,
-                size: true,
-              },
+          // Luôn đọc lại variant hiện tại của sản phẩm để xử lý sau mỗi lần sửa SKU/xoá duplicate.
+          const currentVariants = await this.prisma.productVariant.findMany({
+            where: { productId: product.id },
+            include: { inventoryItems: true },
+            orderBy: { createdAt: "asc" },
+          });
+
+          const comboKey = this.normalizeComboKey(
+            variantSeed.color,
+            variantSeed.size,
+          );
+
+          const variantWithDesiredSku =
+            await this.prisma.productVariant.findUnique({
+              where: { sku: desiredSku },
+              include: { inventoryItems: true },
             });
 
-            existingVariant = created;
-            variantBySku.set(created.sku.trim(), created);
-            variantByCombo.set(this.buildVariantMatchKey(created.color, created.size), created);
-            createdVariants += 1;
-          } else if (overwrite) {
-            const skuOwner =
-              existingVariant.sku.trim() === cleanSku
-                ? existingVariant
-                : await this.prisma.productVariant.findUnique({
-                    where: { sku: cleanSku },
-                    select: { id: true, sku: true },
-                  });
+          const variantByCombo = currentVariants.find(
+            (variant) =>
+              this.normalizeComboKey(variant.color, variant.size) === comboKey,
+          );
 
-            if (skuOwner && skuOwner.id !== existingVariant.id) {
-              failedRows += 1;
+          let targetVariant: typeof variantWithDesiredSku | null = null;
+
+          if (variantByCombo) {
+            targetVariant = variantByCombo as any;
+
+            // Nếu SKU chuẩn trong file đã bị tạo thành duplicate 0 tồn, xoá duplicate trước,
+            // rồi đổi SKU của variant đang có tồn/giá đúng sang SKU chuẩn.
+            if (
+              variantWithDesiredSku &&
+              variantWithDesiredSku.id !== variantByCombo.id
+            ) {
+              const desiredStock = this.getVariantTotalStockForImport(
+                variantWithDesiredSku,
+              );
+              const comboStock =
+                this.getVariantTotalStockForImport(variantByCombo);
+              const sameProduct =
+                variantWithDesiredSku.productId === product.id;
+              const sameCombo =
+                this.normalizeComboKey(
+                  variantWithDesiredSku.color,
+                  variantWithDesiredSku.size,
+                ) === comboKey;
+
+              if (
+                sameProduct &&
+                sameCombo &&
+                desiredStock <= 0 &&
+                comboStock > 0
+              ) {
+                await this.prisma.inventoryItem.deleteMany({
+                  where: { variantId: variantWithDesiredSku.id },
+                });
+                await this.prisma.productVariant.delete({
+                  where: { id: variantWithDesiredSku.id },
+                });
+                removedDuplicateVariants += 1;
+              } else if (sameProduct && sameCombo && desiredStock <= 0) {
+                await this.prisma.inventoryItem.deleteMany({
+                  where: { variantId: variantWithDesiredSku.id },
+                });
+                await this.prisma.productVariant.delete({
+                  where: { id: variantWithDesiredSku.id },
+                });
+                removedDuplicateVariants += 1;
+              } else {
+                failedRows += 1;
+                errors.push(
+                  `${productSeed.name} - ${desiredSku}: SKU này đã tồn tại ở variant khác, bỏ qua để tránh ghi đè sai.`,
+                );
+                continue;
+              }
+            }
+          } else if (
+            variantWithDesiredSku &&
+            variantWithDesiredSku.productId === product.id
+          ) {
+            targetVariant = variantWithDesiredSku;
+          }
+
+          const hasRetailPrice = Boolean((variantSeed as any).hasRetailPrice);
+          const hasImportPrice = Boolean((variantSeed as any).hasImportPrice);
+          const hasBranchStocks = Boolean((variantSeed as any).hasBranchStocks);
+          const allowCreate = Boolean((variantSeed as any).allowCreate);
+
+          if (!targetVariant) {
+            if (!allowCreate) {
+              // File dạng sửa SKU từ báo cáo tồn kho chỉ có Tên sản phẩm + Tên phiên bản + Mã SKU.
+              // Không được tự sinh variant mới khi không match được, vì sẽ tạo mã 0 tồn như lỗi vừa gặp.
+              skippedCreates += 1;
               errors.push(
-                `${productSeed.name}: SKU ${cleanSku} đã thuộc variant khác, bỏ qua sửa SKU cho ${existingVariant.sku}`,
+                `${productSeed.name} - ${desiredSku}: không tìm thấy variant để sửa SKU, đã bỏ qua và không tạo mới.`,
               );
               continue;
             }
 
-            const variantPatch: Prisma.ProductVariantUpdateInput = {
-              product: { connect: { id: product.id } },
-              sku: cleanSku,
-              color: variantSeed.color.trim(),
-              size: variantSeed.size.trim(),
-              status: VariantStatus.ACTIVE,
-            };
-
-            // Chỉ update giá nếu file có cột giá. File sửa SKU/ảnh không được làm giá về 0.
-            if (variantSeed.retailPrice !== undefined) {
-              variantPatch.price = new Prisma.Decimal(this.toNumber(variantSeed.retailPrice));
-            }
-            if (variantSeed.importPrice !== undefined) {
-              variantPatch.costPrice = new Prisma.Decimal(this.toNumber(variantSeed.importPrice));
-            }
-            if (variantSeed.imageUrl) {
-              variantPatch.imageUrl = variantSeed.imageUrl;
-            }
-
-            const updated = await this.prisma.productVariant.update({
-              where: { id: existingVariant.id },
-              data: variantPatch,
-              select: {
-                id: true,
-                sku: true,
-                productId: true,
-                color: true,
-                size: true,
+            await this.prisma.productVariant.create({
+              data: {
+                productId: product.id,
+                sku: desiredSku,
+                color: variantSeed.color.trim(),
+                size: variantSeed.size.trim(),
+                price: new Prisma.Decimal(
+                  hasRetailPrice ? this.toNumber(variantSeed.retailPrice) : 0,
+                ),
+                costPrice: new Prisma.Decimal(
+                  hasImportPrice ? this.toNumber(variantSeed.importPrice) : 0,
+                ),
+                imageUrl: variantSeed.imageUrl || null,
+                variantName: variantSeed.variantName || null,
+                status: VariantStatus.ACTIVE,
               },
             });
-
-            variantBySku.delete(existingVariant.sku.trim());
-            variantBySku.set(updated.sku.trim(), updated);
-            variantByCombo.set(this.buildVariantMatchKey(updated.color, updated.size), updated);
-            existingVariant = updated;
-            updatedVariants += 1;
+            createdVariants += 1;
+            continue;
           }
 
-          const stockEntries = Object.entries(variantSeed.branchStocks || {});
-          if (existingVariant && stockEntries.length > 0) {
-            for (const [branchId, qty] of stockEntries) {
-              if (!knownBranchIds.has(branchId)) continue;
+          const variantUpdateData: Prisma.ProductVariantUpdateInput = {
+            status: VariantStatus.ACTIVE,
+          };
+
+          if (targetVariant.sku !== desiredSku) {
+            variantUpdateData.sku = desiredSku;
+            fixedSkuVariants += 1;
+          }
+
+          if (variantSeed.hasExplicitColor && variantSeed.color.trim())
+            variantUpdateData.color = variantSeed.color.trim();
+          if (variantSeed.hasExplicitSize && variantSeed.size.trim())
+            variantUpdateData.size = variantSeed.size.trim();
+          if (hasRetailPrice) {
+            variantUpdateData.price = new Prisma.Decimal(
+              this.toNumber(variantSeed.retailPrice),
+            );
+          }
+          if (hasImportPrice) {
+            variantUpdateData.costPrice = new Prisma.Decimal(
+              this.toNumber(variantSeed.importPrice),
+            );
+          }
+          if (variantSeed.imageUrl) {
+            variantUpdateData.imageUrl = variantSeed.imageUrl;
+          }
+          if (variantSeed.variantName) {
+            variantUpdateData.variantName = variantSeed.variantName;
+          }
+
+          await this.prisma.productVariant.update({
+            where: { id: targetVariant.id },
+            data: variantUpdateData,
+          });
+          updatedVariants += 1;
+
+          // Không deleteMany tồn kho nữa. Chỉ upsert các chi nhánh thực sự có cột tồn trong file.
+          if (hasBranchStocks) {
+            for (const [branchId, qty] of Object.entries(
+              variantSeed.branchStocks || {},
+            )) {
+              if (!branchIds.has(branchId)) continue;
+
               await this.prisma.inventoryItem.upsert({
                 where: {
                   variantId_branchId: {
-                    variantId: existingVariant.id,
+                    variantId: targetVariant.id,
                     branchId,
                   },
                 },
-                update: {
-                  availableQty: this.toNumber(qty),
-                },
+                update: { availableQty: this.toNumber(qty) },
                 create: {
-                  variantId: existingVariant.id,
+                  variantId: targetVariant.id,
                   branchId,
                   availableQty: this.toNumber(qty),
                   reservedQty: 0,
@@ -1757,22 +1848,21 @@ async updateMissingCostBulk(
       }
     }
 
-    successRows = Array.from(grouped.values()).reduce(
-      (sum, product) => sum + product.variants.length,
-      0,
-    );
+    successRows = Math.max(0, allSkus.length - skippedCreates);
 
     return {
       successRows,
       failedRows,
       errors,
       importedProducts: grouped.size,
-      importedVariants: successRows,
+      importedVariants: allSkus.length,
       createdVariants,
       updatedVariants,
+      fixedSkuVariants,
+      removedDuplicateVariants,
+      skippedCreates,
       inventoryRows,
-      note:
-        "Import an toàn: SKU trong file là chuẩn; match lại theo sản phẩm + màu + size/tên phiên bản; chỉ cập nhật field có trong Excel; không xoá tồn/giá/ảnh/mô tả/variant nếu file thiếu cột.",
+      note: "Import patch an toàn: SKU trong Excel là chuẩn; chỉ cập nhật field có trong file; không xoá tồn kho/giá/ảnh khi thiếu cột; không tự tạo variant mới trong file sửa SKU tối giản; lưu Tên phiên bản sản phẩm vào ProductVariant.variantName.",
     };
   }
 
@@ -2030,30 +2120,30 @@ async updateMissingCostBulk(
     );
   }
 
+  async checkMissingCostFromExcel(file: Express.Multer.File) {
+    if (!file) {
+      return { success: false, message: "Thiếu file" };
+    }
 
-async checkMissingCostFromExcel(file: Express.Multer.File) {
-  if (!file) {
-    return { success: false, message: "Thiếu file" };
+    const workbook = XLSX.read(file.buffer, { type: "buffer" });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+
+    const rows: any[] = XLSX.utils.sheet_to_json(sheet);
+
+    const result = rows.filter((row) => {
+      const cost = Number(
+        row["Giá nhập"] || row["Gia nhap"] || row["costPrice"] || 0,
+      );
+
+      return cost <= 0;
+    });
+
+    return {
+      success: true,
+      total: result.length,
+      data: result,
+    };
   }
-
-  const workbook = XLSX.read(file.buffer, { type: "buffer" });
-  const sheet = workbook.Sheets[workbook.SheetNames[0]];
-
-  const rows: any[] = XLSX.utils.sheet_to_json(sheet);
-
-  const result = rows.filter((row) => {
-    const cost =
-      Number(row["Giá nhập"] || row["Gia nhap"] || row["costPrice"] || 0);
-
-    return cost <= 0;
-  });
-
-  return {
-    success: true,
-    total: result.length,
-    data: result,
-  };
-}
   async toggleProductStatus(productId: string) {
     const product = await this.prisma.product.findUnique({
       where: { id: productId },
@@ -2261,7 +2351,6 @@ async checkMissingCostFromExcel(file: Express.Multer.File) {
     };
   }
 
-
   async clearAllDescriptions() {
     const result = await this.prisma.product.updateMany({
       data: {
@@ -2274,6 +2363,4 @@ async checkMissingCostFromExcel(file: Express.Multer.File) {
       count: result.count,
     };
   }
-
-
 }

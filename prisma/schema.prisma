@@ -64,6 +64,7 @@ model ProductVariant {
   purchaseReceiptItems PurchaseReceiptItem[]
   stockTransferItems   StockTransferItem[]
   locations            ProductVariantLocation[]
+  variantName          String?
 }
 
 model InventoryItem {
@@ -1441,6 +1442,9 @@ model CashVoucher {
   confirmedAt     DateTime?
   confirmedById   String?
   confirmedByName String?
+  cancelledAt     DateTime?
+  cancelledById   String?
+  cancelledByName String?
 
   amount          Decimal         @default(0) @db.Decimal(14, 2)
   paymentSourceId String?

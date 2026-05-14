@@ -2000,23 +2000,36 @@ export class FinanceService {
         const snapshot = snapshotMap.get(key);
         const isLocked = String(snapshot?.status || "OPEN").toUpperCase() === "LOCKED";
 
-        const openingBalance = snapshot
-          ? this.toNumber(snapshot.openingBalance)
-          : this.toNumber(previousClosing.get(comboKey) || 0);
+        // Số dư đầu luôn ưu tiên số dư cuối gần nhất phía trước để chuỗi sổ không bị stale
+        // sau khi mở/chốt lại ngày cũ. Nếu chưa có ngày trước thì mới lấy snapshot opening.
+        const previousOpening = previousClosing.has(comboKey)
+          ? this.toNumber(previousClosing.get(comboKey) || 0)
+          : null;
+        const openingBalance = previousOpening !== null
+          ? previousOpening
+          : this.toNumber(snapshot?.openingBalance || 0);
 
-        const liveReceipt = this.toNumber(txn.posReceiptAmount) + this.toNumber(txn.manualReceiptAmount);
-        const livePayment = this.toNumber(txn.manualPaymentAmount);
-        const liveNet = liveReceipt - livePayment;
-        const liveClosing = openingBalance + liveNet;
+        const livePosReceipt = this.toNumber(txn.posReceiptAmount);
+        const liveManualReceipt = this.toNumber(txn.manualReceiptAmount);
+        const liveManualPayment = this.toNumber(txn.manualPaymentAmount);
+        const liveReceipt = livePosReceipt + liveManualReceipt;
+        const livePayment = liveManualPayment;
 
-        // Nếu ngày đã chốt nhưng sau đó có dòng giao dịch thật, ưu tiên số phát sinh thật để tránh snapshot cũ/bị nhân bản làm phóng đại số tiền.
-        // Snapshot vẫn giữ vai trò lưu trạng thái chốt, thực đếm và lệch.
+        // Dòng đã chốt vẫn phải trả breakdown giao dịch thật để UI không bị
+        // Thu - chi có tiền nhưng POS/Phiếu thu/Phiếu chi lại trắng.
         const hasLiveTxn = liveReceipt !== 0 || livePayment !== 0;
+        const snapshotReceipt = this.toNumber(snapshot?.totalReceipt || 0);
+        const snapshotPayment = this.toNumber(snapshot?.totalPayment || 0);
+        const snapshotNet = this.toNumber(snapshot?.netAmount || 0);
         const useSnapshotAmounts = isLocked && !hasLiveTxn;
-        const totalReceipt = useSnapshotAmounts ? this.toNumber(snapshot.totalReceipt) : liveReceipt;
-        const totalPayment = useSnapshotAmounts ? this.toNumber(snapshot.totalPayment) : livePayment;
-        const netAmount = useSnapshotAmounts ? this.toNumber(snapshot.netAmount) : totalReceipt - totalPayment;
-        const closingBalance = useSnapshotAmounts ? this.toNumber(snapshot.closingBalance) : openingBalance + netAmount;
+
+        const posReceiptAmount = hasLiveTxn ? livePosReceipt : 0;
+        const manualReceiptAmount = hasLiveTxn ? liveManualReceipt : (useSnapshotAmounts ? snapshotReceipt : 0);
+        const manualPaymentAmount = hasLiveTxn ? liveManualPayment : (useSnapshotAmounts ? snapshotPayment : 0);
+        const totalReceipt = hasLiveTxn ? liveReceipt : (useSnapshotAmounts ? snapshotReceipt : 0);
+        const totalPayment = hasLiveTxn ? livePayment : (useSnapshotAmounts ? snapshotPayment : 0);
+        const netAmount = hasLiveTxn ? totalReceipt - totalPayment : (useSnapshotAmounts ? snapshotNet : 0);
+        const closingBalance = openingBalance + netAmount;
         const countedAmount = snapshot?.countedAmount == null ? null : this.toNumber(snapshot.countedAmount);
         const differenceAmount = countedAmount == null ? null : countedAmount - closingBalance;
 
@@ -2042,9 +2055,9 @@ export class FinanceService {
           paymentSourceType: combo.paymentSourceType,
           sourceType: combo.paymentSourceType,
           openingBalance,
-          posReceiptAmount: isLocked ? null : this.toNumber(txn.posReceiptAmount),
-          manualReceiptAmount: isLocked ? null : this.toNumber(txn.manualReceiptAmount),
-          manualPaymentAmount: isLocked ? null : this.toNumber(txn.manualPaymentAmount),
+          posReceiptAmount,
+          manualReceiptAmount,
+          manualPaymentAmount,
           totalReceipt,
           totalPayment,
           netAmount,
