@@ -1,10 +1,9 @@
 import { Module } from '@nestjs/common';
-import { StocktakeController } from './stocktake.controller';
+import { StocktakeController, StocktakeSessionMaintenanceController } from './stocktake.controller';
 import { StocktakeService } from './stocktake.service';
 
-
 @Module({
-  controllers: [StocktakeController],
+  controllers: [StocktakeController, StocktakeSessionMaintenanceController],
   providers: [StocktakeService],
 })
 export class StocktakeModule {}

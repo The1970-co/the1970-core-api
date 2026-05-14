@@ -1681,7 +1681,7 @@ export class FinanceService {
       `p."paymentSourceId" IS NOT NULL`,
       `p."status" IN ('PAID', 'PARTIAL')`,
       `COALESCE(ps."type", '') != 'COD'`,
-      `(COALESCE(o."salesChannel", '') != 'POS' OR o."status" = 'COMPLETED')`,
+      `(COALESCE(o."salesChannel"::text, '') != 'POS' OR o."status" = 'COMPLETED')`,
     ];
 
     if (scopedBranchId) {

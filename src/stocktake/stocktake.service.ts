@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InventoryMovementType, PrismaClient } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -16,20 +16,26 @@ export class StocktakeService {
       ...(Array.isArray(user?.roles) ? user.roles : []),
       user?.role,
     ]
-      .map((role) => String(role || "").toLowerCase())
+      .map((role) => String(role || '').toLowerCase())
       .filter(Boolean);
 
-    return roles.includes("owner") || roles.includes("admin") ||
-      (Array.isArray(user?.permissions) && user.permissions.includes("*"));
+    return roles.includes('owner') || roles.includes('admin') ||
+      (Array.isArray(user?.permissions) && user.permissions.includes('*'));
+  }
+
+  private assertOwner(user?: any) {
+    if (!this.isOwner(user)) {
+      throw new ForbiddenException('Chỉ admin/owner được xử lý phiên kiểm kho.');
+    }
   }
 
   private scopedBranchId(user?: any, requestedBranchId?: string | null) {
-    if (this.isOwner(user)) return String(requestedBranchId || "").trim();
+    if (this.isOwner(user)) return String(requestedBranchId || '').trim();
 
-    const branchId = String(user?.branchId || "").trim();
-    if (!branchId) throw new ForbiddenException("Tài khoản chưa được gán chi nhánh.");
+    const branchId = String(user?.branchId || '').trim();
+    if (!branchId) throw new ForbiddenException('Tài khoản chưa được gán chi nhánh.');
     if (requestedBranchId && String(requestedBranchId) !== branchId) {
-      throw new ForbiddenException("Không có quyền kiểm kho chi nhánh khác.");
+      throw new ForbiddenException('Không có quyền kiểm kho chi nhánh khác.');
     }
     return branchId;
   }
@@ -189,5 +195,80 @@ export class StocktakeService {
         timeout: 20000,
       }
     );
+  }
+
+  async cancelStocktakeSession(id: string, user?: any) {
+    this.assertOwner(user);
+
+    const sessionId = String(id || '').trim();
+    if (!sessionId) throw new BadRequestException('Thiếu sessionId.');
+
+    const session = await (this.prisma as any).stocktakeSession.findUnique({
+      where: { id: sessionId },
+    });
+
+    if (!session) throw new NotFoundException('Không tìm thấy phiên kiểm kho.');
+
+    const status = String(session.status || '').toUpperCase();
+    if (status === 'APPLIED') {
+      throw new BadRequestException('Phiên đã chốt tồn thật, không được huỷ.');
+    }
+
+    return (this.prisma as any).stocktakeSession.update({
+      where: { id: sessionId },
+      data: {
+        status: 'CANCELLED' as any,
+        finishedAt: session.finishedAt || new Date(),
+      },
+    });
+  }
+
+  async deleteStocktakeSession(id: string, user?: any) {
+    this.assertOwner(user);
+
+    const sessionId = String(id || '').trim();
+    if (!sessionId) throw new BadRequestException('Thiếu sessionId.');
+
+    const session = await (this.prisma as any).stocktakeSession.findUnique({
+      where: { id: sessionId },
+    });
+
+    if (!session) throw new NotFoundException('Không tìm thấy phiên kiểm kho.');
+
+    const status = String(session.status || '').toUpperCase();
+    if (status === 'APPLIED') {
+      throw new BadRequestException('Phiên đã chốt tồn thật, không được xoá.');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const db = tx as any;
+
+      // Xoá theo thứ tự con -> cha để tránh lỗi khoá ngoại.
+      // Có try/catch để an toàn nếu project đang dùng tên model khác ở vài bản schema.
+      const safeDeleteMany = async (modelName: string, where: any) => {
+        if (!db[modelName]?.deleteMany) return;
+        try {
+          await db[modelName].deleteMany({ where });
+        } catch {
+          // model tồn tại nhưng không có field tương ứng trong schema hiện tại thì bỏ qua
+        }
+      };
+
+      await safeDeleteMany('stocktakeScanEvent', { sessionId });
+      await safeDeleteMany('stocktakeLog', { sessionId });
+      await safeDeleteMany('stocktakeSnapshotItem', { sessionId });
+      await safeDeleteMany('stocktakeSnapshot', { sessionId });
+      await safeDeleteMany('stocktakeSessionItem', { sessionId });
+      await safeDeleteMany('stocktakeArea', { sessionId });
+      await safeDeleteMany('stocktakeWorker', { sessionId });
+
+      await db.stocktakeSession.delete({ where: { id: sessionId } });
+
+      return {
+        ok: true,
+        deleted: true,
+        id: sessionId,
+      };
+    });
   }
 }
