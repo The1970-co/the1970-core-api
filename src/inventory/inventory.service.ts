@@ -30,7 +30,8 @@ export class InventoryService {
   constructor(private readonly prisma: PrismaService) {}
 
   private isOwner(user?: any) {
-    return user?.role === "owner" || user?.role === "admin";
+    const role = String(user?.role || "").trim().toUpperCase();
+    return role === "OWNER" || role === "ADMIN";
   }
 
   private resolveBranchIdFromUser(user?: any) {
@@ -2165,7 +2166,7 @@ export class InventoryService {
         label: admin.fullName || admin.email,
         name: admin.fullName,
         email: admin.email,
-        type: admin.role === "ADMIN" ? "Owner/Admin" : "Admin",
+        type: String((admin as any).role || "").toUpperCase() === "ADMIN" ? "Owner/Admin" : "Admin",
       });
     }
 
