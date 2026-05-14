@@ -1675,6 +1675,52 @@ export class FinanceService {
       orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
     });
 
+    const normalizeSourceText = (value: unknown) =>
+      String(value || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase();
+
+    const inferSourceBranch = (source: any) => {
+      if (source?.branchId) return String(source.branchId);
+      const text = normalizeSourceText([source?.name, source?.code].filter(Boolean).join(" "));
+      const candidates = branchRows.map((branch) => {
+        const name = normalizeSourceText(branch.name);
+        let aliases: string[] = [name];
+        if (name.includes("thai ha") || /(^|\W)th($|\W)/.test(text)) aliases.push("th", "thai ha");
+        if (name.includes("quoc oai") || /(^|\W)qo($|\W)/.test(text)) aliases.push("qo", "quoc oai");
+        if (name.includes("chua lang") || /(^|\W)cl($|\W)/.test(text)) aliases.push("cl", "chua lang");
+        if (name.includes("xa dan") || /(^|\W)xd($|\W)/.test(text)) aliases.push("xd", "xa dan");
+        aliases = Array.from(new Set(aliases.filter(Boolean)));
+        return { branch, aliases };
+      });
+
+      for (const { branch, aliases } of candidates) {
+        if (
+          aliases.some((alias) =>
+            text === alias ||
+            text.endsWith(` ${alias}`) ||
+            text.endsWith(`-${alias}`) ||
+            text.includes(` ${alias} `) ||
+            text.includes(`-${alias} `) ||
+            text.includes(` ${alias}-`),
+          )
+        ) {
+          return String(branch.id);
+        }
+      }
+      return null;
+    };
+
+    const seededSourceRows = sourceRows
+      .map((source: any) => ({ ...source, inferredBranchId: inferSourceBranch(source) }))
+      .filter((source: any) => {
+        if (source.branchId) return true;
+        if (source.inferredBranchId) return true;
+        // Nguồn tiền global không xác định chi nhánh sẽ chỉ xuất hiện khi thật sự có giao dịch/snapshot.
+        return Boolean(paymentSourceFilter);
+      });
+
     const paymentValues: any[] = [from, to];
     const paymentWhere = [
       `COALESCE(p."paidAt", p."createdAt") BETWEEN $1 AND $2`,
@@ -1783,7 +1829,7 @@ export class FinanceService {
 
     const snapshots = await this.prisma.$queryRawUnsafe<any[]>(
       `
-        SELECT
+        SELECT DISTINCT ON (d."date", d."branchId", d."paymentSourceId")
           d."id",
           TO_CHAR(d."date", 'YYYY-MM-DD') AS "date",
           d."branchId",
@@ -1811,6 +1857,7 @@ export class FinanceService {
         LEFT JOIN "Branch" b ON b."id" = d."branchId"
         LEFT JOIN "PaymentSource" ps ON ps."id" = d."paymentSourceId"
         WHERE ${snapshotWhere.join(" AND ")}
+        ORDER BY d."date", d."branchId", d."paymentSourceId", d."updatedAt" DESC, d."createdAt" DESC
       `,
       ...snapshotValues,
     );
@@ -1864,25 +1911,16 @@ export class FinanceService {
       }
     };
 
-    for (const source of sourceRows) {
-      if (source.branchId) {
-        addCombo(String(source.branchId), String(source.id), {
-          paymentSourceName: source.name,
-          paymentSourceCode: source.code,
-          paymentSourceType: source.type,
-        });
-      } else {
-        // Một số nguồn tiền cũ không gắn branchId nhưng tên/code có thể dùng chung.
-        // Vẫn tạo combo cho từng chi nhánh để chốt sổ không bị mất dòng khi chưa phát sinh.
-        for (const branch of branchRows) {
-          addCombo(String(branch.id), String(source.id), {
-            branchName: branch.name,
-            paymentSourceName: source.name,
-            paymentSourceCode: source.code,
-            paymentSourceType: source.type,
-          });
-        }
-      }
+    for (const source of seededSourceRows) {
+      const targetBranchId = source.branchId || source.inferredBranchId;
+      if (!targetBranchId) continue;
+      const targetBranch = branchRows.find((branch) => String(branch.id) === String(targetBranchId));
+      addCombo(String(targetBranchId), String(source.id), {
+        branchName: targetBranch?.name,
+        paymentSourceName: source.name,
+        paymentSourceCode: source.code,
+        paymentSourceType: source.type,
+      });
     }
 
     for (const row of paymentGroups) {
@@ -1971,10 +2009,14 @@ export class FinanceService {
         const liveNet = liveReceipt - livePayment;
         const liveClosing = openingBalance + liveNet;
 
-        const totalReceipt = isLocked ? this.toNumber(snapshot.totalReceipt) : liveReceipt;
-        const totalPayment = isLocked ? this.toNumber(snapshot.totalPayment) : livePayment;
-        const netAmount = isLocked ? this.toNumber(snapshot.netAmount) : totalReceipt - totalPayment;
-        const closingBalance = isLocked ? this.toNumber(snapshot.closingBalance) : openingBalance + netAmount;
+        // Nếu ngày đã chốt nhưng sau đó có dòng giao dịch thật, ưu tiên số phát sinh thật để tránh snapshot cũ/bị nhân bản làm phóng đại số tiền.
+        // Snapshot vẫn giữ vai trò lưu trạng thái chốt, thực đếm và lệch.
+        const hasLiveTxn = liveReceipt !== 0 || livePayment !== 0;
+        const useSnapshotAmounts = isLocked && !hasLiveTxn;
+        const totalReceipt = useSnapshotAmounts ? this.toNumber(snapshot.totalReceipt) : liveReceipt;
+        const totalPayment = useSnapshotAmounts ? this.toNumber(snapshot.totalPayment) : livePayment;
+        const netAmount = useSnapshotAmounts ? this.toNumber(snapshot.netAmount) : totalReceipt - totalPayment;
+        const closingBalance = useSnapshotAmounts ? this.toNumber(snapshot.closingBalance) : openingBalance + netAmount;
         const countedAmount = snapshot?.countedAmount == null ? null : this.toNumber(snapshot.countedAmount);
         const differenceAmount = countedAmount == null ? null : countedAmount - closingBalance;
 
