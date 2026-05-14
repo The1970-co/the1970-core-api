@@ -3,10 +3,10 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
-} from '@nestjs/common';
-import { InventoryMovementType, Prisma } from '@prisma/client';
-import * as XLSX from 'xlsx';
-import { PrismaService } from '../prisma/prisma.service';
+} from "@nestjs/common";
+import { InventoryMovementType, Prisma } from "@prisma/client";
+import * as XLSX from "xlsx";
+import { PrismaService } from "../prisma/prisma.service";
 
 type StockReportBranchRow = {
   branchId: string;
@@ -30,7 +30,7 @@ export class InventoryService {
   constructor(private readonly prisma: PrismaService) {}
 
   private isOwner(user?: any) {
-    return user?.role === 'owner' || user?.role === 'admin';
+    return user?.role === "owner" || user?.role === "admin";
   }
 
   private resolveBranchIdFromUser(user?: any) {
@@ -43,30 +43,32 @@ export class InventoryService {
     const userBranch = this.resolveBranchIdFromUser(user);
 
     if (!userBranch) {
-      throw new ForbiddenException('Tài khoản chưa được gán chi nhánh.');
+      throw new ForbiddenException("Tài khoản chưa được gán chi nhánh.");
     }
 
     if (branchId && userBranch !== branchId) {
-      throw new ForbiddenException('Bạn không có quyền truy cập chi nhánh này.');
+      throw new ForbiddenException(
+        "Bạn không có quyền truy cập chi nhánh này.",
+      );
     }
   }
 
   private normalizeText(value: any) {
-    return String(value ?? '')
+    return String(value ?? "")
       .trim()
       .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/đ/g, 'd')
-      .replace(/Đ/g, 'D')
-      .replace(/[*:]/g, '')
-      .replace(/[_-]+/g, ' ')
-      .replace(/\s+/g, ' ')
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/đ/g, "d")
+      .replace(/Đ/g, "D")
+      .replace(/[*:]/g, "")
+      .replace(/[_-]+/g, " ")
+      .replace(/\s+/g, " ")
       .trim();
   }
 
   private compactKey(value: any) {
-    return this.normalizeText(value).replace(/[^a-z0-9]/g, '');
+    return this.normalizeText(value).replace(/[^a-z0-9]/g, "");
   }
 
   private buildProductVariantKey(productName: string, variantName: string) {
@@ -79,10 +81,10 @@ export class InventoryService {
     size?: string | null,
     sku?: string | null,
   ) {
-    const cleanProductName = String(productName || '').trim();
-    const cleanColor = String(color || '').trim();
-    const cleanSize = String(size || '').trim();
-    const cleanSku = String(sku || '').trim();
+    const cleanProductName = String(productName || "").trim();
+    const cleanColor = String(color || "").trim();
+    const cleanSize = String(size || "").trim();
+    const cleanSku = String(sku || "").trim();
 
     const names = new Set<string>();
 
@@ -109,58 +111,58 @@ export class InventoryService {
     return Array.from(names);
   }
 
-private toNumber(value: any): number {
-  if (value === null || value === undefined || value === '') return 0;
+  private toNumber(value: any): number {
+    if (value === null || value === undefined || value === "") return 0;
 
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? Math.round(value) : 0;
+    if (typeof value === "number") {
+      return Number.isFinite(value) ? Math.round(value) : 0;
+    }
+
+    let raw = String(value).trim().replace(/\s/g, "");
+    if (!raw || raw === "-") return 0;
+
+    raw = raw.replace(/[^\d.,-]/g, "");
+
+    // Số lượng: 1, 2, 10, 1.000, 1,000
+    if (raw.includes(".") && raw.includes(",")) {
+      // VN: 20.327.999,999 => 20327999.999
+      raw = raw.replace(/\./g, "").replace(",", ".");
+    } else if (raw.includes(".")) {
+      // 550.000 => 550000
+      raw = raw.replace(/\./g, "");
+    } else if (raw.includes(",")) {
+      // 451733,333 => 451733.333
+      raw = raw.replace(",", ".");
+    }
+
+    const n = Number(raw);
+    return Number.isFinite(n) ? Math.round(n) : 0;
   }
 
-  let raw = String(value).trim().replace(/\s/g, '');
-  if (!raw || raw === '-') return 0;
+  private toMoney(value: any): number {
+    if (value === null || value === undefined || value === "") return 0;
 
-  raw = raw.replace(/[^\d.,-]/g, '');
+    // Quan trọng: khi đọc file bằng raw:true, XLSX trả số thật của ô Excel
+    // VD: 462.000đ => 462000, 27.720.000đ => 27720000.
+    // Không tự nhân x1000 ở đây nữa, vì sẽ làm đội số.
+    if (typeof value === "number") {
+      return Number.isFinite(value) ? Math.round(value) : 0;
+    }
 
-  // Số lượng: 1, 2, 10, 1.000, 1,000
-  if (raw.includes('.') && raw.includes(',')) {
-    // VN: 20.327.999,999 => 20327999.999
-    raw = raw.replace(/\./g, '').replace(',', '.');
-  } else if (raw.includes('.')) {
-    // 550.000 => 550000
-    raw = raw.replace(/\./g, '');
-  } else if (raw.includes(',')) {
-    // 451733,333 => 451733.333
-    raw = raw.replace(',', '.');
+    const rawText = String(value).trim();
+    if (!rawText || rawText === "-") return 0;
+
+    return this.toNumber(rawText);
   }
+  private chunkArray<T>(items: T[], size = 1000) {
+    const chunks: T[][] = [];
 
-  const n = Number(raw);
-  return Number.isFinite(n) ? Math.round(n) : 0;
-}
+    for (let index = 0; index < items.length; index += size) {
+      chunks.push(items.slice(index, index + size));
+    }
 
-private toMoney(value: any): number {
-  if (value === null || value === undefined || value === '') return 0;
-
-  // Quan trọng: khi đọc file bằng raw:true, XLSX trả số thật của ô Excel
-  // VD: 462.000đ => 462000, 27.720.000đ => 27720000.
-  // Không tự nhân x1000 ở đây nữa, vì sẽ làm đội số.
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? Math.round(value) : 0;
+    return chunks;
   }
-
-  const rawText = String(value).trim();
-  if (!rawText || rawText === '-') return 0;
-
-  return this.toNumber(rawText);
-}
-private chunkArray<T>(items: T[], size = 1000) {
-  const chunks: T[][] = [];
-
-  for (let index = 0; index < items.length; index += size) {
-    chunks.push(items.slice(index, index + size));
-  }
-
-  return chunks;
-}
   private buildStockReportRows(sheetRows: any[][]): StockReportRow[] {
     const rows: StockReportRow[] = [];
 
@@ -174,14 +176,14 @@ private chunkArray<T>(items: T[], size = 1000) {
       const row = sheetRows[rowIndex] || [];
 
       const stt = this.toNumber(row[0]);
-      const productName = String(row[1] ?? '').trim();
-      const variantName = String(row[2] ?? '').trim();
-      const sku = String(row[3] ?? '').trim();
-      const barcode = String(row[4] ?? '').trim();
-      const category = String(row[5] ?? '').trim();
+      const productName = String(row[1] ?? "").trim();
+      const variantName = String(row[2] ?? "").trim();
+      const sku = String(row[3] ?? "").trim();
+      const barcode = String(row[4] ?? "").trim();
+      const category = String(row[5] ?? "").trim();
 
       if (!stt || !sku || !productName) continue;
-      if (this.normalizeText(productName).startsWith('tong')) continue;
+      if (this.normalizeText(productName).startsWith("tong")) continue;
 
       rows.push({
         rowNumber: rowIndex + 1,
@@ -192,25 +194,25 @@ private chunkArray<T>(items: T[], size = 1000) {
         category,
         branchRows: [
           {
-            branchId: 'CL',
+            branchId: "CL",
             stock: this.toNumber(row[7]),
             value: this.toMoney(row[8]),
             cost: this.toMoney(row[9]),
           },
           {
-            branchId: 'XD',
+            branchId: "XD",
             stock: this.toNumber(row[11]),
             value: this.toMoney(row[12]),
             cost: this.toMoney(row[13]),
           },
           {
-            branchId: 'QO',
+            branchId: "QO",
             stock: this.toNumber(row[15]),
             value: this.toMoney(row[16]),
             cost: this.toMoney(row[17]),
           },
           {
-            branchId: 'TH',
+            branchId: "TH",
             stock: this.toNumber(row[19]),
             value: this.toMoney(row[20]),
             cost: this.toMoney(row[21]),
@@ -242,7 +244,7 @@ private chunkArray<T>(items: T[], size = 1000) {
           },
         },
       },
-      orderBy: [{ updatedAt: 'desc' }],
+      orderBy: [{ updatedAt: "desc" }],
     });
 
     return rows.map((row) => {
@@ -257,17 +259,17 @@ private chunkArray<T>(items: T[], size = 1000) {
         availableQty,
         reservedQty: Number((row as any).reservedQty || 0),
         incomingQty: Number((row as any).incomingQty || 0),
-        updatedAt: new Date(row.updatedAt).toLocaleString('vi-VN'),
+        updatedAt: new Date(row.updatedAt).toLocaleString("vi-VN"),
         variantId: row.variantId,
-        sku: variant?.sku || '—',
-        color: variant?.color || '',
-        size: variant?.size || '',
+        sku: variant?.sku || "—",
+        color: variant?.color || "",
+        size: variant?.size || "",
         price,
         costPrice,
         inventoryValue: availableQty * costPrice,
-        productName: variant?.product?.name || '—',
-        productSlug: variant?.product?.slug || '',
-        category: variant?.product?.category || '',
+        productName: variant?.product?.name || "—",
+        productSlug: variant?.product?.slug || "",
+        category: variant?.product?.category || "",
       };
     });
   }
@@ -312,7 +314,7 @@ private chunkArray<T>(items: T[], size = 1000) {
       const variant = (item as any).variant;
       const product = variant?.product;
 
-      if (!variant || product?.status === 'INACTIVE') continue;
+      if (!variant || product?.status === "INACTIVE") continue;
 
       const qty = Number((item as any).availableQty || 0);
       const costPrice = Number(variant.costPrice || 0);
@@ -324,10 +326,16 @@ private chunkArray<T>(items: T[], size = 1000) {
       if (product?.id) productIds.add(product.id);
       if (variant?.id) {
         variantIds.add(variant.id);
-        variantQtyMap.set(variant.id, (variantQtyMap.get(variant.id) || 0) + qty);
+        variantQtyMap.set(
+          variant.id,
+          (variantQtyMap.get(variant.id) || 0) + qty,
+        );
       }
 
-      branchValues.set(item.branchId, (branchValues.get(item.branchId) || 0) + value);
+      branchValues.set(
+        item.branchId,
+        (branchValues.get(item.branchId) || 0) + value,
+      );
     }
 
     for (const qty of variantQtyMap.values()) {
@@ -335,7 +343,8 @@ private chunkArray<T>(items: T[], size = 1000) {
     }
 
     const highestBranch =
-      Array.from(branchValues.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] || '';
+      Array.from(branchValues.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ||
+      "";
 
     return {
       totalInventoryValue,
@@ -350,33 +359,37 @@ private chunkArray<T>(items: T[], size = 1000) {
 
   async importStockReport(file: Express.Multer.File, user?: any) {
     if (!this.isOwner(user)) {
-      throw new ForbiddenException('Chỉ admin/owner được import báo cáo tồn kho.');
+      throw new ForbiddenException(
+        "Chỉ admin/owner được import báo cáo tồn kho.",
+      );
     }
 
     if (!file?.buffer) {
-      throw new BadRequestException('Thiếu file báo cáo tồn kho.');
+      throw new BadRequestException("Thiếu file báo cáo tồn kho.");
     }
 
     const startedAt = Date.now();
 
-    const workbook = XLSX.read(file.buffer, { type: 'buffer' });
+    const workbook = XLSX.read(file.buffer, { type: "buffer" });
     const sheetName = workbook.SheetNames[0];
 
     if (!sheetName) {
-      throw new BadRequestException('File Excel không có sheet dữ liệu.');
+      throw new BadRequestException("File Excel không có sheet dữ liệu.");
     }
 
     const worksheet = workbook.Sheets[sheetName];
     const sheetRows = XLSX.utils.sheet_to_json<any[]>(worksheet, {
       header: 1,
-      defval: '',
+      defval: "",
       raw: false,
     });
 
     const reportRows = this.buildStockReportRows(sheetRows);
 
     if (!reportRows.length) {
-      throw new BadRequestException('Không tìm thấy dòng tồn kho hợp lệ trong file.');
+      throw new BadRequestException(
+        "Không tìm thấy dòng tồn kho hợp lệ trong file.",
+      );
     }
 
     const products = await this.prisma.product.findMany({
@@ -393,8 +406,14 @@ private chunkArray<T>(items: T[], size = 1000) {
       },
     });
 
-    const variantByName = new Map<string, { id: string; sku: string | null; productId: string }>();
-    const variantBySku = new Map<string, { id: string; sku: string | null; productId: string }>();
+    const variantByName = new Map<
+      string,
+      { id: string; sku: string | null; productId: string }
+    >();
+    const variantBySku = new Map<
+      string,
+      { id: string; sku: string | null; productId: string }
+    >();
 
     for (const product of products) {
       for (const variant of product.variants) {
@@ -410,7 +429,10 @@ private chunkArray<T>(items: T[], size = 1000) {
           variant.size,
           variant.sku,
         )) {
-          variantByName.set(this.buildProductVariantKey(product.name, dbVariantName), record);
+          variantByName.set(
+            this.buildProductVariantKey(product.name, dbVariantName),
+            record,
+          );
         }
 
         if (variant.sku) {
@@ -425,16 +447,33 @@ private chunkArray<T>(items: T[], size = 1000) {
     let totalImportedQty = 0;
     let totalImportedValue = 0;
 
-    const missingSkus: Array<{ rowNumber: number; sku: string; productName: string }> = [];
-    const zeroCostSkus: Array<{ rowNumber: number; sku: string; productName: string; totalQty: number }> = [];
-    const skuWarnings: Array<{ rowNumber: number; fileSku: string; dbSku: string; productName: string }> = [];
+    const missingSkus: Array<{
+      rowNumber: number;
+      sku: string;
+      productName: string;
+    }> = [];
+    const zeroCostSkus: Array<{
+      rowNumber: number;
+      sku: string;
+      productName: string;
+      totalQty: number;
+    }> = [];
+    const skuWarnings: Array<{
+      rowNumber: number;
+      fileSku: string;
+      dbSku: string;
+      productName: string;
+    }> = [];
 
     const inventoryRows: Prisma.InventoryItemCreateManyInput[] = [];
     const variantCostMap = new Map<string, number>();
 
     for (const reportRow of reportRows) {
       const skuKey = this.compactKey(reportRow.sku);
-      const nameKey = this.buildProductVariantKey(reportRow.productName, reportRow.variantName);
+      const nameKey = this.buildProductVariantKey(
+        reportRow.productName,
+        reportRow.variantName,
+      );
 
       const variant =
         (skuKey ? variantBySku.get(skuKey) : undefined) ||
@@ -582,27 +621,26 @@ private chunkArray<T>(items: T[], size = 1000) {
     };
   }
 
-
   async auditSapoFile(file: Express.Multer.File, user?: any) {
     if (!this.isOwner(user)) {
-      throw new ForbiddenException('Chỉ admin/owner được đối chiếu SAPO.');
+      throw new ForbiddenException("Chỉ admin/owner được đối chiếu SAPO.");
     }
 
     if (!file?.buffer) {
-      throw new BadRequestException('Thiếu file SAPO.');
+      throw new BadRequestException("Thiếu file SAPO.");
     }
 
-    const workbook = XLSX.read(file.buffer, { type: 'buffer' });
+    const workbook = XLSX.read(file.buffer, { type: "buffer" });
     const sheetName = workbook.SheetNames[0];
 
     if (!sheetName) {
-      throw new BadRequestException('File Excel không có sheet dữ liệu.');
+      throw new BadRequestException("File Excel không có sheet dữ liệu.");
     }
 
     const worksheet = workbook.Sheets[sheetName];
     const rows = XLSX.utils.sheet_to_json<any[]>(worksheet, {
       header: 1,
-      defval: '',
+      defval: "",
       raw: false,
     });
 
@@ -632,14 +670,14 @@ private chunkArray<T>(items: T[], size = 1000) {
 
     for (let rowIndex = 1; rowIndex < rows.length; rowIndex++) {
       const row = rows[rowIndex] || [];
-      const sku = String(row[COL.sku] || '').trim();
+      const sku = String(row[COL.sku] || "").trim();
 
-      if (!sku || this.normalizeText(sku).includes('ma sku')) continue;
+      if (!sku || this.normalizeText(sku).includes("ma sku")) continue;
 
       fileBySku.set(sku, {
         sku,
-        productName: String(row[COL.productName] || '').trim(),
-        variantName: String(row[COL.variantName] || '').trim(),
+        productName: String(row[COL.productName] || "").trim(),
+        variantName: String(row[COL.variantName] || "").trim(),
         costPrice: this.toNumber(row[COL.costPrice]),
         branches: {
           CL: this.toNumber(row[COL.CL]),
@@ -661,8 +699,10 @@ private chunkArray<T>(items: T[], size = 1000) {
         })
       : [];
 
-    const variantBySku = new Map(variants.map((variant) => [variant.sku, variant]));
-    const branchIds = ['CL', 'XD', 'QO', 'TH'];
+    const variantBySku = new Map(
+      variants.map((variant) => [variant.sku, variant]),
+    );
+    const branchIds = ["CL", "XD", "QO", "TH"];
 
     const branchTotals: Record<
       string,
@@ -744,7 +784,11 @@ private chunkArray<T>(items: T[], size = 1000) {
         const qtyDiff = systemQty - fileQty;
         const valueDiff = systemValue - fileValue;
 
-        if (qtyDiff !== 0 || Math.abs(valueDiff) >= 1 || systemCostPrice !== fileCostPrice) {
+        if (
+          qtyDiff !== 0 ||
+          Math.abs(valueDiff) >= 1 ||
+          systemCostPrice !== fileCostPrice
+        ) {
           diffRows.push({
             sku: fileRow.sku,
             productName: variant.product?.name || fileRow.productName,
@@ -807,11 +851,10 @@ private chunkArray<T>(items: T[], size = 1000) {
     };
   }
 
-
   private getProductCodeFromSku(sku: string) {
-    const cleanSku = String(sku || '').trim();
-    if (!cleanSku) return '';
-    return cleanSku.split('-')[0]?.trim() || cleanSku;
+    const cleanSku = String(sku || "").trim();
+    if (!cleanSku) return "";
+    return cleanSku.split("-")[0]?.trim() || cleanSku;
   }
 
   async auditTwoSapoFiles(
@@ -820,14 +863,18 @@ private chunkArray<T>(items: T[], size = 1000) {
     user?: any,
   ) {
     if (!this.isOwner(user)) {
-      throw new ForbiddenException('Chỉ admin/owner được đối chiếu 2 file SAPO.');
+      throw new ForbiddenException(
+        "Chỉ admin/owner được đối chiếu 2 file SAPO.",
+      );
     }
 
     if (!stockReportFile?.buffer || !productFile?.buffer) {
-      throw new BadRequestException('Cần upload đủ 2 file: Báo cáo tồn kho và Danh sách sản phẩm.');
+      throw new BadRequestException(
+        "Cần upload đủ 2 file: Báo cáo tồn kho và Danh sách sản phẩm.",
+      );
     }
 
-    const branchIds = ['CL', 'XD', 'QO', 'TH'];
+    const branchIds = ["CL", "XD", "QO", "TH"];
 
     const emptyBranchRows = () =>
       Object.fromEntries(
@@ -842,21 +889,25 @@ private chunkArray<T>(items: T[], size = 1000) {
       ) as Record<string, { qty: number; value: number; costPrice: number }>;
 
     const readFirstSheetRows = (file: Express.Multer.File) => {
-      const workbook = XLSX.read(file.buffer, { type: 'buffer' });
+      const workbook = XLSX.read(file.buffer, { type: "buffer" });
       const sheetName = workbook.SheetNames[0];
 
       if (!sheetName) {
-        throw new BadRequestException(`File ${file.originalname || ''} không có sheet dữ liệu.`);
+        throw new BadRequestException(
+          `File ${file.originalname || ""} không có sheet dữ liệu.`,
+        );
       }
 
       return XLSX.utils.sheet_to_json<any[]>(workbook.Sheets[sheetName], {
         header: 1,
-        defval: '',
+        defval: "",
         raw: true,
       });
     };
 
-    const stockReportRows = this.buildStockReportRows(readFirstSheetRows(stockReportFile));
+    const stockReportRows = this.buildStockReportRows(
+      readFirstSheetRows(stockReportFile),
+    );
 
     // File Danh sách sản phẩm SAPO:
     // A = tên sản phẩm, M = tên phiên bản, N = SKU, BB = giá nhập/giá vốn.
@@ -893,7 +944,7 @@ private chunkArray<T>(items: T[], size = 1000) {
     const productBySku = new Map<string, CompareRow>();
 
     for (const row of stockReportRows) {
-      const sku = String(row.sku || '').trim();
+      const sku = String(row.sku || "").trim();
       if (!sku) continue;
 
       const branches = emptyBranchRows();
@@ -911,15 +962,15 @@ private chunkArray<T>(items: T[], size = 1000) {
         };
       }
 
-const qty = Object.values(branches).reduce(
-  (sum, branch) => sum + this.toNumber(branch.qty),
-  0,
-);
+      const qty = Object.values(branches).reduce(
+        (sum, branch) => sum + this.toNumber(branch.qty),
+        0,
+      );
 
-const value = Object.values(branches).reduce(
-  (sum, branch) => sum + this.toNumber(branch.value),
-  0,
-);
+      const value = Object.values(branches).reduce(
+        (sum, branch) => sum + this.toNumber(branch.value),
+        0,
+      );
       const costPrice = qty > 0 ? Math.round(value / qty) : 0;
 
       stockBySku.set(sku, {
@@ -935,9 +986,9 @@ const value = Object.values(branches).reduce(
 
     for (let rowIndex = 1; rowIndex < productSheetRows.length; rowIndex++) {
       const row = productSheetRows[rowIndex] || [];
-      const sku = String(row[COL.sku] || '').trim();
+      const sku = String(row[COL.sku] || "").trim();
 
-      if (!sku || this.normalizeText(sku).includes('ma sku')) continue;
+      if (!sku || this.normalizeText(sku).includes("ma sku")) continue;
 
       const costPrice = this.toMoney(row[COL.costPrice]);
       const branches = emptyBranchRows();
@@ -958,13 +1009,21 @@ const value = Object.values(branches).reduce(
         };
       }
 
-      const qty = Object.values(branches).reduce((sum, branch) => sum + Number(branch.qty || 0), 0);
-      const value = Object.values(branches).reduce((sum, branch) => sum + Number(branch.value || 0), 0);
+      const qty = Object.values(branches).reduce(
+        (sum, branch) => sum + Number(branch.qty || 0),
+        0,
+      );
+      const value = Object.values(branches).reduce(
+        (sum, branch) => sum + Number(branch.value || 0),
+        0,
+      );
 
       productBySku.set(sku, {
         sku,
         productCode: this.getProductCodeFromSku(sku),
-        productName: String(row[COL.productName] || row[COL.variantName] || sku).trim(),
+        productName: String(
+          row[COL.productName] || row[COL.variantName] || sku,
+        ).trim(),
         qty,
         value,
         costPrice,
@@ -972,7 +1031,10 @@ const value = Object.values(branches).reduce(
       });
     }
 
-    const buildBranchDiffRows = (stockRow?: CompareRow, productRow?: CompareRow) => {
+    const buildBranchDiffRows = (
+      stockRow?: CompareRow,
+      productRow?: CompareRow,
+    ) => {
       return branchIds.map((branchId) => {
         const stockBranch = stockRow?.branches?.[branchId];
         const productBranch = productRow?.branches?.[branchId];
@@ -1023,7 +1085,10 @@ const value = Object.values(branches).reduce(
 
       return {
         sku,
-        productCode: stockRow?.productCode || productRow?.productCode || this.getProductCodeFromSku(sku),
+        productCode:
+          stockRow?.productCode ||
+          productRow?.productCode ||
+          this.getProductCodeFromSku(sku),
         productName: stockRow?.productName || productRow?.productName || sku,
         stockReportQty,
         productFileQty,
@@ -1075,19 +1140,43 @@ const value = Object.values(branches).reduce(
       return Array.from(map.values()).map((row) => {
         const branchDiffRows = branchIds.map((branchId) => {
           const stockReportQty = row.skuRows.reduce(
-            (sum, skuRow) => sum + Number(skuRow.branchDiffRows.find((branch) => branch.branchId === branchId)?.stockReportQty || 0),
+            (sum, skuRow) =>
+              sum +
+              Number(
+                skuRow.branchDiffRows.find(
+                  (branch) => branch.branchId === branchId,
+                )?.stockReportQty || 0,
+              ),
             0,
           );
           const productFileQty = row.skuRows.reduce(
-            (sum, skuRow) => sum + Number(skuRow.branchDiffRows.find((branch) => branch.branchId === branchId)?.productFileQty || 0),
+            (sum, skuRow) =>
+              sum +
+              Number(
+                skuRow.branchDiffRows.find(
+                  (branch) => branch.branchId === branchId,
+                )?.productFileQty || 0,
+              ),
             0,
           );
           const stockReportValue = row.skuRows.reduce(
-            (sum, skuRow) => sum + Number(skuRow.branchDiffRows.find((branch) => branch.branchId === branchId)?.stockReportValue || 0),
+            (sum, skuRow) =>
+              sum +
+              Number(
+                skuRow.branchDiffRows.find(
+                  (branch) => branch.branchId === branchId,
+                )?.stockReportValue || 0,
+              ),
             0,
           );
           const productFileValue = row.skuRows.reduce(
-            (sum, skuRow) => sum + Number(skuRow.branchDiffRows.find((branch) => branch.branchId === branchId)?.productFileValue || 0),
+            (sum, skuRow) =>
+              sum +
+              Number(
+                skuRow.branchDiffRows.find(
+                  (branch) => branch.branchId === branchId,
+                )?.productFileValue || 0,
+              ),
             0,
           );
 
@@ -1105,7 +1194,12 @@ const value = Object.values(branches).reduce(
         const diff = row.stockReportValue - row.productFileValue;
         const qtyDiff = row.stockReportQty - row.productFileQty;
         const skuRows = row.skuRows
-          .filter((item) => Math.abs(item.diff) >= 1 || item.qtyDiff !== 0 || item.hasCostPriceDiff)
+          .filter(
+            (item) =>
+              Math.abs(item.diff) >= 1 ||
+              item.qtyDiff !== 0 ||
+              item.hasCostPriceDiff,
+          )
           .sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
 
         return {
@@ -1117,7 +1211,8 @@ const value = Object.values(branches).reduce(
           productFileQty: row.productFileQty,
           qtyDiff,
           skuCount: row.skuRows.length,
-          costDiffSkuCount: row.skuRows.filter((item) => item.hasCostPriceDiff).length,
+          costDiffSkuCount: row.skuRows.filter((item) => item.hasCostPriceDiff)
+            .length,
           branchDiffRows,
           skuRows,
         };
@@ -1125,11 +1220,19 @@ const value = Object.values(branches).reduce(
     };
 
     const productDiffRows = groupByProduct(allSkuRows)
-      .filter((row) => Math.abs(row.diff) >= 1 || row.qtyDiff !== 0 || row.costDiffSkuCount > 0)
+      .filter(
+        (row) =>
+          Math.abs(row.diff) >= 1 ||
+          row.qtyDiff !== 0 ||
+          row.costDiffSkuCount > 0,
+      )
       .sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
 
     const skuDiffRows = allSkuRows
-      .filter((row) => Math.abs(row.diff) >= 1 || row.qtyDiff !== 0 || row.hasCostPriceDiff)
+      .filter(
+        (row) =>
+          Math.abs(row.diff) >= 1 || row.qtyDiff !== 0 || row.hasCostPriceDiff,
+      )
       .sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
 
     const stockReportValue = Array.from(stockBySku.values()).reduce(
@@ -1166,11 +1269,438 @@ const value = Object.values(branches).reduce(
     };
   }
 
+  private formatDateTime(value: any) {
+    if (!value) return null;
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return null;
+
+    return date.toLocaleString("vi-VN", {
+      hour12: false,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  }
+
+  private getUserDisplayName(user?: any) {
+    return (
+      user?.name ||
+      user?.fullName ||
+      user?.displayName ||
+      user?.staffName ||
+      user?.username ||
+      user?.email ||
+      user?.phone ||
+      null
+    );
+  }
+
+  private getUserEmail(user?: any) {
+    return user?.email || user?.username || null;
+  }
+
+  private getUserId(user?: any) {
+    return (
+      user?.id ||
+      user?.sub ||
+      user?.userId ||
+      user?.staffUserId ||
+      user?.adminUserId ||
+      null
+    );
+  }
+
+  private async getPublicColumns(tableName: string) {
+    const rows = await this.prisma.$queryRawUnsafe<
+      Array<{ column_name: string }>
+    >(
+      `SELECT column_name
+       FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = $1`,
+      tableName,
+    );
+
+    return new Set(rows.map((row) => row.column_name));
+  }
+
+  private async tableExists(tableName: string) {
+    const rows = await this.prisma.$queryRawUnsafe<Array<{ exists: boolean }>>(
+      `SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = $1
+       ) AS exists`,
+      tableName,
+    );
+
+    return Boolean(rows?.[0]?.exists);
+  }
+
+  private quoteIdent(value: string) {
+    return `"${String(value).replace(/"/g, '""')}"`;
+  }
+
+  private getFirstValue(row: any, keys: string[]) {
+    for (const key of keys) {
+      const value = row?.[key];
+      if (value !== null && value !== undefined && String(value).trim() !== "")
+        return value;
+    }
+    return null;
+  }
+
+  private normalizeRefType(value: any) {
+    return String(value || "")
+      .trim()
+      .toUpperCase();
+  }
+
+  private getActorFromMovementRow(row: any) {
+    const nestedCreatedBy = row?.createdBy || row?.actor || row?.staff || row?.user;
+
+    const name =
+      this.getFirstValue(row, [
+        "createdByName",
+        "actorName",
+        "userName",
+        "staffName",
+        "employeeName",
+        "updatedByName",
+      ]) ||
+      this.getFirstValue(nestedCreatedBy, ["fullName", "name", "username", "email"]);
+
+    const email =
+      this.getFirstValue(row, [
+        "createdByEmail",
+        "actorEmail",
+        "userEmail",
+        "staffEmail",
+        "employeeEmail",
+        "updatedByEmail",
+      ]) || this.getFirstValue(nestedCreatedBy, ["email", "username"]);
+
+    const id =
+      this.getFirstValue(row, [
+        "createdById",
+        "actorId",
+        "userId",
+        "staffUserId",
+        "adminUserId",
+        "employeeId",
+        "updatedById",
+      ]) || this.getFirstValue(nestedCreatedBy, ["id"]);
+
+    return {
+      id: id ? String(id) : null,
+      name: name ? String(name) : null,
+      email: email ? String(email) : null,
+    };
+  }
+
+  private async hydrateActor(actor: any) {
+    const clean = {
+      id: actor?.id ? String(actor.id) : null,
+      name: actor?.name ? String(actor.name) : null,
+      email: actor?.email ? String(actor.email) : null,
+    };
+
+    if (!clean.id || (clean.name && clean.email)) return clean;
+
+    const [staff, admin] = await Promise.all([
+      this.prisma.staffUser
+        .findUnique({
+          where: { id: clean.id },
+          select: { id: true, name: true, email: true, username: true },
+        })
+        .catch(() => null),
+      this.prisma.adminUser
+        .findUnique({
+          where: { id: clean.id },
+          select: { id: true, fullName: true, email: true },
+        })
+        .catch(() => null),
+    ]);
+
+    return {
+      id: clean.id,
+      name: clean.name || staff?.name || admin?.fullName || staff?.username || clean.id,
+      email: clean.email || staff?.email || admin?.email || null,
+    };
+  }
+
+  private async attachActorToMovement(
+    movementId: string,
+    user?: any,
+    client: any = this.prisma,
+  ) {
+    const actorId = this.getUserId(user);
+    const actorName = this.getUserDisplayName(user);
+    const actorEmail = this.getUserEmail(user);
+
+    if (!movementId || (!actorId && !actorName && !actorEmail)) return;
+
+    const adminActor = actorId
+      ? await this.prisma.adminUser
+          .findFirst({
+            where: {
+              OR: [{ id: String(actorId) }, actorEmail ? { email: String(actorEmail) } : undefined].filter(Boolean) as any,
+            },
+            select: { id: true },
+          })
+          .catch(() => null)
+      : actorEmail
+        ? await this.prisma.adminUser
+            .findUnique({ where: { email: String(actorEmail) }, select: { id: true } })
+            .catch(() => null)
+        : null;
+
+    // InventoryMovement.createdById đang FK sang AdminUser.
+    // StaffUser không thể ghi trực tiếp vào cột này nếu không có record AdminUser tương ứng.
+    const safeCreatedById = adminActor?.id || null;
+
+    const columns = await this.getPublicColumns("InventoryMovement");
+    const updates: string[] = [];
+    const values: any[] = [];
+
+    const addUpdate = (column: string, value: any) => {
+      if (!columns.has(column)) return;
+      if (value === null || value === undefined || String(value).trim() === "")
+        return;
+      values.push(String(value));
+      updates.push(`${this.quoteIdent(column)} = $${values.length}`);
+    };
+
+    addUpdate("createdById", safeCreatedById);
+    addUpdate("createdByName", actorName);
+    addUpdate("createdByEmail", actorEmail);
+    addUpdate("actorId", actorId);
+    addUpdate("actorName", actorName);
+    addUpdate("actorEmail", actorEmail);
+    addUpdate("userId", actorId);
+    addUpdate("userName", actorName);
+    addUpdate("userEmail", actorEmail);
+    addUpdate("staffUserId", actorId);
+    addUpdate("adminUserId", actorId);
+    addUpdate("employeeId", actorId);
+    addUpdate("employeeName", actorName);
+    addUpdate("employeeEmail", actorEmail);
+
+    if (!updates.length) return;
+
+    values.push(movementId);
+    await client.$executeRawUnsafe(
+      `UPDATE "InventoryMovement" SET ${updates.join(", ")} WHERE "id" = $${values.length}`,
+      ...values,
+    );
+  }
+
+  private async createInventoryMovement(
+    tx: any,
+    data: Prisma.InventoryMovementUncheckedCreateInput,
+    user?: any,
+  ) {
+    const movement = await tx.inventoryMovement.create({ data });
+
+    // Nếu schema đã có cột actor/createdBy thì ghi nhận nhân viên thao tác ngay khi phát sinh log.
+    // Nếu schema hiện tại chưa có các cột này, hàm sẽ tự bỏ qua để không làm vỡ build/runtime.
+    await this.attachActorToMovement(movement.id, user, tx);
+
+    return movement;
+  }
+
+  private async mapActorsFromRefs(rows: any[]) {
+    const result = new Map<string, any>();
+
+    const addActor = (movementId: string, actor: any) => {
+      if (!movementId) return;
+      const clean = {
+        id: actor?.id ? String(actor.id) : null,
+        name: actor?.name ? String(actor.name) : null,
+        email: actor?.email ? String(actor.email) : null,
+      };
+      if (clean.id || clean.name || clean.email) result.set(movementId, clean);
+    };
+
+    for (const row of rows) {
+      const directActor = this.getActorFromMovementRow(row);
+      if (directActor.id || directActor.name || directActor.email)
+        addActor(row.id, directActor);
+    }
+
+    const refGroups = new Map<string, Map<string, string[]>>();
+    for (const row of rows) {
+      if (result.has(row.id)) continue;
+      const refType = this.normalizeRefType(row.refType);
+      const refId = row.refId ? String(row.refId) : "";
+      if (!refType || !refId) continue;
+      const group = refGroups.get(refType) || new Map<string, string[]>();
+      const ids = group.get(refId) || [];
+      ids.push(row.id);
+      group.set(refId, ids);
+      refGroups.set(refType, group);
+    }
+
+    const refConfig: Record<
+      string,
+      {
+        table: string;
+        codeColumns: string[];
+        actorColumns: string[];
+        actorNameColumns: string[];
+        actorEmailColumns: string[];
+      }
+    > = {
+      ORDER: {
+        table: "Order",
+        codeColumns: ["orderCode", "code", "orderNumber"],
+        actorColumns: [
+          "createdById",
+          "createdByUserId",
+          "createdByStaffId",
+          "assignedStaffId",
+          "staffUserId",
+          "adminUserId",
+          "cashierId",
+          "sellerId",
+          "employeeId",
+        ],
+        actorNameColumns: [
+          "createdByName",
+          "createdByStaffName",
+          "assignedStaffName",
+          "staffName",
+          "cashierName",
+          "sellerName",
+          "employeeName",
+        ],
+        actorEmailColumns: [
+          "createdByEmail",
+          "staffEmail",
+          "cashierEmail",
+          "sellerEmail",
+          "employeeEmail",
+        ],
+      },
+      PURCHASE_RECEIPT: {
+        table: "PurchaseReceipt",
+        codeColumns: ["code", "receiptCode", "purchaseReceiptCode"],
+        actorColumns: [
+          "createdById",
+          "createdByUserId",
+          "staffUserId",
+          "adminUserId",
+          "employeeId",
+        ],
+        actorNameColumns: ["createdByName", "createdByStaffName", "staffName", "employeeName"],
+        actorEmailColumns: ["createdByEmail", "staffEmail", "employeeEmail"],
+      },
+      STOCKTAKE: {
+        table: "StocktakeSession",
+        codeColumns: ["code", "sessionCode", "stocktakeCode"],
+        actorColumns: [
+          "createdById",
+          "createdByUserId",
+          "staffUserId",
+          "adminUserId",
+          "employeeId",
+        ],
+        actorNameColumns: ["createdByName", "staffName", "employeeName"],
+        actorEmailColumns: ["createdByEmail", "staffEmail", "employeeEmail"],
+      },
+      STOCKTAKE_SESSION: {
+        table: "StocktakeSession",
+        codeColumns: ["code", "sessionCode", "stocktakeCode"],
+        actorColumns: [
+          "createdById",
+          "createdByUserId",
+          "staffUserId",
+          "adminUserId",
+          "employeeId",
+        ],
+        actorNameColumns: ["createdByName", "staffName", "employeeName"],
+        actorEmailColumns: ["createdByEmail", "staffEmail", "employeeEmail"],
+      },
+      INVENTORY_TRANSFER: {
+        table: "StockTransfer",
+        codeColumns: ["code", "transferCode", "stockTransferCode"],
+        actorColumns: [
+          "createdById",
+          "createdByUserId",
+          "staffUserId",
+          "adminUserId",
+          "employeeId",
+        ],
+        actorNameColumns: ["createdByName", "staffName", "employeeName"],
+        actorEmailColumns: ["createdByEmail", "staffEmail", "employeeEmail"],
+      },
+      STOCK_TRANSFER: {
+        table: "StockTransfer",
+        codeColumns: ["code", "transferCode", "stockTransferCode"],
+        actorColumns: [
+          "createdById",
+          "createdByUserId",
+          "staffUserId",
+          "adminUserId",
+          "employeeId",
+        ],
+        actorNameColumns: ["createdByName", "staffName", "employeeName"],
+        actorEmailColumns: ["createdByEmail", "staffEmail", "employeeEmail"],
+      },
+    };
+
+    for (const [refType, group] of refGroups.entries()) {
+      const config = refConfig[refType];
+      if (!config || !(await this.tableExists(config.table))) continue;
+
+      const columns = await this.getPublicColumns(config.table);
+      const selectColumns = ["id"];
+      for (const column of [
+        ...config.codeColumns,
+        ...config.actorColumns,
+        ...config.actorNameColumns,
+        ...config.actorEmailColumns,
+      ]) {
+        if (columns.has(column) && !selectColumns.includes(column))
+          selectColumns.push(column);
+      }
+
+      const ids = Array.from(group.keys());
+      if (!ids.length) continue;
+
+      const sql = `SELECT ${selectColumns.map((column) => this.quoteIdent(column)).join(", ")}
+        FROM ${this.quoteIdent(config.table)}
+        WHERE "id" = ANY($1::text[])`;
+      const refRows = await this.prisma.$queryRawUnsafe<any[]>(sql, ids);
+
+      for (const refRow of refRows) {
+        const movementIds = group.get(String(refRow.id)) || [];
+        const actor = {
+          id: this.getFirstValue(refRow, config.actorColumns),
+          name: this.getFirstValue(refRow, config.actorNameColumns),
+          email: this.getFirstValue(refRow, config.actorEmailColumns),
+        };
+        for (const movementId of movementIds) addActor(movementId, actor);
+      }
+    }
+
+    const hydratedEntries = await Promise.all(
+      Array.from(result.entries()).map(async ([movementId, actor]) => [
+        movementId,
+        await this.hydrateActor(actor),
+      ] as const),
+    );
+
+    return new Map(hydratedEntries);
+  }
+
   async adjustInventory(
     body: {
       variantId: string;
       qty: number;
-      type: 'IN' | 'OUT' | 'SET';
+      type: "IN" | "OUT" | "SET";
       note?: string;
       branchId?: string;
     },
@@ -1183,16 +1713,16 @@ const value = Object.values(branches).reduce(
     this.ensureBranchAccess(user, branchId);
 
     if (!branchId) {
-      throw new BadRequestException('Thiếu branchId');
+      throw new BadRequestException("Thiếu branchId");
     }
 
     if (!body.variantId) {
-      throw new BadRequestException('Thiếu variantId');
+      throw new BadRequestException("Thiếu variantId");
     }
 
     const qty = Number(body.qty || 0);
     if (!Number.isFinite(qty) || qty <= 0) {
-      throw new BadRequestException('Số lượng không hợp lệ');
+      throw new BadRequestException("Số lượng không hợp lệ");
     }
 
     const inventory = await this.prisma.inventoryItem.findUnique({
@@ -1212,34 +1742,38 @@ const value = Object.values(branches).reduce(
     });
 
     if (!inventory) {
-      throw new NotFoundException('Không tìm thấy tồn kho của variant ở chi nhánh này');
+      throw new NotFoundException(
+        "Không tìm thấy tồn kho của variant ở chi nhánh này",
+      );
     }
 
     const costPrice = Number((inventory as any).variant?.costPrice || 0);
     if (costPrice <= 0) {
-      throw new BadRequestException('SKU chưa có giá vốn. Vui lòng cập nhật giá vốn trước khi điều chỉnh kho.');
+      throw new BadRequestException(
+        "SKU chưa có giá vốn. Vui lòng cập nhật giá vốn trước khi điều chỉnh kho.",
+      );
     }
 
     const currentQty = Number((inventory as any).availableQty || 0);
     let nextQty = currentQty;
 
-    if (body.type === 'SET') {
+    if (body.type === "SET") {
       nextQty = qty;
-    } else if (body.type === 'IN') {
+    } else if (body.type === "IN") {
       nextQty = currentQty + qty;
-    } else if (body.type === 'OUT') {
+    } else if (body.type === "OUT") {
       nextQty = currentQty - qty;
       if (nextQty < 0) {
-        throw new BadRequestException('Tồn kho không đủ');
+        throw new BadRequestException("Tồn kho không đủ");
       }
     } else {
-      throw new BadRequestException('Loại điều chỉnh không hợp lệ');
+      throw new BadRequestException("Loại điều chỉnh không hợp lệ");
     }
 
     const movementQty =
-      body.type === 'OUT'
+      body.type === "OUT"
         ? -qty
-        : body.type === 'SET'
+        : body.type === "SET"
           ? nextQty - currentQty
           : qty;
 
@@ -1263,16 +1797,19 @@ const value = Object.values(branches).reduce(
         },
       });
 
-      await tx.inventoryMovement.create({
-        data: {
+      await this.createInventoryMovement(
+        tx,
+        {
           variantId: body.variantId,
           type: InventoryMovementType.ADJUSTMENT,
           qty: movementQty,
           note: body.note || `Điều chỉnh tồn kho (${body.type})`,
-          refType: 'INVENTORY',
+          refType: "INVENTORY",
+          refId: row.id,
           branchId,
-        },
-      });
+        } as any,
+        user,
+      );
 
       return row;
     });
@@ -1285,12 +1822,12 @@ const value = Object.values(branches).reduce(
       availableQty: Number((updated as any).availableQty || 0),
       reservedQty: Number((updated as any).reservedQty || 0),
       incomingQty: Number((updated as any).incomingQty || 0),
-      updatedAt: new Date(updated.updatedAt).toLocaleString('vi-VN'),
+      updatedAt: new Date(updated.updatedAt).toLocaleString("vi-VN"),
       variantId: updated.variantId,
-      sku: updatedVariant?.sku || '—',
-      color: updatedVariant?.color || '',
-      size: updatedVariant?.size || '',
-      productName: updatedVariant?.product?.name || '—',
+      sku: updatedVariant?.sku || "—",
+      color: updatedVariant?.color || "",
+      size: updatedVariant?.size || "",
+      productName: updatedVariant?.product?.name || "—",
     };
   }
 
@@ -1305,16 +1842,18 @@ const value = Object.values(branches).reduce(
     user?: any,
   ) {
     if (!body.variantId || !body.fromBranchId || !body.toBranchId) {
-      throw new BadRequestException('Thiếu dữ liệu chuyển kho');
+      throw new BadRequestException("Thiếu dữ liệu chuyển kho");
     }
 
     if (body.fromBranchId === body.toBranchId) {
-      throw new BadRequestException('Chi nhánh chuyển và nhận không được trùng nhau');
+      throw new BadRequestException(
+        "Chi nhánh chuyển và nhận không được trùng nhau",
+      );
     }
 
     const qty = Number(body.qty || 0);
     if (!Number.isFinite(qty) || qty <= 0) {
-      throw new BadRequestException('Số lượng chuyển không hợp lệ');
+      throw new BadRequestException("Số lượng chuyển không hợp lệ");
     }
 
     this.ensureBranchAccess(user, body.fromBranchId);
@@ -1336,17 +1875,19 @@ const value = Object.values(branches).reduce(
     });
 
     if (!fromInventory) {
-      throw new NotFoundException('Không tìm thấy tồn kho ở chi nhánh chuyển');
+      throw new NotFoundException("Không tìm thấy tồn kho ở chi nhánh chuyển");
     }
 
     const costPrice = Number((fromInventory as any).variant?.costPrice || 0);
     if (costPrice <= 0) {
-      throw new BadRequestException('SKU chưa có giá vốn. Vui lòng cập nhật giá vốn trước khi chuyển kho.');
+      throw new BadRequestException(
+        "SKU chưa có giá vốn. Vui lòng cập nhật giá vốn trước khi chuyển kho.",
+      );
     }
 
     const currentQty = Number((fromInventory as any).availableQty || 0);
     if (currentQty < qty) {
-      throw new BadRequestException('Tồn kho không đủ để chuyển');
+      throw new BadRequestException("Tồn kho không đủ để chuyển");
     }
 
     const updated = await this.prisma.$transaction(async (tx) => {
@@ -1390,31 +1931,37 @@ const value = Object.values(branches).reduce(
         },
       });
 
-      await tx.inventoryMovement.create({
-        data: {
+      await this.createInventoryMovement(
+        tx,
+        {
           variantId: body.variantId,
           type: InventoryMovementType.ADJUSTMENT,
           qty: -qty,
           note:
             body.note ||
             `Chuyển kho từ ${body.fromBranchId} sang ${body.toBranchId}`,
-          refType: 'INVENTORY_TRANSFER',
+          refType: "INVENTORY_TRANSFER",
+          refId: `${body.fromBranchId}->${body.toBranchId}`,
           branchId: body.fromBranchId,
-        },
-      });
+        } as any,
+        user,
+      );
 
-      await tx.inventoryMovement.create({
-        data: {
+      await this.createInventoryMovement(
+        tx,
+        {
           variantId: body.variantId,
           type: InventoryMovementType.ADJUSTMENT,
           qty,
           note:
             body.note ||
             `Nhận kho từ ${body.fromBranchId} sang ${body.toBranchId}`,
-          refType: 'INVENTORY_TRANSFER',
+          refType: "INVENTORY_TRANSFER",
+          refId: `${body.fromBranchId}->${body.toBranchId}`,
           branchId: body.toBranchId,
-        },
-      });
+        } as any,
+        user,
+      );
 
       return deductedRow;
     });
@@ -1427,27 +1974,35 @@ const value = Object.values(branches).reduce(
       availableQty: Number((updated as any).availableQty || 0),
       reservedQty: Number((updated as any).reservedQty || 0),
       incomingQty: Number((updated as any).incomingQty || 0),
-      updatedAt: new Date(updated.updatedAt).toLocaleString('vi-VN'),
+      updatedAt: new Date(updated.updatedAt).toLocaleString("vi-VN"),
       variantId: updated.variantId,
-      sku: updatedVariant?.sku || '—',
-      color: updatedVariant?.color || '',
-      size: updatedVariant?.size || '',
-      productName: updatedVariant?.product?.name || '—',
+      sku: updatedVariant?.sku || "—",
+      color: updatedVariant?.color || "",
+      size: updatedVariant?.size || "",
+      productName: updatedVariant?.product?.name || "—",
     };
   }
 
   async getInventoryMovements(limit = 100, user?: any) {
+    const safeLimit = Math.min(Math.max(Number(limit || 100), 1), 1000);
     const where = this.isOwner(user)
       ? {}
       : {
-          branchId: this.resolveBranchIdFromUser(user) || '__NO_BRANCH__',
+          branchId: this.resolveBranchIdFromUser(user) || "__NO_BRANCH__",
         };
 
     const rows = await this.prisma.inventoryMovement.findMany({
       where,
-      orderBy: { createdAt: 'desc' },
-      take: limit,
+      orderBy: { createdAt: "desc" },
+      take: safeLimit,
       include: {
+        createdBy: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+          },
+        },
         variant: {
           include: {
             product: true,
@@ -1456,8 +2011,18 @@ const value = Object.values(branches).reduce(
       },
     });
 
+    const actorByMovementId = await this.mapActorsFromRefs(rows as any[]);
+
     return rows.map((row) => {
-      const variant = (row as any).variant;
+      const anyRow = row as any;
+      const variant = anyRow.variant;
+      const actor =
+        actorByMovementId.get(row.id) ||
+        this.getActorFromMovementRow(anyRow) ||
+        {};
+      const createdAtIso = row.createdAt
+        ? new Date(row.createdAt).toISOString()
+        : null;
 
       return {
         id: row.id,
@@ -1466,19 +2031,152 @@ const value = Object.values(branches).reduce(
         note: row.note,
         refType: row.refType,
         refId: row.refId,
+        refCode:
+          anyRow.refCode ||
+          anyRow.orderCode ||
+          anyRow.purchaseReceiptCode ||
+          anyRow.stocktakeSessionCode ||
+          anyRow.stockTransferCode ||
+          null,
         branchId: row.branchId,
-        createdAt: new Date(row.createdAt).toLocaleString('vi-VN'),
-        sku: variant?.sku || '—',
-        productName: variant?.product?.name || '—',
-        color: variant?.color || '',
-        size: variant?.size || '',
+        createdAt: createdAtIso,
+        createdAtText: this.formatDateTime(row.createdAt),
+        updatedAt: anyRow.updatedAt
+          ? new Date(anyRow.updatedAt).toISOString()
+          : null,
+        createdById: actor?.id || null,
+        createdByName: actor?.name || null,
+        createdByEmail: actor?.email || null,
+        createdBy: anyRow.createdBy
+          ? {
+              id: anyRow.createdBy.id,
+              fullName: anyRow.createdBy.fullName,
+              email: anyRow.createdBy.email,
+            }
+          : null,
+        actorId: actor?.id || null,
+        actorName: actor?.name || null,
+        actorEmail: actor?.email || null,
+        beforeQty:
+          anyRow.beforeQty ?? anyRow.previousQty ?? anyRow.qtyBefore ?? null,
+        afterQty: anyRow.afterQty ?? anyRow.nextQty ?? anyRow.qtyAfter ?? null,
+        status: anyRow.status || anyRow.movementStatus || "RECORDED",
+        sku: variant?.sku || "—",
+        barcode: variant?.barcode || variant?.barCode || null,
+        productName: variant?.product?.name || "—",
+        productId: variant?.product?.id || null,
+        variantId: row.variantId,
+        color: variant?.color || "",
+        size: variant?.size || "",
       };
     });
   }
 
+
+  async getInventoryMovementActors(user?: any) {
+    const isOwner = this.isOwner(user);
+    const userBranchId = this.resolveBranchIdFromUser(user);
+    const userId = this.getUserId(user);
+    const userEmail = this.getUserEmail(user);
+
+    const [staffUsers, adminUsers] = await Promise.all([
+      this.prisma.staffUser.findMany({
+        where: isOwner
+          ? { isActive: true }
+          : {
+              isActive: true,
+              OR: [
+                userBranchId ? { branchId: userBranchId } : undefined,
+                userBranchId
+                  ? { branchPermissions: { some: { branchId: userBranchId } } }
+                  : undefined,
+                userId ? { id: String(userId) } : undefined,
+                userEmail ? { email: String(userEmail) } : undefined,
+              ].filter(Boolean) as any,
+            },
+        select: {
+          id: true,
+          code: true,
+          name: true,
+          username: true,
+          email: true,
+          branchId: true,
+          branchName: true,
+          isActive: true,
+        },
+        orderBy: [{ name: "asc" }],
+        take: 1000,
+      }),
+      this.prisma.adminUser.findMany({
+        where: isOwner
+          ? { isActive: true }
+          : {
+              isActive: true,
+              OR: [
+                userId ? { id: String(userId) } : undefined,
+                userEmail ? { email: String(userEmail) } : undefined,
+              ].filter(Boolean) as any,
+            },
+        select: {
+          id: true,
+          fullName: true,
+          email: true,
+          role: true,
+          isActive: true,
+        },
+        orderBy: [{ fullName: "asc" }],
+        take: 500,
+      }),
+    ]);
+
+    const map = new Map<string, any>();
+
+    const add = (item: any) => {
+      const label = this.getFirstValue(item, ["label", "name", "fullName", "username", "email", "id"]);
+      if (!label) return;
+      const key = String(item.id || item.email || label);
+      if (map.has(key)) return;
+      map.set(key, {
+        id: String(item.id || key),
+        label: String(label),
+        name: item.name || item.fullName || item.username || String(label),
+        email: item.email || null,
+        type: item.type || item.role || null,
+        branchId: item.branchId || null,
+        branchName: item.branchName || null,
+      });
+    };
+
+    for (const staff of staffUsers) {
+      add({
+        id: staff.id,
+        label: staff.name || staff.username || staff.email || staff.code,
+        name: staff.name || staff.username || staff.code,
+        email: staff.email,
+        type: "Nhân viên",
+        branchId: staff.branchId,
+        branchName: staff.branchName,
+      });
+    }
+
+    for (const admin of adminUsers) {
+      add({
+        id: admin.id,
+        label: admin.fullName || admin.email,
+        name: admin.fullName,
+        email: admin.email,
+        type: admin.role === "OWNER" || admin.role === "owner" ? "Owner/Admin" : "Admin",
+      });
+    }
+
+    return Array.from(map.values()).sort((a, b) =>
+      String(a.label).localeCompare(String(b.label), "vi"),
+    );
+  }
+
   async getInventoryByRack(rackId: string, user?: any) {
     if (!rackId) {
-      throw new BadRequestException('Thiếu rackId');
+      throw new BadRequestException("Thiếu rackId");
     }
 
     const locations = await this.prisma.productVariantLocation.findMany({
@@ -1503,13 +2201,18 @@ const value = Object.values(branches).reduce(
       }),
     ]);
 
-    const variantMap = new Map(variants.map((variant) => [variant.id, variant]));
+    const variantMap = new Map(
+      variants.map((variant) => [variant.id, variant]),
+    );
     const qtyMap = new Map<string, number>();
     const branchQtyMap = new Map<string, Record<string, number>>();
 
     for (const item of inventoryItems) {
       const availableQty = Number((item as any).availableQty || 0);
-      qtyMap.set(item.variantId, (qtyMap.get(item.variantId) || 0) + availableQty);
+      qtyMap.set(
+        item.variantId,
+        (qtyMap.get(item.variantId) || 0) + availableQty,
+      );
 
       const currentBranchQty = branchQtyMap.get(item.variantId) || {};
       currentBranchQty[item.branchId] =
@@ -1526,11 +2229,11 @@ const value = Object.values(branches).reduce(
         id: location.id,
         rackId: location.rackId,
         variantId: location.variantId,
-        sku: variant?.sku || '—',
-        productName: variant?.product?.name || '—',
-        productSlug: variant?.product?.slug || '',
-        color: variant?.color || '',
-        size: variant?.size || '',
+        sku: variant?.sku || "—",
+        productName: variant?.product?.name || "—",
+        productSlug: variant?.product?.slug || "",
+        color: variant?.color || "",
+        size: variant?.size || "",
         qty: totalQty,
         costPrice,
         inventoryValue: totalQty * costPrice,

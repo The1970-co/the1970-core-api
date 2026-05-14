@@ -107,6 +107,12 @@ export class InventoryController {
     return this.inventoryService.getInventoryMovements(parsedLimit, req?.user);
   }
 
+  @Get("movements/actors")
+  @RequirePermissions("inventory.logs.view")
+  async getInventoryMovementActors(@Req() req?: Request & { user?: any }) {
+    return this.inventoryService.getInventoryMovementActors(req?.user);
+  }
+
   @Post("audit-two-sapo-files")
   @RequirePermissions("inventory.excel.audit")
   @UseInterceptors(

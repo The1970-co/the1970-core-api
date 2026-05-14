@@ -1,93 +1,50 @@
 import { PrismaService } from "../src/prisma/prisma.service";
 import * as XLSX from "xlsx";
-import { randomUUID } from "crypto";
-
-type AnyRow = Record<string, any>;
 
 const prisma = new PrismaService();
 
-function arg(name: string, fallback = "") {
+function arg(name: string) {
   const prefix = `--${name}=`;
   const found = process.argv.find((x) => x.startsWith(prefix));
-  return found ? found.slice(prefix.length) : fallback;
+  return found ? found.slice(prefix.length) : "";
 }
 
 function hasFlag(name: string) {
   return process.argv.includes(`--${name}`);
 }
 
-function normalizeText(value: any) {
-  return String(value ?? "").trim();
+function normalize(value: any) {
+  return String(value || "").trim();
 }
 
-function normalizeKey(value: any) {
-  return normalizeText(value)
+function normalizeHeader(value: any) {
+  return String(value || "")
+    .trim()
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/đ/g, "d")
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/[^a-z0-9]+/g, "");
 }
 
-function toNumber(value: any) {
-  if (value === null || value === undefined || value === "") return 0;
-  if (typeof value === "number") return Number.isFinite(value) ? Math.round(value) : 0;
+function getCell(row: any, names: string[]) {
+  const keys = Object.keys(row || {});
 
-  let raw = String(value).trim().replace(/\s/g, "");
-  if (!raw) return 0;
-
-  if (raw.includes(".") && raw.includes(",")) {
-    raw = raw.split(",")[0].replace(/\./g, "");
-  } else if (raw.includes(",")) {
-    const [left, right = ""] = raw.split(",");
-    raw = right.length === 3 && left.length <= 3 ? raw.replace(/,/g, "") : left;
-  } else if (raw.includes(".")) {
-    raw = raw.replace(/\./g, "");
-  }
-
-  raw = raw.replace(/[^\d-]/g, "");
-  const n = Number(raw);
-  return Number.isFinite(n) ? Math.round(n) : 0;
-}
-
-function getCell(row: AnyRow, names: string[]) {
-  const keys = Object.keys(row);
   for (const name of names) {
-    const wanted = normalizeKey(name);
-    const found = keys.find((k) => normalizeKey(k) === wanted);
+    const found = keys.find(
+      (key) => normalizeHeader(key) === normalizeHeader(name)
+    );
+
     if (found) return row[found];
   }
+
   return "";
 }
 
-function parseItems(text: string) {
-  const source = normalizeText(text);
-  const items: Array<{ rawName: string; productCode: string; qty: number }> = [];
-
-  // Match segments like: "Áo Sơ Mi OXFORD - SM927 [1 cái]"
-  const regex = /(.+?)\s*\[\s*(\d+)\s*c[aá]i\s*\]/giu;
-  let match: RegExpExecArray | null;
-
-  while ((match = regex.exec(source))) {
-    let rawName = normalizeText(match[1]).replace(/^,\s*/, "").replace(/,\s*$/, "").trim();
-    const qty = Math.max(1, toNumber(match[2]));
-
-    // Product code usually appears as SM927, QKK904, AP932...
-    const codeMatches = rawName.toUpperCase().match(/\b[A-ZĐ]{1,6}\d{2,6}[A-Z0-9]*\b/g) || [];
-    const productCode = normalizeText(codeMatches[codeMatches.length - 1] || "");
-
-    items.push({ rawName, productCode, qty });
-  }
-
-  return items;
-}
-
 async function tableColumns(tableName: string) {
-  const rows = await prisma.$queryRawUnsafe<Array<{ column_name: string; is_nullable: string; data_type: string }>>(
+  return prisma.$queryRawUnsafe<Array<{ column_name: string }>>(
     `
-      SELECT column_name, is_nullable, data_type
+      SELECT column_name
       FROM information_schema.columns
       WHERE table_schema = 'public'
         AND table_name = $1
@@ -95,374 +52,381 @@ async function tableColumns(tableName: string) {
     `,
     tableName
   );
-
-  return rows;
 }
 
-function hasColumn(columns: Array<{ column_name: string }>, name: string) {
-  return columns.some((c) => c.column_name === name);
+function pickColumn(
+  columns: Array<{ column_name: string }>,
+  candidates: string[]
+) {
+  const set = new Set(columns.map((c) => c.column_name));
+
+  return candidates.find((name) => set.has(name)) || "";
 }
 
-function firstExistingColumn(columns: Array<{ column_name: string }>, names: string[]) {
-  return names.find((name) => hasColumn(columns, name)) || "";
+function extractProductCode(text: string) {
+  const matches =
+    text.toUpperCase().match(/\b[A-Z]{1,6}\d{2,6}[A-Z0-9-]*\b/g) || [];
+
+  return matches[0] || "";
 }
 
-async function getOrderByCode(code: string) {
-  const orderColumns = await tableColumns("Order");
-  const codeColumn = firstExistingColumn(orderColumns, ["code", "orderCode", "orderNumber", "internalCode"]);
-  if (!codeColumn) {
-    throw new Error('Bảng "Order" không có cột mã đơn như code/orderCode/orderNumber/internalCode.');
-  }
+function parseQty(text: string) {
+  const found = String(text || "").match(/\[(\d+)/);
 
-  const rows = await prisma.$queryRawUnsafe<any[]>(
-    `SELECT * FROM "Order" WHERE "${codeColumn}" = $1 LIMIT 1`,
-    code
-  );
-  return rows[0] || null;
+  return found ? Math.max(1, Number(found[1] || 1)) : 1;
 }
 
-async function countOrderItems(orderId: string) {
-  const rows = await prisma.$queryRawUnsafe<Array<{ count: string }>>(
-    `SELECT COUNT(*)::text AS count FROM "OrderItem" WHERE "orderId" = $1`,
-    orderId
-  );
-  return Number(rows[0]?.count || 0);
-}
-
-async function findBranchFallback() {
-  const branchColumns = await tableColumns("Branch");
-  const hasName = hasColumn(branchColumns, "name");
-  const hasCode = hasColumn(branchColumns, "code");
-
-  const selectExpr = [
-    `"id"`,
-    hasName ? `"name"` : `'' AS "name"`,
-    hasCode ? `"code"` : `'' AS "code"`,
-  ].join(", ");
-
-  const orderExpr = `
-    CASE
-      ${hasCode ? `WHEN lower(coalesce("code",'')) = 'qo' THEN 0` : ""}
-      ${hasName ? `WHEN lower(coalesce("name",'')) LIKE '%quốc oai%' THEN 1` : ""}
-      ${hasName ? `WHEN lower(coalesce("name",'')) LIKE '%quoc oai%' THEN 1` : ""}
-      ${hasName ? `WHEN lower(coalesce("name",'')) LIKE '%kho%' THEN 2` : ""}
-      ELSE 3
-    END
+async function findOrder(
+  orderCode: string,
+  orderCodeColumn: string
+) {
+  const sql = `
+    SELECT *
+    FROM "Order"
+    WHERE "${orderCodeColumn}" = $1
+    LIMIT 1
   `;
 
   const rows = await prisma.$queryRawUnsafe<any[]>(
-    `
-      SELECT ${selectExpr}
-      FROM "Branch"
-      ORDER BY ${orderExpr}
-      LIMIT 1
-    `
+    sql,
+    orderCode
   );
 
   return rows[0] || null;
 }
 
-async function findVariantForProductCode(productCode: string, branchId?: string | null) {
-  if (!productCode) return { variant: null, reason: "NO_PRODUCT_CODE", candidates: 0 };
-
-  const code = productCode.toUpperCase();
-
+async function findVariant(productCode: string) {
   const rows = await prisma.$queryRawUnsafe<any[]>(
     `
       SELECT
         pv.*,
-        p.name AS "productName",
-        COALESCE(SUM(ii."availableQty"), 0)::int AS "totalStock",
-        COALESCE(SUM(CASE WHEN ii."branchId" = $2 THEN ii."availableQty" ELSE 0 END), 0)::int AS "branchStock"
+        p.name AS "productName"
       FROM "ProductVariant" pv
-      JOIN "Product" p ON p.id = pv."productId"
-      LEFT JOIN "InventoryItem" ii ON ii."variantId" = pv.id
-      WHERE upper(pv.sku) = $1
-         OR upper(pv.sku) LIKE $1 || '-%'
+      JOIN "Product" p
+        ON p.id = pv."productId"
+      WHERE upper(pv.sku) LIKE $1 || '%'
          OR upper(p.slug) = lower($1)
          OR upper(p.name) LIKE '%' || $1 || '%'
-      GROUP BY pv.id, p.name
-      ORDER BY
-        CASE WHEN upper(pv.sku) = $1 THEN 0 ELSE 1 END,
-        COALESCE(SUM(CASE WHEN ii."branchId" = $2 THEN ii."availableQty" ELSE 0 END), 0) DESC,
-        COALESCE(SUM(ii."availableQty"), 0) DESC,
-        pv."createdAt" ASC
-      LIMIT 20
+      ORDER BY pv."createdAt" ASC
+      LIMIT 1
     `,
-    code,
-    branchId || ""
+    productCode.toUpperCase()
   );
 
-  if (rows.length === 0) return { variant: null, reason: "NO_VARIANT_MATCH", candidates: 0 };
-
-  // If there is only one candidate, use it.
-  if (rows.length === 1) return { variant: rows[0], reason: "MATCH_ONE", candidates: 1 };
-
-  // Prefer candidate with stock in order branch.
-  const withBranchStock = rows.filter((r) => Number(r.branchStock || 0) > 0);
-  if (withBranchStock.length === 1) {
-    return { variant: withBranchStock[0], reason: "MATCH_BRANCH_STOCK", candidates: rows.length };
-  }
-
-  // Prefer candidate with total stock if unique.
-  const withStock = rows.filter((r) => Number(r.totalStock || 0) > 0);
-  if (withStock.length === 1) {
-    return { variant: withStock[0], reason: "MATCH_TOTAL_STOCK", candidates: rows.length };
-  }
-
-  return { variant: null, reason: "AMBIGUOUS_VARIANT", candidates: rows.length };
+  return rows[0] || null;
 }
 
-async function insertOrderItem(params: {
-  columns: Array<{ column_name: string }>;
-  order: AnyRow;
-  variant: AnyRow;
-  item: { rawName: string; productCode: string; qty: number };
-  unitPrice: number;
-}) {
-  const { columns, order, variant, item, unitPrice } = params;
+async function existingOrderItemCount(orderId: string) {
+  const rows = await prisma.$queryRawUnsafe<
+    Array<{ count: string }>
+  >(
+    `
+      SELECT COUNT(*)::text AS count
+      FROM "OrderItem"
+      WHERE "orderId" = $1
+    `,
+    orderId
+  );
 
-  const data: AnyRow = {};
+  return Number(rows[0]?.count || 0);
+}
 
-  if (hasColumn(columns, "id")) data.id = randomUUID();
-  if (hasColumn(columns, "orderId")) data.orderId = order.id;
-  if (hasColumn(columns, "productId")) data.productId = variant.productId || null;
-  if (hasColumn(columns, "variantId")) data.variantId = variant.id || null;
+async function insertOrderItem(
+  orderItemColumns: Array<{ column_name: string }>,
+  orderId: string,
+  variant: any,
+  qty: number
+) {
+  const colSet = new Set(
+    orderItemColumns.map((c) => c.column_name)
+  );
 
-  const productNameCol = firstExistingColumn(columns, ["productName", "name", "title"]);
-  if (productNameCol) data[productNameCol] = variant.productName || item.rawName;
+  const price = Number(variant.price || 0);
 
-  if (hasColumn(columns, "sku")) data.sku = variant.sku || item.productCode;
-  if (hasColumn(columns, "color")) data.color = variant.color || "";
-  if (hasColumn(columns, "size")) data.size = variant.size || "";
-  if (hasColumn(columns, "quantity")) data.quantity = item.qty;
+  const data: Record<string, any> = {};
 
-  const unitPriceCol = firstExistingColumn(columns, ["unitPrice", "price", "salePrice"]);
-  if (unitPriceCol) data[unitPriceCol] = unitPrice || toNumber(variant.price);
+  if (colSet.has("id")) data.id = crypto.randomUUID();
 
-  const totalCol = firstExistingColumn(columns, ["totalPrice", "lineTotal", "total", "amount"]);
-  if (totalCol) data[totalCol] = (unitPrice || toNumber(variant.price)) * item.qty;
+  if (colSet.has("orderId")) data.orderId = orderId;
 
-  const costCol = firstExistingColumn(columns, ["costPrice", "unitCost", "cost"]);
-  if (costCol) data[costCol] = toNumber(variant.costPrice);
+  if (colSet.has("productId"))
+    data.productId = variant.productId || null;
 
-  if (hasColumn(columns, "createdAt")) data.createdAt = new Date();
-  if (hasColumn(columns, "updatedAt")) data.updatedAt = new Date();
+  if (colSet.has("variantId"))
+    data.variantId = variant.id || null;
+
+  if (colSet.has("sku"))
+    data.sku = variant.sku || "";
+
+  if (colSet.has("productName"))
+    data.productName = variant.productName || "";
+
+  if (colSet.has("name"))
+    data.name = variant.productName || "";
+
+  if (colSet.has("color"))
+    data.color = variant.color || "";
+
+  if (colSet.has("size"))
+    data.size = variant.size || "";
+
+  if (colSet.has("quantity"))
+    data.quantity = qty;
+
+  if (colSet.has("qty"))
+    data.qty = qty;
+
+  if (colSet.has("unitPrice"))
+    data.unitPrice = price;
+
+  if (colSet.has("price"))
+    data.price = price;
+
+  if (colSet.has("costPrice"))
+    data.costPrice = Number(
+      variant.costPrice || 0
+    );
+
+  if (colSet.has("totalPrice"))
+    data.totalPrice = price * qty;
+
+  if (colSet.has("lineTotal"))
+    data.lineTotal = price * qty;
+
+  if (colSet.has("subtotal"))
+    data.subtotal = price * qty;
+
+  if (colSet.has("createdAt"))
+    data.createdAt = new Date();
+
+  if (colSet.has("updatedAt"))
+    data.updatedAt = new Date();
 
   const keys = Object.keys(data);
-  const quotedCols = keys.map((k) => `"${k}"`).join(", ");
-  const placeholders = keys.map((_, i) => `$${i + 1}`).join(", ");
+
+  const cols = keys
+    .map((k) => `"${k}"`)
+    .join(", ");
+
+  const params = keys
+    .map((_, i) => `$${i + 1}`)
+    .join(", ");
+
   const values = keys.map((k) => data[k]);
 
   await prisma.$executeRawUnsafe(
-    `INSERT INTO "OrderItem" (${quotedCols}) VALUES (${placeholders})`,
+    `
+      INSERT INTO "OrderItem"
+      (${cols})
+      VALUES
+      (${params})
+    `,
     ...values
   );
 }
 
-async function deductInventory(params: {
-  variantId: string;
-  branchId: string;
-  qty: number;
-  orderCode: string;
-  sku: string;
-}) {
-  const { variantId, branchId, qty, orderCode, sku } = params;
-
-  await prisma.$executeRawUnsafe(
-    `
-      INSERT INTO "InventoryItem" ("id", "variantId", "branchId", "availableQty", "reservedQty", "incomingQty", "createdAt", "updatedAt")
-      VALUES ($1, $2, $3, 0, 0, 0, NOW(), NOW())
-      ON CONFLICT ("variantId", "branchId") DO NOTHING
-    `,
-    randomUUID(),
-    variantId,
-    branchId
-  );
-
-  await prisma.$executeRawUnsafe(
-    `
-      UPDATE "InventoryItem"
-      SET "availableQty" = COALESCE("availableQty", 0) - $1,
-          "updatedAt" = NOW()
-      WHERE "variantId" = $2
-        AND "branchId" = $3
-    `,
-    qty,
-    variantId,
-    branchId
-  );
-
-  const movementCols = await tableColumns("InventoryMovement");
-  if (movementCols.length) {
-    const data: AnyRow = {};
-    if (hasColumn(movementCols, "id")) data.id = randomUUID();
-    if (hasColumn(movementCols, "variantId")) data.variantId = variantId;
-    if (hasColumn(movementCols, "branchId")) data.branchId = branchId;
-    if (hasColumn(movementCols, "type")) data.type = "SALE";
-    if (hasColumn(movementCols, "quantity")) data.quantity = -Math.abs(qty);
-    if (hasColumn(movementCols, "qty")) data.qty = -Math.abs(qty);
-    if (hasColumn(movementCols, "note")) data.note = `Khôi phục từ file GHN cho đơn ${orderCode}`;
-    if (hasColumn(movementCols, "reference")) data.reference = orderCode;
-    if (hasColumn(movementCols, "refCode")) data.refCode = orderCode;
-    if (hasColumn(movementCols, "sku")) data.sku = sku;
-    if (hasColumn(movementCols, "createdAt")) data.createdAt = new Date();
-    if (hasColumn(movementCols, "updatedAt")) data.updatedAt = new Date();
-
-    const keys = Object.keys(data);
-    if (keys.length) {
-      await prisma.$executeRawUnsafe(
-        `INSERT INTO "InventoryMovement" (${keys.map((k) => `"${k}"`).join(", ")}) VALUES (${keys
-          .map((_, i) => `$${i + 1}`)
-          .join(", ")})`,
-        ...keys.map((k) => data[k])
-      );
-    }
-  }
-}
-
 async function main() {
   const file = arg("file");
+
   const commit = hasFlag("commit");
-  const deductStock = hasFlag("deduct-stock");
-  const replaceExisting = hasFlag("replace-existing");
+
+  const replaceExisting =
+    hasFlag("replace-existing");
 
   if (!file) {
+    throw new Error("Thiếu --file");
+  }
+
+  const orderColumns = await tableColumns(
+    "Order"
+  );
+
+  const orderCodeColumn = pickColumn(
+    orderColumns,
+    [
+      "code",
+      "orderCode",
+      "internalCode",
+      "customCode",
+      "orderNumber",
+      "displayCode",
+      "shopOrderCode",
+    ]
+  );
+
+  if (!orderCodeColumn) {
+    console.log(
+      "Các cột hiện có trong bảng Order:",
+      orderColumns.map((c) => c.column_name)
+    );
+
     throw new Error(
-      `Thiếu file. Ví dụ:
-npx ts-node scripts/rescue-ghn-order-items.ts --file="/Users/xman/Downloads/DON-HANG.xlsx"
-npx ts-node scripts/rescue-ghn-order-items.ts --file="/Users/xman/Downloads/DON-HANG.xlsx" --commit
-npx ts-node scripts/rescue-ghn-order-items.ts --file="/Users/xman/Downloads/DON-HANG.xlsx" --commit --deduct-stock`
+      'Không tìm thấy cột mã đơn trong bảng "Order".'
     );
   }
 
-  const wb = XLSX.readFile(file);
-  const sheetName = wb.SheetNames[0];
-  const rows = XLSX.utils.sheet_to_json<AnyRow>(wb.Sheets[sheetName], { defval: "" });
+  const orderItemColumns =
+    await tableColumns("OrderItem");
 
-  const orderItemColumns = await tableColumns("OrderItem");
-  const fallbackBranch = await findBranchFallback();
+  console.log(
+    "Dùng cột mã đơn:",
+    orderCodeColumn
+  );
 
-  const report: AnyRow[] = [];
-  let parsedLines = 0;
-  let restoredLines = 0;
-  let skippedExisting = 0;
+  const workbook = XLSX.readFile(file);
+
+  const sheet =
+    workbook.Sheets[workbook.SheetNames[0]];
+
+  const rows = XLSX.utils.sheet_to_json<any>(
+    sheet,
+    {
+      defval: "",
+    }
+  );
+
+  let parsed = 0;
+
+  let ready = 0;
+
+  let skippedHasItems = 0;
+
   let missingOrder = 0;
+
   let missingVariant = 0;
-  let ambiguousVariant = 0;
-  let deductedLines = 0;
 
-  for (const row of rows) {
-    const orderCode = normalizeText(getCell(row, ["Mã đơn hàng riêng", "Ma don hang rieng", "Mã đơn riêng", "Order code"]));
-    const goodsText = normalizeText(getCell(row, ["Tên hàng hóa", "Ten hang hoa", "Hàng hóa", "Products"]));
-    const cod = toNumber(getCell(row, ["Tiền COD", "COD"]));
-    const status = normalizeText(getCell(row, ["Trạng thái", "Trang thai"]));
+  let restored = 0;
 
-    if (!orderCode || !orderCode.startsWith("ORD-") || !goodsText) continue;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
 
-    const order = await getOrderByCode(orderCode);
+    const orderCode = normalize(
+      getCell(row, [
+        "Mã đơn hàng riêng",
+        "Ma don hang rieng",
+        "Mã đơn riêng",
+        "Order code",
+      ])
+    );
+
+    const goods = normalize(
+      getCell(row, [
+        "Tên hàng hóa",
+        "Ten hang hoa",
+        "Hàng hóa",
+        "Products",
+      ])
+    );
+
+    if (
+      !orderCode ||
+      !goods ||
+      !orderCode.startsWith("ORD-")
+    ) {
+      continue;
+    }
+
+    const order = await findOrder(
+      orderCode,
+      orderCodeColumn
+    );
+
     if (!order) {
       missingOrder += 1;
-      report.push({ orderCode, status, goodsText, result: "MISSING_ORDER" });
       continue;
     }
 
-    const currentItemCount = await countOrderItems(order.id);
-    if (currentItemCount > 0 && !replaceExisting) {
-      skippedExisting += 1;
-      report.push({ orderCode, status, goodsText, result: "SKIP_HAS_ITEMS", currentItemCount });
+    const currentCount =
+      await existingOrderItemCount(order.id);
+
+    if (
+      currentCount > 0 &&
+      !replaceExisting
+    ) {
+      skippedHasItems += 1;
       continue;
     }
 
-    if (currentItemCount > 0 && replaceExisting && commit) {
-      await prisma.$executeRawUnsafe(`DELETE FROM "OrderItem" WHERE "orderId" = $1`, order.id);
+    const productCode =
+      extractProductCode(goods);
+
+    const qty = parseQty(goods);
+
+    parsed += 1;
+
+    if (!productCode) {
+      missingVariant += 1;
+      continue;
     }
 
-    const items = parseItems(goodsText);
-    const totalQty = items.reduce((sum, item) => sum + item.qty, 0) || 1;
-    const fallbackUnitPrice = Math.max(0, Math.round(cod / totalQty));
-    const branchId = order.branchId || fallbackBranch?.id || "";
+    const variant =
+      await findVariant(productCode);
 
-    for (const item of items) {
-      parsedLines += 1;
+    if (!variant) {
+      missingVariant += 1;
+      continue;
+    }
 
-      const match = await findVariantForProductCode(item.productCode, branchId);
+    ready += 1;
 
-      if (!match.variant) {
-        if (match.reason === "AMBIGUOUS_VARIANT") ambiguousVariant += 1;
-        else missingVariant += 1;
+    const percent = Math.round(
+      ((i + 1) / rows.length) * 100
+    );
 
-        report.push({
-          orderCode,
-          status,
-          rawName: item.rawName,
-          productCode: item.productCode,
-          qty: item.qty,
-          result: match.reason,
-          candidates: match.candidates,
-        });
-        continue;
+    if (
+      i % 20 === 0 ||
+      i === rows.length - 1
+    ) {
+      console.log(
+        `[${percent}%] dòng ${i + 1}/${rows.length} | parsed ${parsed} | ready ${ready} | restored ${restored} | thiếu đơn ${missingOrder} | thiếu SP ${missingVariant}`
+      );
+    }
+
+    if (commit) {
+      if (
+        currentCount > 0 &&
+        replaceExisting
+      ) {
+        await prisma.$executeRawUnsafe(
+          `
+            DELETE FROM "OrderItem"
+            WHERE "orderId" = $1
+          `,
+          order.id
+        );
       }
 
-      const unitPrice = toNumber(match.variant.price) || fallbackUnitPrice;
+      await insertOrderItem(
+        orderItemColumns,
+        order.id,
+        variant,
+        qty
+      );
 
-      report.push({
-        orderCode,
-        status,
-        rawName: item.rawName,
-        productCode: item.productCode,
-        qty: item.qty,
-        matchedSku: match.variant.sku,
-        matchedProductName: match.variant.productName,
-        color: match.variant.color,
-        size: match.variant.size,
-        unitPrice,
-        branchId,
-        result: commit ? "RESTORED" : "DRY_RUN_OK",
-        matchReason: match.reason,
-        candidates: match.candidates,
-      });
-
-      if (commit) {
-        await insertOrderItem({
-          columns: orderItemColumns,
-          order,
-          variant: match.variant,
-          item,
-          unitPrice,
-        });
-        restoredLines += 1;
-
-        if (deductStock && branchId) {
-          await deductInventory({
-            variantId: match.variant.id,
-            branchId,
-            qty: item.qty,
-            orderCode,
-            sku: match.variant.sku,
-          });
-          deductedLines += 1;
-        }
-      }
+      restored += 1;
     }
   }
 
-  const outWb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(outWb, XLSX.utils.json_to_sheet(report), "preview");
-  XLSX.writeFile(outWb, `ghn_orderitem_rescue_${commit ? "commit" : "dry_run"}_${Date.now()}.xlsx`);
-
   console.log({
-    mode: commit ? "COMMIT" : "DRY_RUN",
-    deductStock,
-    sourceRows: rows.length,
-    parsedLines,
-    restoredLines,
-    skippedExisting,
+    mode: commit
+      ? "COMMIT"
+      : "DRY_RUN",
+
+    orderCodeColumn,
+
+    totalRows: rows.length,
+
+    parsed,
+
+    ready,
+
+    restored,
+
+    skippedHasItems,
+
     missingOrder,
+
     missingVariant,
-    ambiguousVariant,
-    deductedLines,
-    reportFile: `ghn_orderitem_rescue_${commit ? "commit" : "dry_run"}_<timestamp>.xlsx`,
   });
 }
 
