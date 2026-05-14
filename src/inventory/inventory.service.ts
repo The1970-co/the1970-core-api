@@ -2165,7 +2165,7 @@ export class InventoryService {
         label: admin.fullName || admin.email,
         name: admin.fullName,
         email: admin.email,
-        type: admin.role === "OWNER" || admin.role === "owner" ? "Owner/Admin" : "Admin",
+        type: admin.role === "ADMIN" ? "Owner/Admin" : "Admin",
       });
     }
 
