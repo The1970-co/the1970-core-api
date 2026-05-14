@@ -225,7 +225,7 @@ export class FinanceService {
 
     const voucherValues: any[] = [from, to];
     const voucherWhere: string[] = [
-      `v."createdAt" BETWEEN $1 AND $2`,
+      `COALESCE(v."confirmedAt", v."createdAt") BETWEEN $1 AND $2`,
       `COALESCE(v."status", 'DRAFT') = 'CONFIRMED'`,
     ];
 
@@ -1677,7 +1677,7 @@ export class FinanceService {
 
     const paymentValues: any[] = [from, to];
     const paymentWhere = [
-      `p."createdAt" BETWEEN $1 AND $2`,
+      `COALESCE(p."paidAt", p."createdAt") BETWEEN $1 AND $2`,
       `p."paymentSourceId" IS NOT NULL`,
       `p."status" IN ('PAID', 'PARTIAL')`,
       `COALESCE(ps."type", '') != 'COD'`,
@@ -1697,13 +1697,14 @@ export class FinanceService {
     const paymentGroups = await this.prisma.$queryRawUnsafe<any[]>(
       `
         SELECT
-          TO_CHAR((p."createdAt" AT TIME ZONE 'Asia/Ho_Chi_Minh')::date, 'YYYY-MM-DD') AS "date",
+          TO_CHAR((COALESCE(p."paidAt", p."createdAt") AT TIME ZONE 'Asia/Ho_Chi_Minh')::date, 'YYYY-MM-DD') AS "date",
           o."branchId" AS "branchId",
           COALESCE(b."name", o."branchId") AS "branchName",
           p."paymentSourceId" AS "paymentSourceId",
           COALESCE(ps."name", p."method", 'Chưa rõ') AS "paymentSourceName",
           COALESCE(ps."code", p."paymentSourceId") AS "paymentSourceCode",
           COALESCE(ps."type", '') AS "paymentSourceType",
+          COALESCE(ps."type", '') AS "sourceType",
           COUNT(*)::int AS "paymentCount",
           SUM(p."amount")::numeric AS "amount"
         FROM "Payment" p
@@ -1711,14 +1712,14 @@ export class FinanceService {
         LEFT JOIN "Branch" b ON b."id" = o."branchId"
         LEFT JOIN "PaymentSource" ps ON ps."id" = p."paymentSourceId"
         WHERE ${paymentWhere.join(" AND ")}
-        GROUP BY 1,2,3,4,5,6,7
+        GROUP BY 1,2,3,4,5,6,7,8
       `,
       ...paymentValues,
     );
 
     const voucherValues: any[] = [from, to];
     const voucherWhere = [
-      `v."createdAt" BETWEEN $1 AND $2`,
+      `COALESCE(v."confirmedAt", v."createdAt") BETWEEN $1 AND $2`,
       `COALESCE(v."status", 'DRAFT') = 'CONFIRMED'`,
       `v."paymentSourceId" IS NOT NULL`,
       `v."branchId" IS NOT NULL`,
@@ -1737,13 +1738,14 @@ export class FinanceService {
     const voucherGroups = await this.prisma.$queryRawUnsafe<any[]>(
       `
         SELECT
-          TO_CHAR((v."createdAt" AT TIME ZONE 'Asia/Ho_Chi_Minh')::date, 'YYYY-MM-DD') AS "date",
+          TO_CHAR((COALESCE(v."confirmedAt", v."createdAt") AT TIME ZONE 'Asia/Ho_Chi_Minh')::date, 'YYYY-MM-DD') AS "date",
           v."branchId" AS "branchId",
           COALESCE(b."name", v."branchId") AS "branchName",
           v."paymentSourceId" AS "paymentSourceId",
           COALESCE(ps."name", ps."code", 'Tiền mặt') AS "paymentSourceName",
           COALESCE(ps."code", v."paymentSourceId") AS "paymentSourceCode",
           COALESCE(ps."type", '') AS "paymentSourceType",
+          COALESCE(ps."type", '') AS "sourceType",
           ${this.cashVoucherTypeSql("v")} AS "type",
           COUNT(*)::int AS "voucherCount",
           SUM(v."amount")::numeric AS "amount"
@@ -1763,7 +1765,7 @@ export class FinanceService {
                 AND p2."status" IN ('PAID', 'PARTIAL')
             )
           )
-        GROUP BY 1,2,3,4,5,6,7,8
+        GROUP BY 1,2,3,4,5,6,7,8,9
       `,
       ...voucherValues,
     );
@@ -1782,12 +1784,29 @@ export class FinanceService {
     const snapshots = await this.prisma.$queryRawUnsafe<any[]>(
       `
         SELECT
+          d."id",
           TO_CHAR(d."date", 'YYYY-MM-DD') AS "date",
-          d.*,
+          d."branchId",
+          d."paymentSourceId",
+          d."openingBalance",
+          d."totalReceipt",
+          d."totalPayment",
+          d."netAmount",
+          d."closingBalance",
+          d."countedAmount",
+          d."differenceAmount",
+          d."status",
+          d."note",
+          d."lockedAt",
+          d."lockedById",
+          d."lockedByName",
+          d."createdAt",
+          d."updatedAt",
           COALESCE(b."name", d."branchId") AS "branchName",
           COALESCE(ps."name", ps."code", d."paymentSourceId") AS "paymentSourceName",
           COALESCE(ps."code", d."paymentSourceId") AS "paymentSourceCode",
-          COALESCE(ps."type", '') AS "paymentSourceType"
+          COALESCE(ps."type", '') AS "paymentSourceType",
+          COALESCE(ps."type", '') AS "sourceType"
         FROM "DailyCashBalance" d
         LEFT JOIN "Branch" b ON b."id" = d."branchId"
         LEFT JOIN "PaymentSource" ps ON ps."id" = d."paymentSourceId"
@@ -1840,7 +1859,7 @@ export class FinanceService {
           paymentSourceId,
           paymentSourceName: extra.paymentSourceName || source?.name || paymentSourceId,
           paymentSourceCode: extra.paymentSourceCode || source?.code || paymentSourceId,
-          paymentSourceType: extra.paymentSourceType || source?.type || "",
+          paymentSourceType: extra.paymentSourceType || extra.sourceType || source?.type || "",
         });
       }
     };
@@ -1852,6 +1871,17 @@ export class FinanceService {
           paymentSourceCode: source.code,
           paymentSourceType: source.type,
         });
+      } else {
+        // Một số nguồn tiền cũ không gắn branchId nhưng tên/code có thể dùng chung.
+        // Vẫn tạo combo cho từng chi nhánh để chốt sổ không bị mất dòng khi chưa phát sinh.
+        for (const branch of branchRows) {
+          addCombo(String(branch.id), String(source.id), {
+            branchName: branch.name,
+            paymentSourceName: source.name,
+            paymentSourceCode: source.code,
+            paymentSourceType: source.type,
+          });
+        }
       }
     }
 
@@ -1864,7 +1894,7 @@ export class FinanceService {
         paymentSourceId: row.paymentSourceId,
         paymentSourceName: row.paymentSourceName,
         paymentSourceCode: row.paymentSourceCode,
-        paymentSourceType: row.paymentSourceType,
+        paymentSourceType: row.paymentSourceType || row.sourceType,
         posReceiptAmount: 0,
         manualReceiptAmount: 0,
         manualPaymentAmount: 0,
@@ -1887,7 +1917,7 @@ export class FinanceService {
         paymentSourceId: row.paymentSourceId,
         paymentSourceName: row.paymentSourceName,
         paymentSourceCode: row.paymentSourceCode,
-        paymentSourceType: row.paymentSourceType,
+        paymentSourceType: row.paymentSourceType || row.sourceType,
         posReceiptAmount: 0,
         manualReceiptAmount: 0,
         manualPaymentAmount: 0,
@@ -1968,6 +1998,7 @@ export class FinanceService {
           paymentSourceName: combo.paymentSourceName,
           paymentSourceCode: combo.paymentSourceCode,
           paymentSourceType: combo.paymentSourceType,
+          sourceType: combo.paymentSourceType,
           openingBalance,
           posReceiptAmount: isLocked ? null : this.toNumber(txn.posReceiptAmount),
           manualReceiptAmount: isLocked ? null : this.toNumber(txn.manualReceiptAmount),
@@ -2052,16 +2083,41 @@ export class FinanceService {
       String(item.paymentSourceId) === String(body.paymentSourceId)
     );
 
-    if (!row) {
-      throw new BadRequestException("Không tìm thấy dòng sổ quỹ cần chốt.");
+    let closeRow: any = row;
+
+    if (!closeRow) {
+      const [branch, source] = await Promise.all([
+        this.prisma.branch.findUnique({ where: { id: body.branchId }, select: { id: true, name: true } }),
+        this.prisma.paymentSource.findUnique({ where: { id: body.paymentSourceId } }),
+      ]);
+
+      if (!branch || !source) {
+        throw new BadRequestException("Không tìm thấy dòng sổ quỹ cần chốt.");
+      }
+
+      closeRow = {
+        id: `manual_${body.date}_${body.branchId}_${body.paymentSourceId}`,
+        date: body.date,
+        branchId: body.branchId,
+        branchName: branch.name,
+        paymentSourceId: body.paymentSourceId,
+        paymentSourceName: source.name || source.code || body.paymentSourceId,
+        paymentSourceCode: source.code || body.paymentSourceId,
+        sourceType: source.type || '',
+        openingBalance: 0,
+        totalReceipt: 0,
+        totalPayment: 0,
+        netAmount: 0,
+        closingBalance: 0,
+      };
     }
 
     const countedAmount = body.countedAmount === undefined || body.countedAmount === null || body.countedAmount === ("" as any)
       ? null
       : this.toNumber(body.countedAmount);
-    const closingBalance = this.toNumber(row.closingBalance);
+    const closingBalance = this.toNumber(closeRow.closingBalance);
     const differenceAmount = countedAmount === null ? null : countedAmount - closingBalance;
-    const id = row.id && !String(row.id).includes("|") ? row.id : `dcb_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    const id = closeRow.id && !String(closeRow.id).includes("|") ? closeRow.id : `dcb_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 
     const rows = await this.prisma.$queryRawUnsafe<any[]>(
       `
@@ -2096,10 +2152,10 @@ export class FinanceService {
       body.date,
       body.branchId,
       body.paymentSourceId,
-      this.toNumber(row.openingBalance),
-      this.toNumber(row.totalReceipt),
-      this.toNumber(row.totalPayment),
-      this.toNumber(row.netAmount),
+      this.toNumber(closeRow.openingBalance),
+      this.toNumber(closeRow.totalReceipt),
+      this.toNumber(closeRow.totalPayment),
+      this.toNumber(closeRow.netAmount),
       closingBalance,
       countedAmount,
       differenceAmount,
@@ -2108,7 +2164,16 @@ export class FinanceService {
       body.lockedByName || user?.name || user?.username || user?.email || null,
     );
 
-    return rows[0];
+    const savedRow = rows[0] || {};
+    return {
+      ...savedRow,
+      date: body.date,
+      branchId: body.branchId,
+      paymentSourceId: body.paymentSourceId,
+      countedAmount,
+      differenceAmount,
+      status: "LOCKED",
+    };
   }
 
   async reopenDailyLedger(body: {

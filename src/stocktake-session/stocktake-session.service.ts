@@ -23,12 +23,33 @@ export class StocktakeSessionService {
       .map((role) => String(role || "").toLowerCase())
       .filter(Boolean);
 
-    return roles.includes("owner") || roles.includes("admin") ||
-      (Array.isArray(user?.permissions) && user.permissions.includes("*"));
+    return (
+      roles.includes("owner") ||
+      roles.includes("admin") ||
+      roles.includes("admin_owner") ||
+      roles.includes("admin-owner") ||
+      roles.includes("admin/owner") ||
+      roles.includes("admin all") ||
+      roles.includes("admin-all") ||
+      String(user?.roleName || "").toLowerCase().includes("owner") ||
+      String(user?.roleName || "").toLowerCase().includes("admin") ||
+      String(user?.title || "").toLowerCase().includes("owner") ||
+      String(user?.title || "").toLowerCase().includes("admin") ||
+      (Array.isArray(user?.permissions) && user.permissions.includes("*")) ||
+      (Array.isArray(user?.permissionKeys) && user.permissionKeys.includes("*"))
+    );
   }
 
   private userBranch(user?: any) {
-    return user?.branchId || null;
+    return (
+      user?.branchId ||
+      user?.currentBranchId ||
+      user?.workingBranchId ||
+      user?.defaultBranchId ||
+      user?.staffBranchPermission?.branchId ||
+      user?.branchPermissions?.find?.((row: any) => row?.branchId)?.branchId ||
+      null
+    );
   }
 
   private scopedBranchId(user?: any, requestedBranchId?: string | null) {
@@ -668,14 +689,14 @@ export class StocktakeSessionService {
     await this.createSnapshotForSession(sessionId, session.branchId);
 
     let counts = await this.prisma.stocktakeCount.findMany({
-      where: { sessionId },
-      orderBy: { lastScannedAt: "asc" },
+      where: { sessionId, branchId: session.branchId },
+        orderBy: { lastScannedAt: "asc" },
     });
 
     // Backfill aggregate cho phiên cũ đã có scanEvents nhưng chưa có StocktakeCount.
     if (!counts.length) {
       const events = await this.prisma.stocktakeScanEvent.findMany({
-        where: { sessionId },
+        where: { sessionId, branchId: session.branchId },
         orderBy: { createdAt: "asc" },
       });
 
@@ -697,7 +718,7 @@ export class StocktakeSessionService {
       }
 
       counts = await this.prisma.stocktakeCount.findMany({
-        where: { sessionId },
+        where: { sessionId, branchId: session.branchId },
         orderBy: { lastScannedAt: "asc" },
       });
     }
@@ -848,15 +869,15 @@ export class StocktakeSessionService {
 
     const [snapshots, counts, scanEvents] = await Promise.all([
       this.prisma.stocktakeSnapshot.findMany({
-        where: { sessionId },
+        where: { sessionId, branchId: session.branchId },
         orderBy: { createdAt: "asc" },
       }),
       this.prisma.stocktakeCount.findMany({
-        where: { sessionId },
+        where: { sessionId, branchId: session.branchId },
         orderBy: { lastScannedAt: "asc" },
       }),
       this.prisma.stocktakeScanEvent.findMany({
-        where: { sessionId },
+        where: { sessionId, branchId: session.branchId },
         orderBy: { createdAt: "desc" },
         take: 500,
       }),
@@ -902,9 +923,31 @@ export class StocktakeSessionService {
       countMap.set(key, current);
     }
 
+    // Branch-scope cứng cho detail: phiên CL/QO/TH chỉ được tính SKU thuộc branch đó.
+    // Với các phiên cũ lỡ chụp toàn hệ thống, lọc lại bằng InventoryItem của session.branchId.
+    const branchInventoryItemsForDetail = await this.prisma.inventoryItem.findMany({
+      where: { branchId: session.branchId },
+      select: { variantId: true, availableQty: true },
+    });
+
+    const branchVariantIdSet = new Set(
+      branchInventoryItemsForDetail.map((item) => item.variantId),
+    );
+
+    const inventoryMap = new Map(
+      branchInventoryItemsForDetail.map(
+        (item) => [item.variantId, Number(item.availableQty || 0)] as [string, number],
+      ),
+    );
+
+    const scopedSnapshots = snapshots.filter((snapshot) => {
+      if (!snapshot?.variantId) return false;
+      return branchVariantIdSet.has(snapshot.variantId) || countMap.has(snapshot.variantId);
+    });
+
     const variantIds = Array.from(
       new Set([
-        ...snapshots.map((item) => item.variantId).filter(Boolean),
+        ...scopedSnapshots.map((item) => item.variantId).filter(Boolean),
         ...counts.map((item) => item.variantId).filter(Boolean),
       ]),
     ) as string[];
@@ -918,20 +961,9 @@ export class StocktakeSessionService {
 
     const variantMap = new Map(variants.map((variant) => [variant.id, variant]));
 
-    const inventoryItems = variantIds.length
-      ? await this.prisma.inventoryItem.findMany({
-          where: {
-            branchId: session.branchId,
-            variantId: { in: variantIds },
-          },
-        })
-      : [];
+    // inventoryMap đã được tạo từ toàn bộ InventoryItem của branch phía trên.
 
-    const inventoryMap = new Map(
-      inventoryItems.map((item) => [item.variantId, Number(item.availableQty || 0)]),
-    );
-
-    const snapshotVariantIds = new Set(snapshots.map((item) => item.variantId));
+    const snapshotVariantIds = new Set(scopedSnapshots.map((item) => item.variantId));
     const extraCounts = Array.from(countMap.values()).filter(
       (item) => !item.variantId || !snapshotVariantIds.has(item.variantId),
     );
@@ -950,7 +982,7 @@ export class StocktakeSessionService {
     };
 
     const rows = [
-      ...snapshots.map((snapshot) => {
+      ...scopedSnapshots.map((snapshot) => {
         const count = countMap.get(snapshot.variantId);
         const variant = variantMap.get(snapshot.variantId);
         const hasCount = Boolean(count);
@@ -1055,7 +1087,7 @@ export class StocktakeSessionService {
     const shortRows = rows.filter((row) => row.diffType === "SHORT");
 
     const kpi = {
-      totalSnapshotSku: snapshots.length,
+      totalSnapshotSku: scopedSnapshots.length,
       totalSku: rows.length,
       totalRows: rows.length,
       countedSku: countedRows.length,
@@ -1143,7 +1175,15 @@ export class StocktakeSessionService {
       );
     }
 
-    return rows;
+    const session = await this.prisma.stocktakeSession.findUnique({
+      where: { id: sessionId },
+    });
+
+    if (!session) {
+      return rows;
+    }
+
+    return await this.filterRowsBySessionBranchV27(session, rows);
   }
 
   async getSessionLogs(sessionId: string, user?: any) {
@@ -1158,7 +1198,7 @@ export class StocktakeSessionService {
 
     const [events, workers] = await Promise.all([
       this.prisma.stocktakeScanEvent.findMany({
-        where: { sessionId },
+      where: { sessionId, branchId: session.branchId },
         orderBy: { createdAt: "desc" },
       }),
       this.prisma.stocktakeWorker.findMany({
@@ -1441,4 +1481,41 @@ export class StocktakeSessionService {
 
     return session;
   }
+
+  /* STOCKTAKE_V27_BRANCH_SCOPE_HELPERS */
+  private normalizeBranchKeyV27(value: any): string {
+    return String(value ?? '').trim().toLowerCase();
+  }
+
+  private async getBranchVariantIdsV27(branchId: string): Promise<Set<string>> {
+    if (!branchId) return new Set<string>();
+
+    const rows = await this.prisma.inventoryItem.findMany({
+      where: { branchId },
+      select: { variantId: true },
+    });
+
+    return new Set(rows.map((row: any) => String(row.variantId || '')).filter(Boolean));
+  }
+
+  private async filterRowsBySessionBranchV27<T extends any>(session: any, rows: T[]): Promise<T[]> {
+    const branchVariantIds = await this.getBranchVariantIdsV27(String(session?.branchId || ''));
+    if (!branchVariantIds.size) return [];
+
+    return (Array.isArray(rows) ? rows : []).filter((row: any) => {
+      const directBranch = row?.branchId || row?.branch?.id || row?.inventoryItem?.branchId;
+      if (directBranch) return String(directBranch) === String(session.branchId);
+
+      const variantId = row?.variantId || row?.productVariantId || row?.variant?.id || row?.inventoryItem?.variantId;
+      if (variantId) return branchVariantIds.has(String(variantId));
+
+      // Nếu API cũ không có variantId thì giữ các dòng đã có phát sinh scan, bỏ dòng catalog rỗng.
+      const snapshotQty = Number(row?.snapshotQty ?? row?.systemQty ?? row?.openingQty ?? 0);
+      const countedQty = Number(row?.countedQty ?? row?.counted ?? 0);
+      const diff = Number(row?.diff ?? row?.deltaQty ?? (countedQty - snapshotQty));
+      const status = String(row?.status || '').toUpperCase();
+      return countedQty !== 0 || diff !== 0 || status === 'NOT_FOUND' || Boolean(row?.lastScannedAt || row?.workerId);
+    });
+  }
+
 }

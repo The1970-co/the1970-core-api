@@ -1093,38 +1093,36 @@ const suggestions = result.suggestions.filter(
         },
       });
 
-      if (!fromInventory) {
-        throw new BadRequestException(
-          `Kho gửi chưa có tồn: ${item.productName ?? item.sku ?? item.variantId}`
-        );
-      }
+      const fromAvailableQty = Number(fromInventory?.availableQty ?? 0);
+      const willMakeSourceNegative = !fromInventory || fromAvailableQty < item.qty;
+      const sourceShortQty = Math.max(0, item.qty - fromAvailableQty);
+      const shortageNote = willMakeSourceNegative
+        ? ` · Cảnh báo: kho gửi thiếu ${sourceShortQty}, hệ thống vẫn cho nhận hàng và ghi tồn kho gửi âm để đối soát sau`
+        : "";
 
-      if (fromInventory.availableQty < item.qty) {
-        throw new BadRequestException(
-          `Không đủ tồn để chuyển: ${item.productName ?? item.sku ?? item.variantId}. ` +
-            `Tồn hiện tại ${fromInventory.availableQty}, cần chuyển ${item.qty}`
-        );
-      }
-
-      const sourceUpdate = await tx.inventoryItem.updateMany({
+      // Không hard-block bước nhận hàng nếu kho gửi hiện tại đang 0 / thiếu tồn.
+      // Phiếu đã được kho gửi xác nhận trước đó, nên bên nhận vẫn phải nhận được hàng.
+      // Khi thiếu tồn, vẫn trừ kho gửi về âm để giữ đúng ledger và còn điểm đối soát kiểm kho.
+      await tx.inventoryItem.upsert({
         where: {
-          variantId: item.variantId,
-          branchId: transfer.fromBranchId,
-          availableQty: { gte: item.qty },
+          variantId_branchId: {
+            variantId: item.variantId,
+            branchId: transfer.fromBranchId,
+          },
         },
-        data: {
+        update: {
           availableQty: {
             decrement: item.qty,
           },
         },
+        create: {
+          variantId: item.variantId,
+          branchId: transfer.fromBranchId,
+          availableQty: -item.qty,
+          reservedQty: 0,
+          incomingQty: 0,
+        },
       });
-
-      if (sourceUpdate.count !== 1) {
-        throw new BadRequestException(
-          `Không đủ tồn để chuyển: ${item.productName ?? item.sku ?? item.variantId}. ` +
-            `Vui lòng tải lại phiếu và kiểm tra tồn kho gửi.`
-        );
-      }
 
       await tx.inventoryItem.upsert({
         where: {
@@ -1157,7 +1155,7 @@ const suggestions = result.suggestions.filter(
           refId: transfer.id,
           note: `Chuyển kho ${transfer.transferCode}: xuất từ ${transfer.fromBranchId} sang ${transfer.toBranchId}${
             actorName ? ` · Người xác nhận: ${actorName}` : ""
-          }`,
+          }${shortageNote}`,
         },
       });
 
@@ -1171,7 +1169,7 @@ const suggestions = result.suggestions.filter(
           refId: transfer.id,
           note: `Chuyển kho ${transfer.transferCode}: nhập từ ${transfer.fromBranchId} sang ${transfer.toBranchId}${
             actorName ? ` · Người xác nhận: ${actorName}` : ""
-          }`,
+          }${shortageNote}`,
         },
       });
     }
