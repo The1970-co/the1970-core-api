@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  OnModuleInit,
 } from "@nestjs/common";
 import {
   FulfillmentStatus,
@@ -37,13 +38,56 @@ type GetOrdersParams = {
 };
 
 @Injectable()
-export class OrderService {
+export class OrderService implements OnModuleInit {
+  private orderListIndexesReady = false;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly shipmentService: ShipmentService,
     private readonly promotionsService: PromotionsService,
     private readonly promotionEngine: PromotionEngineService
   ) { }
+
+  onModuleInit() {
+    void this.ensureOrderListPerformanceIndexes();
+  }
+
+  private async ensureOrderListPerformanceIndexes() {
+    if (this.orderListIndexesReady) return;
+    this.orderListIndexesReady = true;
+
+    const statements = [
+      `CREATE EXTENSION IF NOT EXISTS pg_trgm`,
+      `CREATE INDEX IF NOT EXISTS "Order_createdAt_desc_idx" ON "Order" ("createdAt" DESC)`,
+      `CREATE INDEX IF NOT EXISTS "Order_branchId_createdAt_desc_idx" ON "Order" ("branchId", "createdAt" DESC)`,
+      `CREATE INDEX IF NOT EXISTS "Order_status_createdAt_desc_idx" ON "Order" ("status", "createdAt" DESC)`,
+      `CREATE INDEX IF NOT EXISTS "Order_paymentStatus_createdAt_desc_idx" ON "Order" ("paymentStatus", "createdAt" DESC)`,
+      `CREATE INDEX IF NOT EXISTS "Order_orderCode_idx" ON "Order" ("orderCode")`,
+      `CREATE INDEX IF NOT EXISTS "Order_customerPhone_idx" ON "Order" ("customerPhone")`,
+      `CREATE INDEX IF NOT EXISTS "Order_shippingPhone_idx" ON "Order" ("shippingPhone")`,
+      `CREATE INDEX IF NOT EXISTS "Order_createdByStaffName_trgm_idx" ON "Order" USING GIN ("createdByStaffName" gin_trgm_ops)`,
+      `CREATE INDEX IF NOT EXISTS "Order_customerName_trgm_idx" ON "Order" USING GIN ("customerName" gin_trgm_ops)`,
+      `CREATE INDEX IF NOT EXISTS "Order_shippingAddressLine1_trgm_idx" ON "Order" USING GIN ("shippingAddressLine1" gin_trgm_ops)`,
+      `CREATE INDEX IF NOT EXISTS "Shipment_trackingCode_idx" ON "Shipment" ("trackingCode")`,
+      `CREATE INDEX IF NOT EXISTS "Shipment_trackingCode_trgm_idx" ON "Shipment" USING GIN ("trackingCode" gin_trgm_ops)`,
+      `CREATE INDEX IF NOT EXISTS "Shipment_carrier_idx" ON "Shipment" ("carrier")`,
+      `CREATE INDEX IF NOT EXISTS "OrderItem_orderId_idx" ON "OrderItem" ("orderId")`,
+      `CREATE INDEX IF NOT EXISTS "OrderItem_sku_idx" ON "OrderItem" ("sku")`,
+      `CREATE INDEX IF NOT EXISTS "OrderItem_sku_trgm_idx" ON "OrderItem" USING GIN ("sku" gin_trgm_ops)`,
+      `CREATE INDEX IF NOT EXISTS "OrderItem_productName_trgm_idx" ON "OrderItem" USING GIN ("productName" gin_trgm_ops)`,
+      `CREATE INDEX IF NOT EXISTS "Payment_orderId_idx" ON "Payment" ("orderId")`,
+    ];
+
+    for (const sql of statements) {
+      try {
+        await this.prisma.$executeRawUnsafe(sql);
+      } catch (error) {
+        // Không được làm chết app vì index phụ. Build/deploy vẫn phải an toàn.
+        console.warn("[ORDERS_LIST_INDEX_SKIP]", sql, error instanceof Error ? error.message : error);
+      }
+    }
+  }
+
 
   private toNumber(value: unknown) {
     if (typeof value === "number") return value;
