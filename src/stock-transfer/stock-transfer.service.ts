@@ -402,6 +402,39 @@ async handleAutoRebalanceCron() {
     console.error("Auto rebalance cron failed", error);
   }
 }
+  async scanVariant(code: string) {
+    const rawCode = String(code || "").trim();
+
+    if (!rawCode) {
+      throw new BadRequestException("Thiếu mã quét");
+    }
+
+    const variant = await this.prisma.productVariant.findFirst({
+      where: {
+        OR: [
+          { id: rawCode },
+          { sku: { equals: rawCode, mode: "insensitive" } },
+        ],
+      },
+      include: {
+        product: true,
+      },
+    });
+
+    if (!variant) {
+      throw new NotFoundException("Không tìm thấy sản phẩm theo mã quét");
+    }
+
+    return {
+      rowId: variant.id,
+      variantId: variant.id,
+      sku: variant.sku,
+      productName: variant.product?.name || "Sản phẩm",
+      color: variant.color || "",
+      size: variant.size || "",
+    };
+  }
+
   async list(dto: ListStockTransfersDto) {
     const andConditions: Prisma.StockTransferWhereInput[] = [];
 
@@ -451,16 +484,7 @@ async handleAutoRebalanceCron() {
     const rows = await this.prisma.stockTransfer.findMany({
       where,
       include: {
-        items: {
-          include: {
-            variant: {
-              include: {
-                product: true,
-              },
-            },
-          },
-          orderBy: { createdAt: "asc" },
-        },
+        items: false,
         fromBranch: true,
         toBranch: true,
       },
@@ -514,33 +538,9 @@ async handleAutoRebalanceCron() {
         completedAt: row.completedAt,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
-        totalLines: stats?.totalLines ?? row.items.length,
-        totalQty: stats?.totalQty ?? row.items.reduce((sum, item) => sum + Number(item.qty || 0), 0),
-        items: row.items.map((item) => {
-          const product = (item as any).variant?.product as any;
-
-          return {
-            id: item.id,
-            transferId: item.transferId,
-            variantId: item.variantId,
-            sku: item.sku ?? item.variant?.sku ?? null,
-            productName: item.productName ?? product?.name ?? null,
-            color: item.color ?? item.variant?.color ?? null,
-            size: item.size ?? item.variant?.size ?? null,
-            qty: item.qty,
-            createdAt: item.createdAt,
-            variant: item.variant,
-            product,
-            categoryName:
-              product?.categoryName ??
-              product?.category?.name ??
-              product?.category?.title ??
-              product?.categoryId ??
-              product?.type ??
-              product?.productType ??
-              null,
-          };
-        }),
+        totalLines: stats?.totalLines ?? 0,
+        totalQty: stats?.totalQty ?? 0,
+        items: [],
       };
     });
   }

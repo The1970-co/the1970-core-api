@@ -5,6 +5,7 @@ import {
   Patch,
   Post,
   Query,
+  Param,
   Req,
   UploadedFile,
   UploadedFiles,
@@ -105,6 +106,22 @@ export class InventoryController {
   ) {
     const parsedLimit = Number(limit || 100);
     return this.inventoryService.getInventoryMovements(parsedLimit, req?.user);
+  }
+
+
+  @Get("movements/product/:productId")
+  @RequirePermissions("inventory.view")
+  async getInventoryMovementsByProduct(
+    @Param("productId") productId: string,
+    @Query("limit") limit?: string,
+    @Req() req?: Request & { user?: any },
+  ) {
+    const parsedLimit = Number(limit || 120);
+    return this.inventoryService.getInventoryMovementsByProduct(
+      productId,
+      parsedLimit,
+      req?.user,
+    );
   }
 
   @Get("movements/actors")

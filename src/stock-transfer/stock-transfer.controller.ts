@@ -174,6 +174,12 @@ export class StockTransferController {
     return this.stockTransferService.createSelectedOutboundTransfers(body);
   }
 
+  @Get("scan-variant")
+  @RequirePermissions("stock_transfer.create")
+  async scanVariant(@Query("code") code: string) {
+    return this.stockTransferService.scanVariant(code);
+  }
+
   @Get(":id")
   @RequirePermissions("stock_transfer.view")
   async detail(@Param("id") id: string) {

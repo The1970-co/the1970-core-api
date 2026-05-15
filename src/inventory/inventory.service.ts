@@ -1634,7 +1634,7 @@ export class InventoryService {
           "adminUserId",
           "employeeId",
         ],
-        actorNameColumns: ["createdByName", "staffName", "employeeName"],
+        actorNameColumns: ["createdByName", "confirmedByName", "staffName", "employeeName"],
         actorEmailColumns: ["createdByEmail", "staffEmail", "employeeEmail"],
       },
       STOCK_TRANSFER: {
@@ -1647,7 +1647,7 @@ export class InventoryService {
           "adminUserId",
           "employeeId",
         ],
-        actorNameColumns: ["createdByName", "staffName", "employeeName"],
+        actorNameColumns: ["createdByName", "confirmedByName", "staffName", "employeeName"],
         actorEmailColumns: ["createdByEmail", "staffEmail", "employeeEmail"],
       },
     };
@@ -1668,22 +1668,41 @@ export class InventoryService {
           selectColumns.push(column);
       }
 
-      const ids = Array.from(group.keys());
-      if (!ids.length) continue;
+      const refs = Array.from(group.keys());
+      if (!refs.length) continue;
+
+      const searchableColumns = ["id", ...config.codeColumns].filter(
+        (column, index, array) => columns.has(column) && array.indexOf(column) === index,
+      );
+
+      if (!searchableColumns.length) continue;
+
+      const whereSql = searchableColumns
+        .map((column) => `${this.quoteIdent(column)} = ANY($1::text[])`)
+        .join(" OR ");
 
       const sql = `SELECT ${selectColumns.map((column) => this.quoteIdent(column)).join(", ")}
         FROM ${this.quoteIdent(config.table)}
-        WHERE "id" = ANY($1::text[])`;
-      const refRows = await this.prisma.$queryRawUnsafe<any[]>(sql, ids);
+        WHERE ${whereSql}`;
+      const refRows = await this.prisma.$queryRawUnsafe<any[]>(sql, refs);
 
       for (const refRow of refRows) {
-        const movementIds = group.get(String(refRow.id)) || [];
+        const matchedMovementIds = new Set<string>();
+
+        for (const column of searchableColumns) {
+          const refValue = refRow?.[column];
+          if (refValue === null || refValue === undefined) continue;
+          const idsForRef = group.get(String(refValue)) || [];
+          idsForRef.forEach((movementId) => matchedMovementIds.add(movementId));
+        }
+
         const actor = {
           id: this.getFirstValue(refRow, config.actorColumns),
           name: this.getFirstValue(refRow, config.actorNameColumns),
           email: this.getFirstValue(refRow, config.actorEmailColumns),
         };
-        for (const movementId of movementIds) addActor(movementId, actor);
+
+        for (const movementId of matchedMovementIds) addActor(movementId, actor);
       }
     }
 
@@ -2073,6 +2092,134 @@ export class InventoryService {
     });
   }
 
+
+
+  async getInventoryMovementsByProduct(
+    productId: string,
+    limit = 120,
+    user?: any,
+  ) {
+    const cleanProductId = String(productId || "").trim();
+    if (!cleanProductId) {
+      throw new BadRequestException("Thiếu productId.");
+    }
+
+    const safeLimit = Math.min(Math.max(Number(limit || 120), 1), 500);
+    const product = await this.prisma.product.findUnique({
+      where: { id: cleanProductId },
+      select: {
+        id: true,
+        name: true,
+        variants: {
+          select: {
+            id: true,
+            sku: true,
+            color: true,
+            size: true,
+          } as any,
+        },
+      },
+    });
+
+    if (!product) {
+      throw new NotFoundException("Không tìm thấy sản phẩm.");
+    }
+
+    const variantIds = (product.variants || [])
+      .map((variant: any) => String(variant.id || ""))
+      .filter(Boolean);
+
+    if (!variantIds.length) return [];
+
+    const where: any = {
+      variantId: { in: variantIds },
+    };
+
+    if (!this.isOwner(user)) {
+      where.branchId = this.resolveBranchIdFromUser(user) || "__NO_BRANCH__";
+    }
+
+    const rows = await this.prisma.inventoryMovement.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      take: safeLimit,
+      include: {
+        createdBy: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+          },
+        },
+        variant: {
+          include: {
+            product: true,
+          },
+        },
+      },
+    });
+
+    const actorByMovementId = await this.mapActorsFromRefs(rows as any[]);
+
+    return rows.map((row) => {
+      const anyRow = row as any;
+      const variant = anyRow.variant;
+      const actor =
+        actorByMovementId.get(row.id) ||
+        this.getActorFromMovementRow(anyRow) ||
+        {};
+      const createdAtIso = row.createdAt
+        ? new Date(row.createdAt).toISOString()
+        : null;
+
+      return {
+        id: row.id,
+        type: row.type,
+        qty: row.qty,
+        note: row.note,
+        refType: row.refType,
+        refId: row.refId,
+        refCode:
+          anyRow.refCode ||
+          anyRow.orderCode ||
+          anyRow.purchaseReceiptCode ||
+          anyRow.stocktakeSessionCode ||
+          anyRow.stockTransferCode ||
+          null,
+        branchId: row.branchId,
+        createdAt: createdAtIso,
+        createdAtIso,
+        createdAtText: this.formatDateTime(row.createdAt),
+        updatedAt: anyRow.updatedAt
+          ? new Date(anyRow.updatedAt).toISOString()
+          : null,
+        createdById: actor?.id || null,
+        createdByName: actor?.name || null,
+        createdByEmail: actor?.email || null,
+        createdBy: anyRow.createdBy
+          ? {
+              id: anyRow.createdBy.id,
+              fullName: anyRow.createdBy.fullName,
+              email: anyRow.createdBy.email,
+            }
+          : null,
+        actorId: actor?.id || null,
+        actorName: actor?.name || null,
+        actorEmail: actor?.email || null,
+        beforeQty:
+          anyRow.beforeQty ?? anyRow.previousQty ?? anyRow.qtyBefore ?? null,
+        afterQty: anyRow.afterQty ?? anyRow.nextQty ?? anyRow.qtyAfter ?? null,
+        status: anyRow.status || anyRow.movementStatus || "RECORDED",
+        sku: variant?.sku || "—",
+        barcode: variant?.barcode || variant?.barCode || null,
+        productName: variant?.product?.name || product.name || "—",
+        productId: variant?.product?.id || product.id,
+        variantId: row.variantId,
+        color: variant?.color || "",
+        size: variant?.size || "",
+      };
+    });
+  }
 
   async getInventoryMovementActors(user?: any) {
     const isOwner = this.isOwner(user);

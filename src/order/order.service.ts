@@ -2144,6 +2144,191 @@ export class OrderService {
     };
   }
 
+  private normalizeOrderKeyword(value?: string | null) {
+    return String(value || "").trim();
+  }
+
+  private normalizeOrderKeywordForContains(value?: string | null) {
+    return this.normalizeOrderKeyword(value).replace(/[%_]/g, "");
+  }
+
+  private normalizeOrderKeywordPhone(value?: string | null) {
+    const digits = String(value || "").replace(/\D/g, "").trim();
+    return digits || "";
+  }
+
+  private isSalesChannelKeyword(keyword: string): keyword is SalesChannel {
+    return (Object.values(SalesChannel) as string[]).includes(keyword.toUpperCase());
+  }
+
+  private buildExactOrderSearchWhere(keyword: string): Prisma.OrderWhereInput {
+    const safeKeyword = this.normalizeOrderKeyword(keyword);
+    const phoneKeyword = this.normalizeOrderKeywordPhone(safeKeyword);
+    const exactOr: Prisma.OrderWhereInput[] = [
+      { orderCode: { equals: safeKeyword, mode: "insensitive" } },
+      { shipment: { is: { trackingCode: { equals: safeKeyword, mode: "insensitive" } } } },
+      { items: { some: { sku: { equals: safeKeyword, mode: "insensitive" } } } },
+    ];
+
+    if (phoneKeyword) {
+      exactOr.push({ customerPhone: { equals: phoneKeyword, mode: "insensitive" } });
+      exactOr.push({ shippingPhone: { equals: phoneKeyword, mode: "insensitive" } });
+    }
+
+    return { OR: exactOr };
+  }
+
+  private buildBroadOrderSearchWhere(keyword: string): Prisma.OrderWhereInput {
+    const safeKeyword = this.normalizeOrderKeywordForContains(keyword);
+    const phoneKeyword = this.normalizeOrderKeywordPhone(safeKeyword);
+    const broadOr: Prisma.OrderWhereInput[] = [
+      { orderCode: { contains: safeKeyword, mode: "insensitive" } },
+      { customerName: { contains: safeKeyword, mode: "insensitive" } },
+      { customerPhone: { contains: safeKeyword, mode: "insensitive" } },
+      { createdByStaffName: { contains: safeKeyword, mode: "insensitive" } },
+      { note: { contains: safeKeyword, mode: "insensitive" } },
+      { shippingRecipientName: { contains: safeKeyword, mode: "insensitive" } },
+      { shippingPhone: { contains: safeKeyword, mode: "insensitive" } },
+      { shippingAddressLine1: { contains: safeKeyword, mode: "insensitive" } },
+      { shippingAddressLine2: { contains: safeKeyword, mode: "insensitive" } },
+      { shippingWard: { contains: safeKeyword, mode: "insensitive" } },
+      { shippingDistrict: { contains: safeKeyword, mode: "insensitive" } },
+      { shippingCity: { contains: safeKeyword, mode: "insensitive" } },
+      { shippingProvince: { contains: safeKeyword, mode: "insensitive" } },
+      { shipment: { is: { trackingCode: { contains: safeKeyword, mode: "insensitive" } } } },
+      { shipment: { is: { carrier: { contains: safeKeyword, mode: "insensitive" } } } },
+      { items: { some: { sku: { contains: safeKeyword, mode: "insensitive" } } } },
+      { items: { some: { productName: { contains: safeKeyword, mode: "insensitive" } } } },
+    ];
+
+    if (phoneKeyword && phoneKeyword !== safeKeyword) {
+      broadOr.push({ customerPhone: { contains: phoneKeyword, mode: "insensitive" } });
+      broadOr.push({ shippingPhone: { contains: phoneKeyword, mode: "insensitive" } });
+    }
+
+    if (this.isSalesChannelKeyword(safeKeyword)) {
+      broadOr.push({ salesChannel: { equals: safeKeyword.toUpperCase() as SalesChannel } });
+    }
+
+    return { OR: broadOr };
+  }
+
+  private buildFastOrderListSelect(): Prisma.OrderSelect {
+    return {
+      id: true,
+      orderCode: true,
+      salesChannel: true,
+      customerName: true,
+      customerPhone: true,
+      branchId: true,
+      createdByStaffId: true,
+      createdByStaffName: true,
+      soldAt: true,
+      totalAmount: true,
+      discountAmount: true,
+      shippingFee: true,
+      finalAmount: true,
+      paymentStatus: true,
+      fulfillmentStatus: true,
+      status: true,
+      note: true,
+      customerAddressId: true,
+      shippingRecipientName: true,
+      shippingPhone: true,
+      shippingAddressLine1: true,
+      shippingAddressLine2: true,
+      shippingWard: true,
+      shippingDistrict: true,
+      shippingCity: true,
+      shippingProvince: true,
+      shippingCountry: true,
+      shippingPostalCode: true,
+      createdAt: true,
+      updatedAt: true,
+      items: {
+        select: {
+          id: true,
+          qty: true,
+          sku: true,
+          productName: true,
+          color: true,
+          size: true,
+        },
+      },
+      shipment: {
+        select: {
+          id: true,
+          carrier: true,
+          trackingCode: true,
+          shippingStatus: true,
+          codAmount: true,
+          shippingFee: true,
+        },
+      },
+      payments: {
+        select: {
+          id: true,
+          method: true,
+          amount: true,
+          status: true,
+          paidAt: true,
+          paymentSourceId: true,
+          paymentSource: {
+            select: {
+              id: true,
+              code: true,
+              name: true,
+              type: true,
+              branchId: true,
+            },
+          },
+        },
+      },
+    };
+  }
+
+  private mapOrderListResponse(order: any) {
+    return {
+      ...order,
+      totalAmount: this.toNumber(order.totalAmount),
+      discountAmount: this.toNumber(order.discountAmount),
+      shippingFee: this.toNumber(order.shippingFee),
+      finalAmount: this.toNumber(order.finalAmount),
+      createdAt: order.createdAt,
+      updatedAt: order.updatedAt,
+      soldAt: order.soldAt || null,
+      items: Array.isArray(order.items)
+        ? order.items.map((item: any) => ({
+          ...item,
+          qty: Number(item.qty || 0),
+        }))
+        : [],
+      itemCount: Array.isArray(order.items)
+        ? order.items.reduce(
+          (sum: number, item: any) => sum + Number(item.qty || 0),
+          0
+        )
+        : 0,
+      payments: Array.isArray(order.payments)
+        ? order.payments.map((payment: any) => ({
+          ...payment,
+          amount: this.toNumber(payment.amount),
+          sourceName: payment.paymentSource?.name || payment.method || null,
+          sourceCode: payment.paymentSource?.code || null,
+          sourceType: payment.paymentSource?.type || null,
+          paidAt: payment.paidAt || null,
+        }))
+        : [],
+      shipment: order.shipment
+        ? {
+          ...order.shipment,
+          shippingFee: this.toNumber(order.shipment.shippingFee),
+          codAmount: this.toNumber(order.shipment.codAmount),
+        }
+        : null,
+    };
+  }
+
   async getOrders(params: GetOrdersParams = {}, user?: any) {
     const {
       page = 1,
@@ -2159,166 +2344,74 @@ export class OrderService {
     const safePage = Math.max(Number(page || 1), 1);
     const safePageSize = Math.min(Math.max(Number(pageSize || 50), 1), 100);
     const skip = (safePage - 1) * safePageSize;
+    const keyword = this.normalizeOrderKeyword(q);
 
-    const extraWhere: Prisma.OrderWhereInput = {};
+    const baseWhere: Prisma.OrderWhereInput = {};
 
     if (branchId && branchId !== "ALL") {
-      extraWhere.branchId = branchId;
+      baseWhere.branchId = branchId;
     }
 
     if (orderStatus && orderStatus !== "ALL") {
-      extraWhere.status = orderStatus as OrderStatus;
+      baseWhere.status = orderStatus as OrderStatus;
     }
 
     if (paymentStatus && paymentStatus !== "ALL") {
-      extraWhere.paymentStatus = paymentStatus as PaymentStatus;
+      baseWhere.paymentStatus = paymentStatus as PaymentStatus;
     }
 
     if (dateFrom || dateTo) {
-      extraWhere.createdAt = {};
+      baseWhere.createdAt = {};
       if (dateFrom) {
-        (extraWhere.createdAt as Prisma.DateTimeFilter).gte = new Date(
+        (baseWhere.createdAt as Prisma.DateTimeFilter).gte = new Date(
           `${dateFrom}T00:00:00.000Z`
         );
       }
       if (dateTo) {
-        (extraWhere.createdAt as Prisma.DateTimeFilter).lte = new Date(
+        (baseWhere.createdAt as Prisma.DateTimeFilter).lte = new Date(
           `${dateTo}T23:59:59.999Z`
         );
       }
     }
 
-    if (q.trim()) {
-      const keyword = q.trim();
-      extraWhere.OR = [
-        { orderCode: { contains: keyword, mode: "insensitive" } },
-        { customerName: { contains: keyword, mode: "insensitive" } },
-        { customerPhone: { contains: keyword, mode: "insensitive" } },
-        { salesChannel: { equals: keyword as SalesChannel } },
-        { note: { contains: keyword, mode: "insensitive" } },
-      ];
+    let searchWhere: Prisma.OrderWhereInput | null = null;
+    let exactSearchHit = false;
+
+    if (keyword) {
+      const exactWhere = this.buildOrderWhereByUser(user, {
+        AND: [baseWhere, this.buildExactOrderSearchWhere(keyword)],
+      } as Prisma.OrderWhereInput);
+
+      const exactTotal = await this.prisma.order.count({ where: exactWhere });
+
+      if (exactTotal > 0) {
+        searchWhere = this.buildExactOrderSearchWhere(keyword);
+        exactSearchHit = true;
+      } else {
+        searchWhere = this.buildBroadOrderSearchWhere(keyword);
+      }
     }
 
-    const where = this.buildOrderWhereByUser(user, extraWhere);
+    const scopedWhere = this.buildOrderWhereByUser(
+      user,
+      searchWhere
+        ? ({ AND: [baseWhere, searchWhere] } as Prisma.OrderWhereInput)
+        : baseWhere,
+    );
 
     const [orders, total] = await Promise.all([
       this.prisma.order.findMany({
-        where,
+        where: scopedWhere,
         orderBy: { createdAt: "desc" },
         skip,
         take: safePageSize,
-        select: {
-          id: true,
-          orderCode: true,
-          salesChannel: true,
-          customerName: true,
-          customerPhone: true,
-          branchId: true,
-          createdByStaffId: true,
-          createdByStaffName: true,
-          soldAt: true,
-          totalAmount: true,
-          discountAmount: true,
-          shippingFee: true,
-          finalAmount: true,
-          paymentStatus: true,
-          fulfillmentStatus: true,
-          status: true,
-          note: true,
-          createdAt: true,
-          updatedAt: true,
-
-          items: {
-            select: {
-              id: true,
-              qty: true,
-            },
-          },
-
-          // ✅ THÊM ĐOẠN NÀY
-          shipment: {
-            select: {
-              id: true,
-              carrier: true,
-              trackingCode: true,
-              shippingStatus: true,
-              codAmount: true,
-              shippingFee: true,
-            },
-          },
-          payments: {
-            select: {
-              id: true,
-              method: true,
-              amount: true,
-              status: true,
-              paidAt: true,
-              paymentSourceId: true,
-              paymentSource: {
-                select: {
-                  id: true,
-                  code: true,
-                  name: true,
-                  type: true,
-                  branchId: true,
-                },
-              },
-            },
-          },
-        },
+        select: this.buildFastOrderListSelect(),
       }),
-      this.prisma.order.count({ where }),
+      this.prisma.order.count({ where: scopedWhere }),
     ]);
 
     const ordersWithAssignedStaff = await this.attachAssignedStaffFields(orders);
-
-    const data = ordersWithAssignedStaff.map((order) => ({
-      ...order,
-      totalAmount: this.toNumber(order.totalAmount),
-      discountAmount: this.toNumber(order.discountAmount),
-      shippingFee: this.toNumber(order.shippingFee),
-      finalAmount: this.toNumber(order.finalAmount),
-
-      // ✅ GIỮ RAW DATE ISO
-      createdAt: order.createdAt,
-      updatedAt: order.updatedAt,
-      soldAt: order.soldAt || null,
-
-      items: Array.isArray(order.items)
-        ? order.items.map((item: any) => ({
-          ...item,
-          qty: Number(item.qty || 0),
-        }))
-        : [],
-
-      itemCount: Array.isArray(order.items)
-        ? order.items.reduce(
-          (sum: number, item: any) => sum + Number(item.qty || 0),
-          0
-        )
-        : 0,
-
-      payments: Array.isArray(order.payments)
-        ? order.payments.map((payment: any) => ({
-          ...payment,
-          amount: this.toNumber(payment.amount),
-          sourceName: payment.paymentSource?.name || payment.method || null,
-          sourceCode: payment.paymentSource?.code || null,
-          sourceType: payment.paymentSource?.type || null,
-
-          // ✅ GIỮ RAW DATE ISO
-          paidAt: payment.paidAt || null,
-        }))
-        : [],
-
-      shipment: order.shipment
-        ? {
-          ...order.shipment,
-          shippingFee: this.toNumber(order.shipment.shippingFee),
-          codAmount: this.toNumber(order.shipment.codAmount),
-        }
-        : null,
-    }));
+    const data = ordersWithAssignedStaff.map((order) => this.mapOrderListResponse(order));
 
     return {
       data,
@@ -2327,6 +2420,10 @@ export class OrderService {
         pageSize: safePageSize,
         total,
         totalPages: Math.ceil(total / safePageSize),
+      },
+      search: {
+        q: keyword,
+        exact: exactSearchHit,
       },
     };
   }
