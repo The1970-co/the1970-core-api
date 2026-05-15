@@ -451,7 +451,16 @@ async handleAutoRebalanceCron() {
     const rows = await this.prisma.stockTransfer.findMany({
       where,
       include: {
-        items: false,
+        items: {
+          include: {
+            variant: {
+              include: {
+                product: true,
+              },
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        },
         fromBranch: true,
         toBranch: true,
       },
@@ -505,9 +514,33 @@ async handleAutoRebalanceCron() {
         completedAt: row.completedAt,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
-        totalLines: stats?.totalLines ?? 0,
-        totalQty: stats?.totalQty ?? 0,
-        items: [],
+        totalLines: stats?.totalLines ?? row.items.length,
+        totalQty: stats?.totalQty ?? row.items.reduce((sum, item) => sum + Number(item.qty || 0), 0),
+        items: row.items.map((item) => {
+          const product = (item as any).variant?.product as any;
+
+          return {
+            id: item.id,
+            transferId: item.transferId,
+            variantId: item.variantId,
+            sku: item.sku ?? item.variant?.sku ?? null,
+            productName: item.productName ?? product?.name ?? null,
+            color: item.color ?? item.variant?.color ?? null,
+            size: item.size ?? item.variant?.size ?? null,
+            qty: item.qty,
+            createdAt: item.createdAt,
+            variant: item.variant,
+            product,
+            categoryName:
+              product?.categoryName ??
+              product?.category?.name ??
+              product?.category?.title ??
+              product?.categoryId ??
+              product?.type ??
+              product?.productType ??
+              null,
+          };
+        }),
       };
     });
   }
