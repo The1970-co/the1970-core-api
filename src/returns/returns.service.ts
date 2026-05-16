@@ -20,19 +20,51 @@ export class ReturnsService {
   }
 
   private userBranch(user?: any) {
-    return user?.branchId || user?.workingBranchId || user?.currentBranchId || null;
+    return this.userBranchCandidates(user)[0] || null;
+  }
+
+  private normalizeBranchKey(value: any) {
+    return String(value || "")
+      .trim()
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/đ/g, "d")
+      .replace(/[^a-z0-9]/g, "");
+  }
+
+  private userBranchCandidates(user?: any) {
+    return [
+      user?.branchId,
+      user?.workingBranchId,
+      user?.currentBranchId,
+      user?.branchCode,
+      user?.branchName,
+      user?.branch,
+      user?.activeBranchId,
+    ]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
   }
 
   private ensureBranch(user: any, branchId?: string | null) {
     if (this.isOwner(user)) return;
 
-    const ub = this.userBranch(user);
+    const candidates = this.userBranchCandidates(user);
 
-    if (!ub) {
+    if (!candidates.length) {
       throw new ForbiddenException("Tài khoản chưa được gán chi nhánh.");
     }
 
-    if (branchId && ub !== branchId) {
+    if (!branchId) return;
+
+    const target = this.normalizeBranchKey(branchId);
+    const hasAccess = candidates.some((value) => {
+      const normalized = this.normalizeBranchKey(value);
+      return normalized && normalized === target;
+    });
+
+    if (!hasAccess) {
       throw new ForbiddenException("Không có quyền xử lý phiếu ở chi nhánh này.");
     }
   }
@@ -516,6 +548,76 @@ export class ReturnsService {
     };
   }
 
+
+  async getReturnsByOrder(orderIdOrCode: string, user?: any) {
+    const key = String(orderIdOrCode || "").trim();
+
+    if (!key) {
+      throw new BadRequestException("Thiếu mã đơn gốc.");
+    }
+
+    const order = await this.prisma.order.findFirst({
+      where: {
+        OR: [{ id: key }, { orderCode: key }],
+      },
+      select: {
+        id: true,
+        orderCode: true,
+        branchId: true,
+      },
+    });
+
+    const candidateOriginalOrderIds = Array.from(
+      new Set([order?.id, order?.orderCode, key].filter(Boolean).map(String)),
+    );
+
+    if (order?.branchId) {
+      this.ensureBranch(user, order.branchId);
+    }
+
+    const userBranchId = this.userBranch(user);
+
+    const rows = await this.prisma.returnExchange.findMany({
+      where: {
+        originalOrderId: { in: candidateOriginalOrderIds },
+        ...(this.isOwner(user) || !userBranchId
+          ? {}
+          : {
+              OR: [
+                { originalBranchId: userBranchId },
+                { handledAtBranchId: userBranchId },
+                { returnReceiveBranchId: userBranchId },
+                { exchangeIssueBranchId: userBranchId },
+              ],
+            }),
+      },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+      include: {
+        items: true,
+        cashVouchers: true,
+        originalOrder: {
+          select: {
+            id: true,
+            orderCode: true,
+            customerName: true,
+            customerPhone: true,
+            branchId: true,
+          },
+        },
+      },
+    });
+
+    return {
+      data: rows.map((row) => ({
+        ...this.map(row),
+        originalOrderCode: (row as any).originalOrder?.orderCode || order?.orderCode || null,
+        originalOrderCustomerName: (row as any).originalOrder?.customerName || null,
+        originalOrderCustomerPhone: (row as any).originalOrder?.customerPhone || null,
+      })),
+    };
+  }
+
   async getReturnById(idOrCode: string, user?: any) {
     const row = await this.prisma.returnExchange.findFirst({
       where: {
@@ -682,8 +784,13 @@ export class ReturnsService {
       throw new BadRequestException("Thiếu orderId.");
     }
 
-    const order = await this.prisma.order.findUnique({
-      where: { id },
+    const order = await this.prisma.order.findFirst({
+      where: {
+        OR: [
+          { id },
+          { orderCode: id },
+        ],
+      },
       include: {
         items: true,
         payments: {
