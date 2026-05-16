@@ -596,15 +596,6 @@ export class ReturnsService {
       include: {
         items: true,
         cashVouchers: true,
-        originalOrder: {
-          select: {
-            id: true,
-            orderCode: true,
-            customerName: true,
-            customerPhone: true,
-            branchId: true,
-          },
-        },
       },
     });
 
