@@ -30,6 +30,16 @@ export class ReturnsController {
     return this.returnsService.createReturn(body, req.user);
   }
 
+
+  @Post("create-exchange-shipment")
+  @RequirePermissions("returns.create")
+  createReturnAndShipExchange(
+    @Body() body: any,
+    @Req() req: Request & { user?: any },
+  ) {
+    return this.returnsService.createReturnAndShipExchange(body, req.user);
+  }
+
   @Get()
   @RequirePermissions("returns.view")
   getReturns(

@@ -1134,6 +1134,15 @@ export class OrderService implements OnModuleInit {
         toAddress: snapshot.shippingAddressLine1,
 
         codAmount: remainingCodAmount,
+        serviceId:
+          snapshot.ahamoveServiceId ||
+          snapshot.serviceId ||
+          snapshot.selectedServiceId ||
+          snapshot._ahamoveServiceId ||
+          undefined,
+        payment_method: snapshot.paymentMethod || snapshot.payment_method || undefined,
+        paymentMethod: snapshot.paymentMethod || snapshot.payment_method || undefined,
+        note: snapshot.shippingNote || snapshot.note || body?.paymentNote || "",
         items: ahamoveItems,
       });
     }

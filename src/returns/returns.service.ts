@@ -3,19 +3,27 @@ import {
   ForbiddenException,
   Injectable,
 } from "@nestjs/common";
-import { InventoryMovementType, Prisma } from "@prisma/client";
+import { InventoryMovementType, PaymentStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { OrderService } from "../order/order.service";
+import { ShipmentService } from "../shipment/shipment.service";
 
 @Injectable()
 export class ReturnsService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly orderService: OrderService,
+    private readonly shipmentService: ShipmentService,
+  ) {}
 
   private n(v: any) {
     return Number(v || 0);
   }
 
   private isOwner(user?: any) {
-    const role = String(user?.role || "").trim().toUpperCase();
+    const role = String(user?.role || "")
+      .trim()
+      .toUpperCase();
     return role === "OWNER" || role === "ADMIN";
   }
 
@@ -65,7 +73,9 @@ export class ReturnsService {
     });
 
     if (!hasAccess) {
-      throw new ForbiddenException("Không có quyền xử lý phiếu ở chi nhánh này.");
+      throw new ForbiddenException(
+        "Không có quyền xử lý phiếu ở chi nhánh này.",
+      );
     }
   }
 
@@ -85,7 +95,9 @@ export class ReturnsService {
     });
 
     if (!source) {
-      throw new BadRequestException(`Nguồn tiền không tồn tại: ${paymentSourceId}`);
+      throw new BadRequestException(
+        `Nguồn tiền không tồn tại: ${paymentSourceId}`,
+      );
     }
 
     return source;
@@ -94,7 +106,9 @@ export class ReturnsService {
   private isReturnableOrder(order: any) {
     const status = String(order?.status || "").toUpperCase();
     const paymentStatus = String(order?.paymentStatus || "").toUpperCase();
-    const fulfillmentStatus = String(order?.fulfillmentStatus || "").toUpperCase();
+    const fulfillmentStatus = String(
+      order?.fulfillmentStatus || "",
+    ).toUpperCase();
 
     return (
       status === "COMPLETED" ||
@@ -113,8 +127,19 @@ export class ReturnsService {
       differenceAmount: this.n(row.differenceAmount),
       refundAmount: this.n(row.refundAmount),
       extraChargeAmount: this.n(row.extraChargeAmount),
-      createdAt: row.createdAt ? new Date(row.createdAt).toLocaleString("vi-VN") : null,
-      updatedAt: row.updatedAt ? new Date(row.updatedAt).toLocaleString("vi-VN") : null,
+      shippingFee: this.n(row.shippingFee),
+      customerPayableAmount: this.n(row.customerPayableAmount),
+      exchangeOrderId: row.exchangeOrderId || null,
+      exchangeOrderCode: row.exchangeOrderCode || null,
+      exchangeShipmentId: row.exchangeShipmentId || null,
+      exchangeTrackingCode: row.exchangeTrackingCode || null,
+      exchangeCarrier: row.exchangeCarrier || null,
+      createdAt: row.createdAt
+        ? new Date(row.createdAt).toLocaleString("vi-VN")
+        : null,
+      updatedAt: row.updatedAt
+        ? new Date(row.updatedAt).toLocaleString("vi-VN")
+        : null,
       items: (row.items || []).map((i: any) => ({
         ...i,
         unitPrice: this.n(i.unitPrice),
@@ -124,13 +149,20 @@ export class ReturnsService {
       cashVouchers: (row.cashVouchers || []).map((v: any) => ({
         ...v,
         amount: this.n(v.amount),
-        createdAt: v.createdAt ? new Date(v.createdAt).toLocaleString("vi-VN") : null,
-        updatedAt: v.updatedAt ? new Date(v.updatedAt).toLocaleString("vi-VN") : null,
+        createdAt: v.createdAt
+          ? new Date(v.createdAt).toLocaleString("vi-VN")
+          : null,
+        updatedAt: v.updatedAt
+          ? new Date(v.updatedAt).toLocaleString("vi-VN")
+          : null,
       })),
     };
   }
 
-  private async validateReturnQuantity(originalOrderId: string, returnItems: any[]) {
+  private async validateReturnQuantity(
+    originalOrderId: string,
+    returnItems: any[],
+  ) {
     const orderItemIds = returnItems
       .map((item) => item.orderItemId)
       .filter(Boolean)
@@ -171,7 +203,7 @@ export class ReturnsService {
 
       if (requestedQty > Number(orderItem.qty || 0)) {
         throw new BadRequestException(
-          `Số lượng trả ${orderItem.sku || orderItem.productName || ""} vượt số lượng đã mua.`
+          `Số lượng trả ${orderItem.sku || orderItem.productName || ""} vượt số lượng đã mua.`,
         );
       }
     }
@@ -191,20 +223,29 @@ export class ReturnsService {
       },
     });
 
-    const previousQtyByOrderItemId = previousRows.reduce((acc, row) => {
-      if (!row.orderItemId) return acc;
-      acc[row.orderItemId] = (acc[row.orderItemId] || 0) + Number(row.qty || 0);
-      return acc;
-    }, {} as Record<string, number>);
+    const previousQtyByOrderItemId = previousRows.reduce(
+      (acc, row) => {
+        if (!row.orderItemId) return acc;
+        acc[row.orderItemId] =
+          (acc[row.orderItemId] || 0) + Number(row.qty || 0);
+        return acc;
+      },
+      {} as Record<string, number>,
+    );
 
-    const requestedQtyByOrderItemId = returnItems.reduce((acc, item) => {
-      if (!item.orderItemId) return acc;
-      const key = String(item.orderItemId);
-      acc[key] = (acc[key] || 0) + this.n(item.qty);
-      return acc;
-    }, {} as Record<string, number>);
+    const requestedQtyByOrderItemId = returnItems.reduce(
+      (acc, item) => {
+        if (!item.orderItemId) return acc;
+        const key = String(item.orderItemId);
+        acc[key] = (acc[key] || 0) + this.n(item.qty);
+        return acc;
+      },
+      {} as Record<string, number>,
+    );
 
-    for (const [orderItemId, requestedQtyRaw] of Object.entries(requestedQtyByOrderItemId)) {
+    for (const [orderItemId, requestedQtyRaw] of Object.entries(
+      requestedQtyByOrderItemId,
+    )) {
       const requestedQty = Number(requestedQtyRaw || 0);
 
       const orderItem = orderItemMap.get(orderItemId);
@@ -214,7 +255,7 @@ export class ReturnsService {
 
       if (requestedQty > remainQty) {
         throw new BadRequestException(
-          `Sản phẩm ${orderItem?.sku || orderItem?.productName || ""} chỉ còn được trả ${remainQty}.`
+          `Sản phẩm ${orderItem?.sku || orderItem?.productName || ""} chỉ còn được trả ${remainQty}.`,
         );
       }
     }
@@ -244,7 +285,7 @@ export class ReturnsService {
 
     if (!this.isReturnableOrder(originalOrder)) {
       throw new BadRequestException(
-        "Chỉ được đổi/trả đơn đã hoàn thành, đã giao hoặc đã thanh toán hợp lệ."
+        "Chỉ được đổi/trả đơn đã hoàn thành, đã giao hoặc đã thanh toán hợp lệ.",
       );
     }
 
@@ -253,19 +294,18 @@ export class ReturnsService {
       body.handledAtBranchId ||
       originalOrder.branchId;
 
-    const exchangeIssueBranchId =
-      body.exchangeIssueBranchId || receiveBranchId;
+    const exchangeIssueBranchId = body.exchangeIssueBranchId || receiveBranchId;
 
     this.ensureBranch(user, receiveBranchId);
 
     const items = Array.isArray(body.items) ? body.items : [];
 
     const returnItems = items.filter(
-      (x: any) => String(x.itemType || "RETURN") === "RETURN"
+      (x: any) => String(x.itemType || "RETURN") === "RETURN",
     );
 
     const exchangeItems = items.filter(
-      (x: any) => String(x.itemType || "") === "EXCHANGE"
+      (x: any) => String(x.itemType || "") === "EXCHANGE",
     );
 
     if (!returnItems.length && !exchangeItems.length) {
@@ -275,23 +315,47 @@ export class ReturnsService {
     await this.validateReturnQuantity(originalOrderId, returnItems);
 
     const returnAmount = returnItems.reduce((sum: number, item: any) => {
-      return sum + this.n(item.refundPrice ?? item.unitPrice) * this.n(item.qty);
+      return (
+        sum + this.n(item.refundPrice ?? item.unitPrice) * this.n(item.qty)
+      );
     }, 0);
 
     const exchangeAmount = exchangeItems.reduce((sum: number, item: any) => {
-      return sum + this.n(item.refundPrice ?? item.unitPrice) * this.n(item.qty);
+      return (
+        sum + this.n(item.refundPrice ?? item.unitPrice) * this.n(item.qty)
+      );
     }, 0);
 
-    const differenceAmount = returnAmount - exchangeAmount;
+    const rawShippingFee = this.n(
+      body.shippingFee ??
+        body.shipFee ??
+        body.deliveryFee ??
+        body.customerShippingFee ??
+        0,
+    );
+    const shippingFee = exchangeItems.length ? Math.max(0, rawShippingFee) : 0;
+
+    // Chênh lệch thực tế phải tính cả phí ship thu khách:
+    // khách phải trả = tiền hàng đổi + phí ship - tiền hàng trả.
+    const customerPayableAmount = Math.max(
+      0,
+      exchangeAmount + shippingFee - returnAmount,
+    );
+    const differenceAmount = returnAmount - exchangeAmount - shippingFee;
     const refundAmount = differenceAmount > 0 ? differenceAmount : 0;
-    const extraChargeAmount =
-      differenceAmount < 0 ? Math.abs(differenceAmount) : 0;
+    const extraChargeAmount = customerPayableAmount;
 
     if (refundAmount > 0 && !body.refundPaymentSourceId) {
       throw new BadRequestException("Thiếu nguồn tiền hoàn khách.");
     }
 
-    if (extraChargeAmount > 0 && !body.extraChargePaymentSourceId) {
+    const deferExtraChargeToShipment = body.deferExtraChargeToShipment === true;
+
+    if (
+      extraChargeAmount > 0 &&
+      !deferExtraChargeToShipment &&
+      !body.extraChargePaymentSourceId
+    ) {
       throw new BadRequestException("Thiếu nguồn tiền khách bù thêm.");
     }
 
@@ -299,7 +363,7 @@ export class ReturnsService {
       await this.ensurePaymentSourceExists(body.refundPaymentSourceId);
     }
 
-    if (extraChargeAmount > 0) {
+    if (extraChargeAmount > 0 && !deferExtraChargeToShipment) {
       await this.ensurePaymentSourceExists(body.extraChargePaymentSourceId);
     }
 
@@ -329,6 +393,8 @@ export class ReturnsService {
 
           refundAmount: new Prisma.Decimal(refundAmount),
           extraChargeAmount: new Prisma.Decimal(extraChargeAmount),
+          shippingFee: new Prisma.Decimal(shippingFee),
+          customerPayableAmount: new Prisma.Decimal(customerPayableAmount),
 
           refundPaymentSourceId: body.refundPaymentSourceId || null,
           extraChargePaymentSourceId: body.extraChargePaymentSourceId || null,
@@ -345,10 +411,10 @@ export class ReturnsService {
               qty: this.n(item.qty),
               unitPrice: new Prisma.Decimal(this.n(item.unitPrice)),
               refundPrice: new Prisma.Decimal(
-                this.n(item.refundPrice ?? item.unitPrice)
+                this.n(item.refundPrice ?? item.unitPrice),
               ),
               lineTotal: new Prisma.Decimal(
-                this.n(item.refundPrice ?? item.unitPrice) * this.n(item.qty)
+                this.n(item.refundPrice ?? item.unitPrice) * this.n(item.qty),
               ),
               reason: item.reason || null,
             })),
@@ -414,7 +480,7 @@ export class ReturnsService {
 
           if (!inv || Number(inv.availableQty || 0) < this.n(item.qty)) {
             throw new BadRequestException(
-              `Không đủ tồn kho sản phẩm đổi ${item.sku || item.productName || ""}.`
+              `Không đủ tồn kho sản phẩm đổi ${item.sku || item.productName || ""}.`,
             );
           }
 
@@ -466,7 +532,7 @@ export class ReturnsService {
         });
       }
 
-      if (extraChargeAmount > 0) {
+      if (extraChargeAmount > 0 && !deferExtraChargeToShipment) {
         await tx.cashVoucher.create({
           data: {
             code: this.voucherCode("IN"),
@@ -496,6 +562,680 @@ export class ReturnsService {
 
       return this.map(full);
     });
+  }
+
+  private buildExchangeOrderUser(user?: any) {
+    const ensure = (items?: any[]) => {
+      const set = new Set<string>();
+      if (Array.isArray(items))
+        items.forEach((item) => item && set.add(String(item)));
+      set.add("orders.create");
+      return Array.from(set);
+    };
+
+    return {
+      ...(user || {}),
+      permissions: ensure(user?.permissions),
+      permissionKeys: ensure(user?.permissionKeys),
+    };
+  }
+
+  private parseStructuredNoteValue(note?: string | null, prefix?: string) {
+    if (!note || !prefix) return "";
+    const parts = String(note)
+      .split(" | ")
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    const found = parts.find((item) => item.startsWith(prefix));
+    return found ? found.replace(prefix, "").trim() : "";
+  }
+
+  private buildFullAddress(order: any) {
+    return [
+      order.shippingAddressLine1,
+      order.shippingAddressLine2,
+      order.shippingWard,
+      order.shippingDistrict,
+      order.shippingProvince,
+      order.shippingPostalCode,
+    ]
+      .filter(Boolean)
+      .join(", ");
+  }
+
+  private normalizeGhnRequiredNote(input?: string | null) {
+    const raw = String(input || "")
+      .trim()
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+
+    if (raw.includes("cho xem") && raw.includes("khong cho thu")) {
+      return "CHOXEMHANGKHONGTHU";
+    }
+
+    if (raw.includes("cho xem")) {
+      return "CHOXEMHANG";
+    }
+
+    return "KHONGCHOXEMHANG";
+  }
+
+  private normalizeShippingPartner(input?: string | null) {
+    const raw = String(input || "")
+      .trim()
+      .toUpperCase()
+      .replace(/[\s_-]+/g, "");
+
+    if (raw.includes("VIETTEL") || raw === "VTP") return "VIETTELPOST";
+    if (raw.includes("AHA")) return "AHAMOVE";
+    return "GHN";
+  }
+
+  private quoteFee(input: any) {
+    return this.n(
+      input?._fee ||
+        input?.fee?.total ||
+        input?.fee?.total_fee ||
+        input?.fee?.service_fee ||
+        input?.data?.user_price_details?.total_fee ||
+        input?.data?.user_price_details?.total_price ||
+        input?.data?.total_price ||
+        input?.data?.total_fee ||
+        input?.data?.service_fee ||
+        input?.totalFee ||
+        input?.total_fee ||
+        input?.totalPrice ||
+        input?.total_price ||
+        input?.fee ||
+        0,
+    );
+  }
+
+  private buildShippingSnapshotFromOriginalOrder(
+    originalOrder: any,
+    shippingFee: number,
+    shippingPartner = "GHN",
+    options: any = {},
+  ) {
+    const partner = this.normalizeShippingPartner(shippingPartner);
+    const selectedQuote =
+      options?.selectedShippingQuote || options?.shippingQuote || {};
+    const oldNote = String(originalOrder.note || "");
+    const shippingNote =
+      this.parseStructuredNoteValue(oldNote, "Ghi chú giao hàng:") ||
+      this.parseStructuredNoteValue(oldNote, "Ghi chú:") ||
+      "Cho xem hàng, không cho thử";
+
+    return {
+      shippingPartner: partner,
+      carrier: partner,
+      shippingFee,
+      shippingRecipientName:
+        originalOrder.shippingRecipientName ||
+        originalOrder.customerName ||
+        "Khách hàng",
+      shippingPhone:
+        originalOrder.shippingPhone || originalOrder.customerPhone || "",
+      shippingAddressLine1: originalOrder.shippingAddressLine1 || "",
+      shippingAddressLine2: originalOrder.shippingAddressLine2 || "",
+      shippingWard: originalOrder.shippingWard || "",
+      shippingDistrict: originalOrder.shippingDistrict || "",
+      shippingCity: originalOrder.shippingCity || "",
+      shippingProvince: originalOrder.shippingProvince || "",
+      shippingCountry: originalOrder.shippingCountry || "VN",
+      shippingPostalCode: originalOrder.shippingPostalCode || "",
+      ghnDistrictId: originalOrder.shippingGhnDistrictId || null,
+      ghnWardCode: originalOrder.shippingGhnWardCode || null,
+      shippingGhnDistrictId: originalOrder.shippingGhnDistrictId || null,
+      shippingGhnWardCode: originalOrder.shippingGhnWardCode || null,
+      requiredNote: this.normalizeGhnRequiredNote(shippingNote),
+      shippingNote,
+      deliveryRequirement: shippingNote,
+      note: shippingNote,
+      selectedServiceId:
+        options?.selectedServiceId || selectedQuote?.serviceId || null,
+      selectedServiceTypeId:
+        options?.selectedServiceTypeId || selectedQuote?.serviceTypeId || null,
+      selectedQuoteKey:
+        options?.selectedQuoteKey || selectedQuote?._quoteKey || null,
+      serviceCode:
+        options?.serviceCode ||
+        options?.viettelServiceCode ||
+        selectedQuote?._viettelServiceCode ||
+        selectedQuote?.serviceCode ||
+        selectedQuote?.orderService ||
+        null,
+      viettelServiceCode:
+        options?.viettelServiceCode ||
+        options?.serviceCode ||
+        selectedQuote?._viettelServiceCode ||
+        selectedQuote?.serviceCode ||
+        null,
+      orderService:
+        options?.serviceCode ||
+        options?.viettelServiceCode ||
+        selectedQuote?._viettelServiceCode ||
+        selectedQuote?.serviceCode ||
+        null,
+      ahamoveServiceId:
+        options?.ahamoveServiceId ||
+        selectedQuote?._ahamoveServiceId ||
+        selectedQuote?.service_id ||
+        selectedQuote?.serviceId ||
+        null,
+      serviceId:
+        options?.ahamoveServiceId ||
+        selectedQuote?._ahamoveServiceId ||
+        selectedQuote?.service_id ||
+        selectedQuote?.serviceId ||
+        options?.selectedServiceId ||
+        null,
+      weight: Number(options?.weight || selectedQuote?.weight || 500),
+      length: 20,
+      width: 20,
+      height: 5,
+    };
+  }
+
+  private getExchangeShipmentDims(body: any, selectedQuote: any = {}) {
+    return {
+      weight: Math.max(
+        1,
+        Number(
+          body?.weight || body?.shippingWeight || selectedQuote?.weight || 500,
+        ),
+      ),
+      length: Math.max(
+        1,
+        Number(
+          body?.length || body?.shippingLength || selectedQuote?.length || 20,
+        ),
+      ),
+      width: Math.max(
+        1,
+        Number(
+          body?.width || body?.shippingWidth || selectedQuote?.width || 20,
+        ),
+      ),
+      height: Math.max(
+        1,
+        Number(
+          body?.height || body?.shippingHeight || selectedQuote?.height || 5,
+        ),
+      ),
+    };
+  }
+
+  private buildOrderFullAddress(order: any) {
+    return [
+      order?.shippingAddressLine1,
+      order?.shippingAddressLine2,
+      order?.shippingWard,
+      order?.shippingDistrict,
+      order?.shippingProvince,
+      order?.shippingPostalCode,
+    ]
+      .filter(Boolean)
+      .join(", ");
+  }
+
+  private calculateOrderRemainingCod(order: any) {
+    const paidAmount = Array.isArray(order?.payments)
+      ? order.payments.reduce((sum: number, payment: any) => {
+          const sourceType = String(
+            payment?.paymentSource?.type || payment?.sourceType || "",
+          ).toUpperCase();
+          if (
+            sourceType === "COD" ||
+            payment?.status === PaymentStatus.PENDING_COD
+          )
+            return sum;
+          return sum + this.n(payment?.amount);
+        }, 0)
+      : 0;
+
+    if (String(order?.paymentStatus || "").toUpperCase() === "PAID") return 0;
+    return Math.max(0, Math.round(this.n(order?.finalAmount) - paidAmount));
+  }
+
+  private buildShipmentItemsFromOrder(
+    order: any,
+    dims: { weight: number; length: number; width: number; height: number },
+  ) {
+    const items = Array.isArray(order?.items) ? order.items : [];
+    const itemWeight = Math.max(
+      1,
+      Math.floor(Number(dims.weight || 1) / Math.max(items.length, 1)),
+    );
+
+    return items.map((item: any) => ({
+      name: item.productName || item.sku || "Sản phẩm",
+      quantity: Number(item.qty || 1),
+      num: Number(item.qty || 1),
+      price: this.n(item.unitPrice),
+      length: dims.length,
+      width: dims.width,
+      height: dims.height,
+      weight: itemWeight,
+      category: "Hàng hóa",
+    }));
+  }
+
+  private getSelectedCarrierService(body: any, selectedQuote: any = {}) {
+    return {
+      selectedServiceId:
+        Number(body?.selectedServiceId || selectedQuote?.serviceId || 0) ||
+        undefined,
+      selectedServiceTypeId:
+        Number(
+          body?.selectedServiceTypeId || selectedQuote?.serviceTypeId || 0,
+        ) || undefined,
+      serviceCode: String(
+        body?.serviceCode ||
+          body?.viettelServiceCode ||
+          selectedQuote?._viettelServiceCode ||
+          selectedQuote?.serviceCode ||
+          selectedQuote?.orderService ||
+          "",
+      ).trim(),
+      ahamoveServiceId: String(
+        body?.ahamoveServiceId ||
+          selectedQuote?._ahamoveServiceId ||
+          selectedQuote?.service_id ||
+          selectedQuote?.serviceId ||
+          "",
+      ).trim(),
+      viettelReceiverProvinceId:
+        Number(
+          selectedQuote?._viettelReceiverProvinceId ||
+            body?.viettelReceiverProvinceId ||
+            0,
+        ) || undefined,
+      viettelReceiverDistrictId:
+        Number(
+          selectedQuote?._viettelReceiverDistrictId ||
+            body?.viettelReceiverDistrictId ||
+            0,
+        ) || undefined,
+      viettelReceiverWardId:
+        Number(
+          selectedQuote?._viettelReceiverWardId ||
+            body?.viettelReceiverWardId ||
+            0,
+        ) || undefined,
+      viettelSenderGroupAddressId:
+        Number(
+          selectedQuote?._viettelSenderGroupAddressId ||
+            body?.viettelSenderGroupAddressId ||
+            0,
+        ) || undefined,
+    };
+  }
+
+  private async createShipmentForExchangeOrder(input: {
+    exchangeOrder: any;
+    shippingPartner: string;
+    shippingFee: number;
+    body: any;
+    selectedQuote?: any;
+    shippingNote?: string;
+    user?: any;
+  }) {
+    const order = input.exchangeOrder;
+    const selectedQuote = input.selectedQuote || {};
+    const partner = this.normalizeShippingPartner(
+      input.shippingPartner ||
+        selectedQuote?._carrier ||
+        selectedQuote?.carrier ||
+        "GHN",
+    );
+    const dims = this.getExchangeShipmentDims(input.body, selectedQuote);
+    const items = this.buildShipmentItemsFromOrder(order, dims);
+    const service = this.getSelectedCarrierService(input.body, selectedQuote);
+    const codAmount = this.calculateOrderRemainingCod(order);
+    const toAddress =
+      this.buildOrderFullAddress(order) || order?.shippingAddressLine1 || "";
+    const note =
+      input.shippingNote ||
+      this.parseStructuredNoteValue(
+        String(order?.note || ""),
+        "Ghi chú giao hàng:",
+      ) ||
+      "Đơn đổi/trả";
+
+    if (partner === "AHAMOVE") {
+      return this.shipmentService.createAhamoveShipment(order.id, {
+        toName:
+          order.shippingRecipientName || order.customerName || "Khách hàng",
+        toPhone: order.shippingPhone || order.customerPhone || "",
+        toAddress,
+        codAmount,
+        serviceId: service.ahamoveServiceId || undefined,
+        note,
+        items: items.map((item: any, index: number) => ({
+          _id: String(item?.name || index + 1),
+          name: item.name,
+          num: item.quantity,
+          quantity: item.quantity,
+          price: item.price,
+          weight: item.weight,
+        })),
+      });
+    }
+
+    if (partner === "VIETTELPOST") {
+      return this.shipmentService.createViettelPostShipment(order.id, {
+        toName:
+          order.shippingRecipientName || order.customerName || "Khách hàng",
+        toPhone: order.shippingPhone || order.customerPhone || "",
+        toAddress: order.shippingAddressLine1 || toAddress,
+        toProvince: order.shippingProvince || "",
+        toDistrict: order.shippingDistrict || "",
+        toWard: order.shippingWard || "",
+        province: order.shippingProvince || "",
+        district: order.shippingDistrict || "",
+        ward: order.shippingWard || "",
+        receiverProvinceId: service.viettelReceiverProvinceId,
+        receiverDistrictId: service.viettelReceiverDistrictId,
+        receiverWardId: service.viettelReceiverWardId,
+        senderGroupAddressId: service.viettelSenderGroupAddressId,
+        codAmount,
+        insuranceValue: this.n(order.finalAmount),
+        productPrice: this.n(order.finalAmount),
+        serviceCode: service.serviceCode || "VCN",
+        clientOrderCode: order.orderCode,
+        orderCode: order.orderCode,
+        content: `Đơn đổi/trả ${order.orderCode}`,
+        note,
+        weight: dims.weight,
+        length: dims.length,
+        width: dims.width,
+        height: dims.height,
+        items: items.map((item: any) => ({
+          name: item.name,
+          quantity: item.quantity,
+          price: item.price,
+          weight: item.weight,
+        })),
+      });
+    }
+
+    const toDistrictId = Number(
+      order.shippingGhnDistrictId ||
+        input.body?.ghnDistrictId ||
+        input.body?.shippingGhnDistrictId ||
+        0,
+    );
+    const toWardCode = String(
+      order.shippingGhnWardCode ||
+        input.body?.ghnWardCode ||
+        input.body?.shippingGhnWardCode ||
+        "",
+    );
+    if (!toDistrictId || !toWardCode) {
+      throw new BadRequestException(
+        "Đơn đổi chưa có mã GHN quận/huyện hoặc phường/xã.",
+      );
+    }
+
+    return this.shipmentService.createGhnShipment(order.id, {
+      toName: order.shippingRecipientName || order.customerName || "Khách hàng",
+      toPhone: order.shippingPhone || order.customerPhone || "",
+      toAddress,
+      toDistrictId,
+      toWardCode,
+      codAmount,
+      clientOrderCode: order.orderCode,
+      note,
+      content: `Đơn đổi/trả ${order.orderCode}`,
+      requiredNote: this.normalizeGhnRequiredNote(note),
+      weight: dims.weight,
+      length: dims.length,
+      width: dims.width,
+      height: dims.height,
+      insuranceValue: this.n(order.finalAmount),
+      items: items.map((item: any) => ({
+        name: item.name,
+        quantity: item.quantity,
+        price: item.price,
+        length: item.length,
+        width: item.width,
+        height: item.height,
+        weight: item.weight,
+        category: "Hàng hóa",
+      })),
+    });
+  }
+
+  async createReturnAndShipExchange(body: any, user?: any) {
+    const items = Array.isArray(body?.items) ? body.items : [];
+    const exchangeItems = items.filter(
+      (item: any) => String(item?.itemType || "").toUpperCase() === "EXCHANGE",
+    );
+
+    if (!exchangeItems.length) {
+      throw new BadRequestException("Chưa có sản phẩm đổi để gửi vận chuyển.");
+    }
+
+    const originalOrderId = String(body?.originalOrderId || "").trim();
+    if (!originalOrderId) {
+      throw new BadRequestException("Thiếu originalOrderId.");
+    }
+
+    const originalOrder = await this.prisma.order.findUnique({
+      where: { id: originalOrderId },
+      include: { items: true, payments: true },
+    });
+
+    if (!originalOrder) {
+      throw new BadRequestException("Không tìm thấy đơn hàng gốc.");
+    }
+
+    const selectedQuote =
+      body?.selectedShippingQuote || body?.shippingQuote || {};
+    const shippingPartner = this.normalizeShippingPartner(
+      body?.shippingPartner ||
+        body?.carrier ||
+        selectedQuote?._carrier ||
+        selectedQuote?.carrier ||
+        "GHN",
+    );
+
+    const shippingFee = Math.max(
+      0,
+      this.n(
+        body?.shippingFee ??
+          body?.shipFee ??
+          this.quoteFee(selectedQuote) ??
+          30000,
+      ),
+    );
+
+    const record = await this.createReturn(
+      {
+        ...body,
+        status: body?.status || "COMPLETED",
+        shippingFee,
+        shippingPartner,
+        deferExtraChargeToShipment: true,
+      },
+      user,
+    );
+
+    const freshRecord = await this.prisma.returnExchange.findUnique({
+      where: { id: record.id },
+      include: { items: true, cashVouchers: true },
+    });
+
+    if (!freshRecord) {
+      throw new BadRequestException("Không tìm thấy phiếu đổi/trả vừa tạo.");
+    }
+
+    const exchangeAmount = this.n(freshRecord.exchangeAmount);
+    const returnAmount = this.n(freshRecord.returnAmount);
+    const customerPayableAmount = Math.max(
+      0,
+      exchangeAmount + shippingFee - returnAmount,
+    );
+
+    const originalAddress = this.buildFullAddress(originalOrder);
+    const originalNote = String(originalOrder.note || "");
+    const originalShippingMode =
+      this.parseStructuredNoteValue(originalNote, "Cách giao:") || "Giao hàng";
+    const originalShippingPartner =
+      shippingPartner ||
+      this.parseStructuredNoteValue(originalNote, "Đơn vị giao:") ||
+      "GHN";
+    const originalShippingNote =
+      this.parseStructuredNoteValue(originalNote, "Ghi chú giao hàng:") ||
+      "Cho xem hàng, không cho thử";
+    const exchangeOrderNote = [
+      `Ghi chú: Đơn đổi/trả từ phiếu ${freshRecord.code}`,
+      originalAddress ? `Địa chỉ: ${originalAddress}` : "",
+      `Cách giao: ${originalShippingMode}`,
+      `Đơn vị giao: ${originalShippingPartner}`,
+      `Ghi chú giao hàng: ${originalShippingNote}`,
+      `Phí ship: ${shippingFee.toLocaleString("vi-VN")}đ`,
+      `Còn phải trả: ${customerPayableAmount.toLocaleString("vi-VN")}đ`,
+      `Đơn gốc: ${originalOrder.orderCode}`,
+      body?.note ? `Ghi chú nội bộ: ${body.note}` : "",
+    ]
+      .filter(Boolean)
+      .join(" | ");
+
+    let exchangeOrder = await this.orderService.createOrder(
+      {
+        mode: "approve",
+        salesChannel: originalOrder.salesChannel || "OTHER",
+        customerId: originalOrder.customerId || undefined,
+        customerName:
+          originalOrder.customerName ||
+          originalOrder.shippingRecipientName ||
+          "Khách hàng",
+        customerPhone:
+          originalOrder.customerPhone || originalOrder.shippingPhone || "",
+        branchId:
+          body.exchangeIssueBranchId ||
+          body.handledAtBranchId ||
+          originalOrder.branchId,
+        discountAmount: returnAmount,
+        shippingFee,
+        note: exchangeOrderNote,
+        shippingSnapshot: this.buildShippingSnapshotFromOriginalOrder(
+          originalOrder,
+          shippingFee,
+          shippingPartner,
+          body,
+        ),
+        items: exchangeItems.map((item: any) => ({
+          variantId: String(item.variantId || item.id || ""),
+          quantity: this.n(item.qty),
+        })),
+      },
+      this.buildExchangeOrderUser(user),
+    );
+
+    const exchangeOrderId = String((exchangeOrder as any)?.id || "");
+    if (!exchangeOrderId) {
+      throw new BadRequestException("Không tạo được đơn đổi mới.");
+    }
+
+    // Khóa số tiền của đơn đổi mới theo đúng công thức đổi/trả, tránh promotion hoặc giá DB làm lệch COD.
+    const lockedExchangeOrder = await this.prisma.order.update({
+      where: { id: exchangeOrderId },
+      data: {
+        totalAmount: new Prisma.Decimal(exchangeAmount),
+        discountAmount: new Prisma.Decimal(returnAmount),
+        shippingFee: new Prisma.Decimal(shippingFee),
+        finalAmount: new Prisma.Decimal(customerPayableAmount),
+        paymentStatus:
+          customerPayableAmount > 0
+            ? PaymentStatus.PENDING_COD
+            : PaymentStatus.PAID,
+        shippingRecipientName:
+          originalOrder.shippingRecipientName ||
+          originalOrder.customerName ||
+          null,
+        shippingPhone:
+          originalOrder.shippingPhone || originalOrder.customerPhone || null,
+        shippingAddressLine1: originalOrder.shippingAddressLine1 || null,
+        shippingAddressLine2: originalOrder.shippingAddressLine2 || null,
+        shippingWard: originalOrder.shippingWard || null,
+        shippingDistrict: originalOrder.shippingDistrict || null,
+        shippingCity: originalOrder.shippingCity || null,
+        shippingProvince: originalOrder.shippingProvince || null,
+        shippingCountry: originalOrder.shippingCountry || "VN",
+        shippingPostalCode: originalOrder.shippingPostalCode || null,
+        shippingGhnDistrictId: originalOrder.shippingGhnDistrictId || null,
+        shippingGhnWardCode: originalOrder.shippingGhnWardCode || null,
+        note: [
+          (exchangeOrder as any)?.note,
+          `Bù trừ đổi/trả: hàng đổi ${exchangeAmount.toLocaleString("vi-VN")}đ - hàng trả ${returnAmount.toLocaleString("vi-VN")}đ + ship ${shippingFee.toLocaleString("vi-VN")}đ = COD ${customerPayableAmount.toLocaleString("vi-VN")}đ`,
+        ]
+          .filter(Boolean)
+          .join(" | "),
+      },
+      include: { items: true, shipment: true, payments: true },
+    });
+
+    exchangeOrder = lockedExchangeOrder;
+
+    let shipmentResult: any = null;
+    try {
+      shipmentResult = await this.createShipmentForExchangeOrder({
+        exchangeOrder,
+        shippingPartner,
+        shippingFee,
+        body,
+        selectedQuote,
+        shippingNote: originalShippingNote,
+        user,
+      });
+    } catch (error) {
+      await this.prisma.returnExchange.update({
+        where: { id: freshRecord.id },
+        data: {
+          exchangeOrderId,
+          exchangeOrderCode: (exchangeOrder as any)?.orderCode || null,
+          exchangeCarrier: shippingPartner || "GHN",
+          note: [
+            freshRecord.note,
+            `Đã tạo đơn đổi ${(exchangeOrder as any)?.orderCode || exchangeOrderId} nhưng chưa gửi được HVC: ${error instanceof Error ? error.message : String(error)}`,
+          ]
+            .filter(Boolean)
+            .join(" | "),
+        },
+      });
+      throw error;
+    }
+
+    const shipment = shipmentResult?.shipment || null;
+
+    const updated = await this.prisma.returnExchange.update({
+      where: { id: freshRecord.id },
+      data: {
+        shippingFee: new Prisma.Decimal(shippingFee),
+        customerPayableAmount: new Prisma.Decimal(customerPayableAmount),
+        exchangeOrderId,
+        exchangeOrderCode: (exchangeOrder as any)?.orderCode || null,
+        exchangeShipmentId: shipment?.id || null,
+        exchangeTrackingCode:
+          shipment?.trackingCode || shipmentResult?.ghn?.order_code || null,
+        exchangeCarrier: shipment?.carrier || shippingPartner || "GHN",
+      },
+      include: {
+        items: true,
+        cashVouchers: true,
+      },
+    });
+
+    return {
+      ...this.map(updated),
+      exchangeOrder,
+      shipment: shipmentResult,
+    };
   }
 
   async getReturns(params: any, user?: any) {
@@ -547,7 +1287,6 @@ export class ReturnsService {
       data: rows.map((row) => this.map(row)),
     };
   }
-
 
   async getReturnsByOrder(orderIdOrCode: string, user?: any) {
     const key = String(orderIdOrCode || "").trim();
@@ -602,9 +1341,12 @@ export class ReturnsService {
     return {
       data: rows.map((row) => ({
         ...this.map(row),
-        originalOrderCode: (row as any).originalOrder?.orderCode || order?.orderCode || null,
-        originalOrderCustomerName: (row as any).originalOrder?.customerName || null,
-        originalOrderCustomerPhone: (row as any).originalOrder?.customerPhone || null,
+        originalOrderCode:
+          (row as any).originalOrder?.orderCode || order?.orderCode || null,
+        originalOrderCustomerName:
+          (row as any).originalOrder?.customerName || null,
+        originalOrderCustomerPhone:
+          (row as any).originalOrder?.customerPhone || null,
       })),
     };
   }
@@ -699,20 +1441,20 @@ export class ReturnsService {
       ...mapped,
       originalOrder: order
         ? {
-          ...order,
-          finalAmount: this.n(order.finalAmount),
-          soldAt: order.soldAt
-            ? new Date(order.soldAt).toLocaleString("vi-VN")
-            : null,
-          createdAt: order.createdAt
-            ? new Date(order.createdAt).toLocaleString("vi-VN")
-            : null,
-          payments: (order.payments || []).map((payment: any) => ({
-            ...payment,
-            amount: this.n(payment.amount),
-            sourceName: payment.paymentSource?.name || payment.method || null,
-          })),
-        }
+            ...order,
+            finalAmount: this.n(order.finalAmount),
+            soldAt: order.soldAt
+              ? new Date(order.soldAt).toLocaleString("vi-VN")
+              : null,
+            createdAt: order.createdAt
+              ? new Date(order.createdAt).toLocaleString("vi-VN")
+              : null,
+            payments: (order.payments || []).map((payment: any) => ({
+              ...payment,
+              amount: this.n(payment.amount),
+              sourceName: payment.paymentSource?.name || payment.method || null,
+            })),
+          }
         : null,
     };
   }
@@ -724,13 +1466,30 @@ export class ReturnsService {
       customerName: order.customerName,
       customerPhone: order.customerPhone,
 
+      note: order.note || null,
+      shippingRecipientName:
+        order.shippingRecipientName || order.customerName || null,
+      shippingPhone: order.shippingPhone || order.customerPhone || null,
+      shippingEmail: order.shippingEmail || null,
+      shippingAddressLine1: order.shippingAddressLine1 || null,
+      shippingAddressLine2: order.shippingAddressLine2 || null,
+      shippingWard: order.shippingWard || null,
+      shippingDistrict: order.shippingDistrict || null,
+      shippingCity: order.shippingCity || null,
+      shippingProvince: order.shippingProvince || null,
+      shippingPostalCode: order.shippingPostalCode || null,
+      shippingGhnDistrictId: order.shippingGhnDistrictId || null,
+      shippingGhnWardCode: order.shippingGhnWardCode || null,
+
       branchId: order.branchId,
       createdByStaffId: order.createdByStaffId,
       createdByStaffName: order.createdByStaffName,
       salesChannel: order.salesChannel,
       status: order.status,
       soldAt: order.soldAt ? new Date(order.soldAt).toISOString() : null,
-      createdAt: order.createdAt ? new Date(order.createdAt).toISOString() : null,
+      createdAt: order.createdAt
+        ? new Date(order.createdAt).toISOString()
+        : null,
 
       totalAmount: this.n(order.totalAmount),
       finalAmount: this.n(order.finalAmount),
@@ -777,10 +1536,7 @@ export class ReturnsService {
 
     const order = await this.prisma.order.findFirst({
       where: {
-        OR: [
-          { id },
-          { orderCode: id },
-        ],
+        OR: [{ id }, { orderCode: id }],
       },
       include: {
         items: true,

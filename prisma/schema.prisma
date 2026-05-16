@@ -1392,6 +1392,13 @@ model ReturnExchange {
   updatedAt                  DateTime             @updatedAt
   items                      ReturnExchangeItem[]
   cashVouchers               CashVoucher[]
+  shippingFee                Decimal              @default(0) @db.Decimal(14, 2)
+  customerPayableAmount      Decimal              @default(0) @db.Decimal(14, 2)
+  exchangeOrderId            String?
+  exchangeOrderCode          String?
+  exchangeShipmentId         String?
+  exchangeTrackingCode       String?
+  exchangeCarrier            String?
 
   @@index([originalOrderId])
   @@index([originalBranchId])
@@ -1399,6 +1406,8 @@ model ReturnExchange {
   @@index([returnReceiveBranchId])
   @@index([status])
   @@index([createdAt])
+  @@index([exchangeOrderId])
+  @@index([exchangeTrackingCode])
 }
 
 model ReturnExchangeItem {
