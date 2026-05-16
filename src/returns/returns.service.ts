@@ -15,11 +15,12 @@ export class ReturnsService {
   }
 
   private isOwner(user?: any) {
-    return user?.role === "owner" || user?.role === "admin";
+    const role = String(user?.role || "").trim().toUpperCase();
+    return role === "OWNER" || role === "ADMIN";
   }
 
   private userBranch(user?: any) {
-    return user?.branchId || null;
+    return user?.branchId || user?.workingBranchId || user?.currentBranchId || null;
   }
 
   private ensureBranch(user: any, branchId?: string | null) {
@@ -623,6 +624,85 @@ export class ReturnsService {
     };
   }
 
+  private mapOrderForReturn(order: any) {
+    return {
+      id: order.id,
+      orderCode: order.orderCode,
+      customerName: order.customerName,
+      customerPhone: order.customerPhone,
+
+      branchId: order.branchId,
+      createdByStaffId: order.createdByStaffId,
+      createdByStaffName: order.createdByStaffName,
+      salesChannel: order.salesChannel,
+      status: order.status,
+      soldAt: order.soldAt ? new Date(order.soldAt).toISOString() : null,
+      createdAt: order.createdAt ? new Date(order.createdAt).toISOString() : null,
+
+      totalAmount: this.n(order.totalAmount),
+      finalAmount: this.n(order.finalAmount),
+      paymentStatus: order.paymentStatus,
+      fulfillmentStatus: order.fulfillmentStatus,
+      isReturnable: this.isReturnableOrder(order),
+
+      items: (order.items || []).map((item: any) => ({
+        id: item.id,
+        variantId: item.variantId,
+        sku: item.sku,
+        productName: item.productName,
+        color: item.color,
+        size: item.size,
+        qty: this.n(item.qty),
+        unitPrice: this.n(item.unitPrice),
+        lineTotal: this.n(item.lineTotal),
+      })),
+
+      payments: (order.payments || []).map((payment: any) => ({
+        id: payment.id,
+        amount: this.n(payment.amount),
+        method: payment.method,
+        sourceName: payment.paymentSource?.name || payment.method,
+        paymentSourceId: payment.paymentSourceId,
+        paymentSource: payment.paymentSource
+          ? {
+              id: payment.paymentSource.id,
+              name: payment.paymentSource.name,
+              code: payment.paymentSource.code,
+              type: payment.paymentSource.type,
+            }
+          : null,
+      })),
+    };
+  }
+
+  async getSourceOrderForReturn(orderId: string, user?: any) {
+    const id = String(orderId || "").trim();
+
+    if (!id) {
+      throw new BadRequestException("Thiếu orderId.");
+    }
+
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+      include: {
+        items: true,
+        payments: {
+          include: {
+            paymentSource: true,
+          },
+        },
+      },
+    });
+
+    if (!order) {
+      throw new BadRequestException("Không tìm thấy đơn hàng gốc.");
+    }
+
+    this.ensureBranch(user, order.branchId);
+
+    return this.mapOrderForReturn(order);
+  }
+
   async searchOrdersForReturn(q: string, user?: any) {
     const keyword = String(q || "").trim();
 
@@ -630,8 +710,8 @@ export class ReturnsService {
       return [];
     }
 
-    const rows = await this.prisma.order.findMany({
-      where: {
+    const filters: any[] = [
+      {
         OR: [
           { orderCode: { contains: keyword, mode: "insensitive" } },
           { customerName: { contains: keyword, mode: "insensitive" } },
@@ -645,6 +725,14 @@ export class ReturnsService {
           },
         ],
       },
+    ];
+
+    if (!this.isOwner(user)) {
+      filters.push({ branchId: this.userBranch(user) || "__NO_BRANCH__" });
+    }
+
+    const rows = await this.prisma.order.findMany({
+      where: { AND: filters },
       orderBy: { createdAt: "desc" },
       take: 20,
       include: {
@@ -657,43 +745,6 @@ export class ReturnsService {
       },
     });
 
-    return rows.map((order: any) => ({
-      id: order.id,
-      orderCode: order.orderCode,
-      customerName: order.customerName,
-      customerPhone: order.customerPhone,
-
-      branchId: order.branchId,
-      createdByStaffId: order.createdByStaffId,
-      createdByStaffName: order.createdByStaffName,
-      soldAt: order.soldAt
-        ? new Date(order.soldAt).toLocaleString("vi-VN")
-        : null,
-
-      finalAmount: this.n(order.finalAmount),
-      paymentStatus: order.paymentStatus,
-      fulfillmentStatus: order.fulfillmentStatus,
-      isReturnable: this.isReturnableOrder(order),
-
-      items: order.items.map((item: any) => ({
-        id: item.id,
-        variantId: item.variantId,
-        sku: item.sku,
-        productName: item.productName,
-        color: item.color,
-        size: item.size,
-        qty: item.qty,
-        unitPrice: this.n(item.unitPrice),
-        lineTotal: this.n(item.lineTotal),
-      })),
-
-      payments: order.payments.map((payment: any) => ({
-        id: payment.id,
-        amount: this.n(payment.amount),
-        method: payment.method,
-        sourceName: payment.paymentSource?.name || payment.method,
-        paymentSourceId: payment.paymentSourceId,
-      })),
-    }));
+    return rows.map((order: any) => this.mapOrderForReturn(order));
   }
 }

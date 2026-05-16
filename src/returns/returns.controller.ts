@@ -53,6 +53,15 @@ export class ReturnsController {
     return this.returnsService.searchOrdersForReturn(q, req.user);
   }
 
+  @Get("source-order/:orderId")
+  @RequirePermissions("returns.create")
+  getSourceOrderForReturn(
+    @Param("orderId") orderId: string,
+    @Req() req: Request & { user?: any },
+  ) {
+    return this.returnsService.getSourceOrderForReturn(orderId, req.user);
+  }
+
   @Get(":id")
   @RequirePermissions("returns.view")
   getReturnDetail(
