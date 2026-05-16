@@ -157,10 +157,14 @@ export class FinanceService {
     );
 
     const where: Prisma.PaymentWhereInput = {
-      createdAt: {
-        gte: from,
-        lte: to,
-      },
+      AND: [
+        {
+          OR: [
+            { paidAt: { gte: from, lte: to } },
+            { paidAt: null, createdAt: { gte: from, lte: to } },
+          ],
+        },
+      ],
     };
 
     if (params.paymentSourceId && params.paymentSourceId !== "ALL") {
@@ -1117,7 +1121,7 @@ export class FinanceService {
       toBuffer.setDate(toBuffer.getDate() + 1);
 
       virtualPosValues.push(fromBuffer, toBuffer);
-      virtualPosWhere.push(`p."createdAt" BETWEEN $1 AND $2`);
+      virtualPosWhere.push(`COALESCE(p."paidAt", p."createdAt") BETWEEN $1 AND $2`);
     }
 
     if (params.type && params.type !== "ALL" && params.type !== "RECEIPT") {
@@ -1581,7 +1585,7 @@ export class FinanceService {
     let cursor = dateFrom;
     let guard = 0;
 
-    while (cursor <= dateTo && guard < 370) {
+    while (cursor <= dateTo && guard < 5000) {
       result.push(cursor);
       cursor = this.addDays(cursor, 1);
       guard += 1;
@@ -1652,19 +1656,34 @@ export class FinanceService {
     await this.ensureDailyCashBalanceTable();
     await this.ensureCashVoucherTable();
 
-    const { from, to, dateFrom, dateTo } = this.makeDateRange(params.dateFrom, params.dateTo);
+    const { dateFrom, dateTo } = this.makeDateRange(params.dateFrom, params.dateTo);
     const scopedBranchId = this.scopedBranchId(user, params.branchId);
     const paymentSourceFilter = params.paymentSourceId && params.paymentSourceId !== "ALL"
       ? params.paymentSourceId
       : null;
 
     const days = this.daysBetween(dateFrom, dateTo);
+    const requestedDateSet = new Set(days);
 
-    const branchRows = await this.prisma.branch.findMany({
-      where: scopedBranchId ? { id: scopedBranchId } : {},
+    // Core tự tính lại sổ quỹ từ mốc an toàn. UI không được tự cộng số dư.
+    // Số dư đầu ngày N luôn bằng số dư cuối ngày N-1 theo đúng cặp branchId + paymentSourceId.
+    const calcDateFrom = "2020-01-01";
+    const calcRange = this.makeDateRange(calcDateFrom, dateTo);
+    const calcFrom = calcRange.from;
+    const calcTo = calcRange.to;
+    const calcDays = this.daysBetween(calcDateFrom, dateTo);
+
+    // Lấy toàn bộ chi nhánh để suy luận nguồn tiền theo hậu tố TH/QO/CL/XD.
+    // Nếu chỉ lấy chi nhánh đang filter thì nguồn global dạng "CHUYỂN KHOẢN - TH"
+    // có thể không suy luận được và lại sinh dòng sai chi nhánh.
+    const allBranchRows = await this.prisma.branch.findMany({
       select: { id: true, name: true },
       orderBy: { name: "asc" },
     });
+
+    const branchRows = scopedBranchId
+      ? allBranchRows.filter((branch) => String(branch.id) === String(scopedBranchId))
+      : allBranchRows;
 
     const sourceRows = await this.prisma.paymentSource.findMany({
       where: {
@@ -1679,49 +1698,79 @@ export class FinanceService {
       String(value || "")
         .normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "")
-        .toLowerCase();
+        .toLowerCase()
+        .replace(/[_]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const sourceTextHasAlias = (text: string, alias: string) => {
+      const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`(^|[\\s\\-_/])${escaped}($|[\\s\\-_/])`, "i").test(text);
+    };
 
     const inferSourceBranch = (source: any) => {
       if (source?.branchId) return String(source.branchId);
+
       const text = normalizeSourceText([source?.name, source?.code].filter(Boolean).join(" "));
-      const candidates = branchRows.map((branch) => {
+      if (!text) return null;
+
+      const aliasByBranch = allBranchRows.map((branch) => {
         const name = normalizeSourceText(branch.name);
-        let aliases: string[] = [name];
-        if (name.includes("thai ha") || /(^|\W)th($|\W)/.test(text)) aliases.push("th", "thai ha");
-        if (name.includes("quoc oai") || /(^|\W)qo($|\W)/.test(text)) aliases.push("qo", "quoc oai");
-        if (name.includes("chua lang") || /(^|\W)cl($|\W)/.test(text)) aliases.push("cl", "chua lang");
-        if (name.includes("xa dan") || /(^|\W)xd($|\W)/.test(text)) aliases.push("xd", "xa dan");
-        aliases = Array.from(new Set(aliases.filter(Boolean)));
-        return { branch, aliases };
+        const aliases = new Set<string>([name]);
+        if (name.includes("thai ha")) aliases.add("th");
+        if (name.includes("quoc oai")) aliases.add("qo");
+        if (name.includes("chua lang")) aliases.add("cl");
+        if (name.includes("xa dan")) aliases.add("xd");
+        return { branch, aliases: Array.from(aliases).filter(Boolean) };
       });
 
-      for (const { branch, aliases } of candidates) {
-        if (
-          aliases.some((alias) =>
-            text === alias ||
-            text.endsWith(` ${alias}`) ||
-            text.endsWith(`-${alias}`) ||
-            text.includes(` ${alias} `) ||
-            text.includes(`-${alias} `) ||
-            text.includes(` ${alias}-`),
-          )
-        ) {
+      for (const { branch, aliases } of aliasByBranch) {
+        if (aliases.some((alias) => text === alias || sourceTextHasAlias(text, alias))) {
           return String(branch.id);
         }
       }
+
       return null;
     };
 
-    const seededSourceRows = sourceRows
-      .map((source: any) => ({ ...source, inferredBranchId: inferSourceBranch(source) }))
-      .filter((source: any) => {
-        if (source.branchId) return true;
-        if (source.inferredBranchId) return true;
-        // Nguồn tiền global không xác định chi nhánh sẽ chỉ xuất hiện khi thật sự có giao dịch/snapshot.
-        return Boolean(paymentSourceFilter);
-      });
+    const branchMap = new Map(allBranchRows.map((branch) => [String(branch.id), branch.name]));
+    const sourceMap = new Map<string, any>();
+    const sourceBranchMap = new Map<string, string | null>();
 
-    const paymentValues: any[] = [from, to];
+    for (const source of sourceRows) {
+      const inferredBranchId = inferSourceBranch(source);
+      const enriched = { ...source, inferredBranchId };
+      sourceMap.set(String(source.id), enriched);
+      sourceBranchMap.set(String(source.id), inferredBranchId);
+    }
+
+    const resolveEffectiveBranchId = (paymentSourceId: string, fallbackBranchId: string | null | undefined) => {
+      const sourceBranchId = sourceBranchMap.get(String(paymentSourceId)) || null;
+      return sourceBranchId || (fallbackBranchId ? String(fallbackBranchId) : null);
+    };
+
+    const isAllowedEffectiveBranch = (branchId: string | null | undefined) => {
+      if (!branchId) return false;
+      if (scopedBranchId && String(branchId) !== String(scopedBranchId)) return false;
+      return branchMap.has(String(branchId));
+    };
+
+    const shouldKeepSnapshotPair = (branchId: string, paymentSourceId: string) => {
+      const sourceBranchId = sourceBranchMap.get(String(paymentSourceId)) || null;
+      if (sourceBranchId && String(sourceBranchId) !== String(branchId)) {
+        // Bỏ snapshot cũ bị trộn chi nhánh, ví dụ QO + nguồn "CHUYỂN KHOẢN - TH".
+        return false;
+      }
+      return isAllowedEffectiveBranch(branchId);
+    };
+
+    const seededSourceRows = Array.from(sourceMap.values()).filter((source: any) => {
+      const targetBranchId = resolveEffectiveBranchId(String(source.id), source.branchId);
+      if (!targetBranchId) return Boolean(paymentSourceFilter);
+      return isAllowedEffectiveBranch(targetBranchId);
+    });
+
+    const paymentValues: any[] = [calcFrom, calcTo];
     const paymentWhere = [
       `COALESCE(p."paidAt", p."createdAt") BETWEEN $1 AND $2`,
       `p."paymentSourceId" IS NOT NULL`,
@@ -1732,7 +1781,7 @@ export class FinanceService {
 
     if (scopedBranchId) {
       paymentValues.push(scopedBranchId);
-      paymentWhere.push(`o."branchId" = $${paymentValues.length}`);
+      paymentWhere.push(`(o."branchId" = $${paymentValues.length} OR ps."branchId" = $${paymentValues.length})`);
     }
 
     if (paymentSourceFilter) {
@@ -1740,7 +1789,7 @@ export class FinanceService {
       paymentWhere.push(`p."paymentSourceId" = $${paymentValues.length}`);
     }
 
-    const paymentGroups = await this.prisma.$queryRawUnsafe<any[]>(
+    const paymentGroupsRaw = await this.prisma.$queryRawUnsafe<any[]>(
       `
         SELECT
           TO_CHAR((COALESCE(p."paidAt", p."createdAt") AT TIME ZONE 'Asia/Ho_Chi_Minh')::date, 'YYYY-MM-DD') AS "date",
@@ -1763,7 +1812,7 @@ export class FinanceService {
       ...paymentValues,
     );
 
-    const voucherValues: any[] = [from, to];
+    const voucherValues: any[] = [calcFrom, calcTo];
     const voucherWhere = [
       `COALESCE(v."confirmedAt", v."createdAt") BETWEEN $1 AND $2`,
       `COALESCE(v."status", 'DRAFT') = 'CONFIRMED'`,
@@ -1773,7 +1822,7 @@ export class FinanceService {
 
     if (scopedBranchId) {
       voucherValues.push(scopedBranchId);
-      voucherWhere.push(`v."branchId" = $${voucherValues.length}`);
+      voucherWhere.push(`(v."branchId" = $${voucherValues.length} OR ps."branchId" = $${voucherValues.length})`);
     }
 
     if (paymentSourceFilter) {
@@ -1781,7 +1830,7 @@ export class FinanceService {
       voucherWhere.push(`v."paymentSourceId" = $${voucherValues.length}`);
     }
 
-    const voucherGroups = await this.prisma.$queryRawUnsafe<any[]>(
+    const voucherGroupsRaw = await this.prisma.$queryRawUnsafe<any[]>(
       `
         SELECT
           TO_CHAR((COALESCE(v."confirmedAt", v."createdAt") AT TIME ZONE 'Asia/Ho_Chi_Minh')::date, 'YYYY-MM-DD') AS "date",
@@ -1816,7 +1865,7 @@ export class FinanceService {
       ...voucherValues,
     );
 
-    const snapshotValues: any[] = [dateFrom, dateTo];
+    const snapshotValues: any[] = [calcDateFrom, dateTo];
     const snapshotWhere = [`d."date" BETWEEN $1::date AND $2::date`];
     if (scopedBranchId) {
       snapshotValues.push(scopedBranchId);
@@ -1827,7 +1876,7 @@ export class FinanceService {
       snapshotWhere.push(`d."paymentSourceId" = $${snapshotValues.length}`);
     }
 
-    const snapshots = await this.prisma.$queryRawUnsafe<any[]>(
+    const snapshotsRaw = await this.prisma.$queryRawUnsafe<any[]>(
       `
         SELECT DISTINCT ON (d."date", d."branchId", d."paymentSourceId")
           d."id",
@@ -1862,44 +1911,47 @@ export class FinanceService {
       ...snapshotValues,
     );
 
-    const previousValues: any[] = [dateFrom];
-    const previousWhere = [`d."date" < $1::date`];
-    if (scopedBranchId) {
-      previousValues.push(scopedBranchId);
-      previousWhere.push(`d."branchId" = $${previousValues.length}`);
-    }
-    if (paymentSourceFilter) {
-      previousValues.push(paymentSourceFilter);
-      previousWhere.push(`d."paymentSourceId" = $${previousValues.length}`);
-    }
+    const paymentGroups = paymentGroupsRaw
+      .map((row: any) => {
+        const effectiveBranchId = resolveEffectiveBranchId(row.paymentSourceId, row.branchId);
+        if (!isAllowedEffectiveBranch(effectiveBranchId)) return null;
+        return {
+          ...row,
+          branchId: effectiveBranchId,
+          branchName: branchMap.get(String(effectiveBranchId)) || row.branchName || effectiveBranchId,
+        };
+      })
+      .filter(Boolean) as any[];
 
-    const previousSnapshots = await this.prisma.$queryRawUnsafe<any[]>(
-      `
-        SELECT DISTINCT ON (d."branchId", d."paymentSourceId")
-          TO_CHAR(d."date", 'YYYY-MM-DD') AS "date",
-          d."branchId",
-          d."paymentSourceId",
-          d."closingBalance"
-        FROM "DailyCashBalance" d
-        WHERE ${previousWhere.join(" AND ")}
-        ORDER BY d."branchId", d."paymentSourceId", d."date" DESC
-      `,
-      ...previousValues,
-    );
+    const voucherGroups = voucherGroupsRaw
+      .map((row: any) => {
+        const effectiveBranchId = resolveEffectiveBranchId(row.paymentSourceId, row.branchId);
+        if (!isAllowedEffectiveBranch(effectiveBranchId)) return null;
+        return {
+          ...row,
+          branchId: effectiveBranchId,
+          branchName: branchMap.get(String(effectiveBranchId)) || row.branchName || effectiveBranchId,
+        };
+      })
+      .filter(Boolean) as any[];
 
-    const branchMap = new Map(branchRows.map((branch) => [String(branch.id), branch.name]));
-    const sourceMap = new Map<string, any>(sourceRows.map((source) => [String(source.id), source]));
+    const snapshots = snapshotsRaw.filter((row: any) => shouldKeepSnapshotPair(row.branchId, row.paymentSourceId));
+
     const snapshotMap = new Map<string, any>();
     const txnMap = new Map<string, any>();
     const combos = new Map<string, any>();
 
     const addCombo = (branchId: string, paymentSourceId: string, extra: any = {}) => {
       if (!branchId || !paymentSourceId) return;
-      if (scopedBranchId && String(branchId) !== String(scopedBranchId)) return;
+      if (!isAllowedEffectiveBranch(branchId)) return;
       if (paymentSourceFilter && String(paymentSourceId) !== String(paymentSourceFilter)) return;
+
       const key = `${branchId}|${paymentSourceId}`;
+      const source = sourceMap.get(String(paymentSourceId));
+      const sourceBranchId = sourceBranchMap.get(String(paymentSourceId)) || null;
+      if (sourceBranchId && String(sourceBranchId) !== String(branchId)) return;
+
       if (!combos.has(key)) {
-        const source = sourceMap.get(String(paymentSourceId));
         combos.set(key, {
           branchId,
           branchName: extra.branchName || branchMap.get(String(branchId)) || branchId,
@@ -1912,11 +1964,10 @@ export class FinanceService {
     };
 
     for (const source of seededSourceRows) {
-      const targetBranchId = source.branchId || source.inferredBranchId;
+      const targetBranchId = resolveEffectiveBranchId(String(source.id), source.branchId);
       if (!targetBranchId) continue;
-      const targetBranch = branchRows.find((branch) => String(branch.id) === String(targetBranchId));
       addCombo(String(targetBranchId), String(source.id), {
-        branchName: targetBranch?.name,
+        branchName: branchMap.get(String(targetBranchId)),
         paymentSourceName: source.name,
         paymentSourceCode: source.code,
         paymentSourceType: source.type,
@@ -1980,14 +2031,9 @@ export class FinanceService {
     }
 
     const previousClosing = new Map<string, number>();
-    for (const snapshot of previousSnapshots) {
-      previousClosing.set(`${snapshot.branchId}|${snapshot.paymentSourceId}`, this.toNumber(snapshot.closingBalance));
-      addCombo(snapshot.branchId, snapshot.paymentSourceId, snapshot);
-    }
-
     const rows: any[] = [];
 
-    for (const date of days) {
+    for (const date of calcDays) {
       const comboList = Array.from(combos.values()).sort((a, b) =>
         String(a.branchName || "").localeCompare(String(b.branchName || ""), "vi") ||
         String(a.paymentSourceName || "").localeCompare(String(b.paymentSourceName || ""), "vi")
@@ -2000,48 +2046,41 @@ export class FinanceService {
         const snapshot = snapshotMap.get(key);
         const isLocked = String(snapshot?.status || "OPEN").toUpperCase() === "LOCKED";
 
-        // Số dư đầu luôn ưu tiên số dư cuối gần nhất phía trước để chuỗi sổ không bị stale
-        // sau khi mở/chốt lại ngày cũ. Nếu chưa có ngày trước thì mới lấy snapshot opening.
-        const previousOpening = previousClosing.has(comboKey)
+        // Số dư đầu ngày N = số dư cuối ngày N-1 theo đúng cặp branchId + paymentSourceId.
+        // Lưu ý quan trọng: KHÔNG được set previousClosing cho các ngày trống 0đ trước khi nguồn tiền có snapshot/giao dịch.
+        // Nếu set 0đ từ năm 2020 cho mọi nguồn, các snapshot opening thật ở ngày 14/15 sẽ bị bỏ qua,
+        // dẫn đến ngày sau kéo sai số dư đầu kỳ.
+        const hasPreviousClosing = previousClosing.has(comboKey);
+        const openingBalance = hasPreviousClosing
           ? this.toNumber(previousClosing.get(comboKey) || 0)
-          : null;
-        const openingBalance = previousOpening !== null
-          ? previousOpening
           : this.toNumber(snapshot?.openingBalance || 0);
 
-        const livePosReceipt = this.toNumber(txn.posReceiptAmount);
-        const liveManualReceipt = this.toNumber(txn.manualReceiptAmount);
-        const liveManualPayment = this.toNumber(txn.manualPaymentAmount);
-        const liveReceipt = livePosReceipt + liveManualReceipt;
-        const livePayment = liveManualPayment;
-
-        // Dòng đã chốt vẫn phải trả breakdown giao dịch thật để UI không bị
-        // Thu - chi có tiền nhưng POS/Phiếu thu/Phiếu chi lại trắng.
-        const hasLiveTxn = liveReceipt !== 0 || livePayment !== 0;
-        const snapshotReceipt = this.toNumber(snapshot?.totalReceipt || 0);
-        const snapshotPayment = this.toNumber(snapshot?.totalPayment || 0);
-        const snapshotNet = this.toNumber(snapshot?.netAmount || 0);
-        const useSnapshotAmounts = isLocked && !hasLiveTxn;
-
-        const posReceiptAmount = hasLiveTxn ? livePosReceipt : 0;
-        const manualReceiptAmount = hasLiveTxn ? liveManualReceipt : (useSnapshotAmounts ? snapshotReceipt : 0);
-        const manualPaymentAmount = hasLiveTxn ? liveManualPayment : (useSnapshotAmounts ? snapshotPayment : 0);
-        const totalReceipt = hasLiveTxn ? liveReceipt : (useSnapshotAmounts ? snapshotReceipt : 0);
-        const totalPayment = hasLiveTxn ? livePayment : (useSnapshotAmounts ? snapshotPayment : 0);
-        const netAmount = hasLiveTxn ? totalReceipt - totalPayment : (useSnapshotAmounts ? snapshotNet : 0);
+        const posReceiptAmount = this.toNumber(txn.posReceiptAmount);
+        const manualReceiptAmount = this.toNumber(txn.manualReceiptAmount);
+        const manualPaymentAmount = this.toNumber(txn.manualPaymentAmount);
+        const totalReceipt = posReceiptAmount + manualReceiptAmount;
+        const totalPayment = manualPaymentAmount;
+        const netAmount = totalReceipt - totalPayment;
         const closingBalance = openingBalance + netAmount;
+
         const countedAmount = snapshot?.countedAmount == null ? null : this.toNumber(snapshot.countedAmount);
         const differenceAmount = countedAmount == null ? null : countedAmount - closingBalance;
 
-        previousClosing.set(comboKey, closingBalance);
+        const hasTransaction = totalReceipt !== 0 || totalPayment !== 0;
+        const hasSnapshot = Boolean(snapshot);
+        const hasBalance = openingBalance !== 0 || closingBalance !== 0;
+        const hasActivity = hasTransaction || hasSnapshot || hasPreviousClosing || hasBalance;
 
-        const hasActivity =
-          totalReceipt !== 0 ||
-          totalPayment !== 0 ||
-          openingBalance !== 0 ||
-          closingBalance !== 0 ||
-          Boolean(snapshot);
+        // Chỉ carry số dư sau khi nguồn đã thật sự xuất hiện trong sổ.
+        // Nhờ vậy:
+        // - Ngày 15 lấy đúng số dư cuối ngày 14 làm số dư đầu.
+        // - Ngày 16 lấy đúng số dư cuối ngày 15 làm số dư đầu.
+        // - Các nguồn chưa từng phát sinh không tạo số dư ảo 0đ kéo dài.
+        if (hasActivity) {
+          previousClosing.set(comboKey, closingBalance);
+        }
 
+        if (!requestedDateSet.has(date)) continue;
         if (!hasActivity && days.length > 31) continue;
 
         rows.push({
@@ -2064,7 +2103,7 @@ export class FinanceService {
           closingBalance,
           countedAmount,
           differenceAmount,
-          status: snapshot?.status || "OPEN",
+          status: isLocked ? "LOCKED" : "OPEN",
           note: snapshot?.note || null,
           lockedAt: snapshot?.lockedAt || null,
           lockedById: snapshot?.lockedById || null,
@@ -2076,13 +2115,15 @@ export class FinanceService {
       }
     }
 
+    const firstDate = days[0];
+    const lastDate = days[days.length - 1];
     const summary = rows.reduce(
       (acc, row) => {
-        acc.openingBalance += this.toNumber(row.openingBalance);
+        if (row.date === firstDate) acc.openingBalance += this.toNumber(row.openingBalance);
         acc.totalReceipt += this.toNumber(row.totalReceipt);
         acc.totalPayment += this.toNumber(row.totalPayment);
         acc.netAmount += this.toNumber(row.netAmount);
-        acc.closingBalance += this.toNumber(row.closingBalance);
+        if (row.date === lastDate) acc.closingBalance += this.toNumber(row.closingBalance);
         if (row.status === "LOCKED") acc.lockedRows += 1;
         if (row.differenceAmount !== null && row.differenceAmount !== 0) acc.diffRows += 1;
         return acc;

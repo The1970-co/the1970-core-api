@@ -106,6 +106,17 @@ const PERMISSION_LABEL_TO_KEY: Record<string, string> = {
   "Phân quyền": "menu.permissions",
   "Cấu hình": "menu.settings",
 
+  "Tính lương": "menu.payroll",
+  "Sổ lương": "payroll.view",
+  "Cấu hình lương": "payroll.config",
+  "Xem bảng lương": "payroll.view",
+  "Tạo kỳ lương": "payroll.create",
+  "Tính lại lương": "payroll.calculate",
+  "Sửa bảng lương": "payroll.edit",
+  "Khóa sổ lương": "payroll.lock",
+  "Xác nhận trả lương": "payroll.mark_paid",
+  "Xuất file lương": "payroll.excel.export",
+
   "Xem sản phẩm": "products.view",
   "Tạo sản phẩm": "products.create",
   "Sửa sản phẩm": "products.edit",

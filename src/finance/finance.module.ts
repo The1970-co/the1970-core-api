@@ -13,5 +13,6 @@ import { GhnCodReconciliationService } from "./ghn-cod-reconciliation.service";
     FinanceService,
     GhnCodReconciliationService,
   ],
+  exports: [FinanceService],
 })
 export class FinanceModule {}

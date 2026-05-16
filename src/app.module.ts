@@ -31,6 +31,7 @@ import { DashboardModule } from './dashboard/dashboard.module';
 import { PromotionsModule } from './promotions/promotions.module';
 import { SupplierPaymentsModule } from './supplier-payments/supplier-payments.module';
 import { RbacSnapshotsModule } from "./rbac-snapshots/rbac-snapshots.module";
+import { PayrollModule } from "./payroll/payroll.module";
 @Module({
   imports: [
     PrismaModule,
@@ -65,6 +66,7 @@ import { RbacSnapshotsModule } from "./rbac-snapshots/rbac-snapshots.module";
     PromotionsModule,
     SupplierPaymentsModule,
     RbacSnapshotsModule,
+    PayrollModule,
   ],
 })
 export class AppModule {}

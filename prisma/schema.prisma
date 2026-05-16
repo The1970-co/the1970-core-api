@@ -1652,3 +1652,186 @@ model RbacSnapshot {
 
   @@index([createdAt])
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Payroll / Salary Center
+// ─────────────────────────────────────────────────────────────────────────────
+
+model PayrollPeriod {
+  id         String   @id @default(cuid())
+  code       String   @unique
+  name       String
+  fromDate   DateTime
+  toDate     DateTime
+  branchId   String?
+  branchName String?
+  status     String   @default("DRAFT")
+
+  totalStaff   Int     @default(0)
+  totalOrders  Int     @default(0)
+  totalItems   Int     @default(0)
+  totalRevenue Decimal @default(0) @db.Decimal(18, 2)
+  totalGross   Decimal @default(0) @db.Decimal(18, 2)
+  totalNet     Decimal @default(0) @db.Decimal(18, 2)
+  totalPaid    Decimal @default(0) @db.Decimal(18, 2)
+
+  lockedAt         DateTime?
+  lockedById       String?
+  lockedByName     String?
+  paidAt           DateTime?
+  paidById         String?
+  paidByName       String?
+  paymentSourceId  String?
+  paymentVoucherId String?
+  note             String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lines PayrollLine[]
+
+  @@index([fromDate])
+  @@index([toDate])
+  @@index([branchId])
+  @@index([status])
+}
+
+model PayrollLine {
+  id         String  @id @default(cuid())
+  periodId   String
+  staffId    String
+  staffCode  String?
+  staffName  String
+  branchId   String?
+  branchName String?
+
+  salaryType     String  @default("MONTHLY")
+  baseSalary     Decimal @default(0) @db.Decimal(18, 2)
+  dailyRate      Decimal @default(0) @db.Decimal(18, 2)
+  workingDays    Decimal @default(0) @db.Decimal(8, 2)
+  standardDays   Decimal @default(26) @db.Decimal(8, 2)
+  proratedSalary Decimal @default(0) @db.Decimal(18, 2)
+
+  successOrderCount Int     @default(0)
+  successItemQty    Int     @default(0)
+  revenueAmount     Decimal @default(0) @db.Decimal(18, 2)
+
+  commissionByOrder   Decimal @default(0) @db.Decimal(18, 2)
+  commissionByItem    Decimal @default(0) @db.Decimal(18, 2)
+  commissionByPercent Decimal @default(0) @db.Decimal(18, 2)
+  commissionTotal     Decimal @default(0) @db.Decimal(18, 2)
+
+  bonus     Decimal @default(0) @db.Decimal(18, 2)
+  allowance Decimal @default(0) @db.Decimal(18, 2)
+  advance   Decimal @default(0) @db.Decimal(18, 2)
+  deduction Decimal @default(0) @db.Decimal(18, 2)
+
+  grossPay   Decimal @default(0) @db.Decimal(18, 2)
+  netPay     Decimal @default(0) @db.Decimal(18, 2)
+  paidAmount Decimal @default(0) @db.Decimal(18, 2)
+
+  status           String    @default("DRAFT")
+  note             String?
+  paidAt           DateTime?
+  paidById         String?
+  paidByName       String?
+  paymentSourceId  String?
+  paymentVoucherId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  period      PayrollPeriod       @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  orderLinks  PayrollOrderLink[]
+  adjustments PayrollAdjustment[]
+
+  @@unique([periodId, staffId, branchId])
+  @@index([periodId])
+  @@index([staffId])
+  @@index([branchId])
+  @@index([status])
+}
+
+model PayrollOrderLink {
+  id                  String    @id @default(cuid())
+  payrollLineId       String
+  orderId             String
+  orderCode           String
+  branchId            String?
+  salesChannel        String?
+  orderDate           DateTime?
+  completedAt         DateTime?
+  revenueAmount       Decimal   @default(0) @db.Decimal(18, 2)
+  itemQty             Int       @default(0)
+  commissionByOrder   Decimal   @default(0) @db.Decimal(18, 2)
+  commissionByItem    Decimal   @default(0) @db.Decimal(18, 2)
+  commissionByPercent Decimal   @default(0) @db.Decimal(18, 2)
+  commissionTotal     Decimal   @default(0) @db.Decimal(18, 2)
+  reason              String?
+  createdAt           DateTime  @default(now())
+
+  payrollLine PayrollLine @relation(fields: [payrollLineId], references: [id], onDelete: Cascade)
+
+  @@unique([payrollLineId, orderId])
+  @@index([orderId])
+  @@index([orderCode])
+  @@index([branchId])
+  @@index([orderDate])
+}
+
+model PayrollConfig {
+  id         String  @id @default(cuid())
+  staffId    String
+  staffCode  String?
+  staffName  String?
+  branchId   String?
+  branchName String?
+
+  salaryType          String  @default("MONTHLY") // MONTHLY | DAILY | SHIFT | NONE
+  baseSalary          Decimal @default(0) @db.Decimal(18, 2)
+  dailyRate           Decimal @default(0) @db.Decimal(18, 2)
+  standardWorkingDays Decimal @default(26) @db.Decimal(8, 2)
+
+  commissionPerOrderEnabled Boolean @default(false)
+  commissionPerOrderAmount  Decimal @default(0) @db.Decimal(18, 2)
+  commissionPerItemEnabled  Boolean @default(false)
+  commissionPerItemAmount   Decimal @default(0) @db.Decimal(18, 2)
+  commissionPercentEnabled  Boolean @default(false)
+  commissionRate            Decimal @default(0) @db.Decimal(8, 4)
+
+  applyPos      Boolean @default(true)
+  applyOnline   Boolean @default(true)
+  applyFacebook Boolean @default(true)
+  applyCod      Boolean @default(true)
+
+  allowanceDefault Decimal   @default(0) @db.Decimal(18, 2)
+  note             String?
+  effectiveFrom    DateTime
+  effectiveTo      DateTime?
+  isActive         Boolean   @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([staffId])
+  @@index([branchId])
+  @@index([isActive])
+  @@index([effectiveFrom])
+}
+
+model PayrollAdjustment {
+  id            String   @id @default(cuid())
+  payrollLineId String
+  type          String // BONUS | ALLOWANCE | ADVANCE | DEDUCTION
+  amount        Decimal  @default(0) @db.Decimal(18, 2)
+  reason        String?
+  createdById   String?
+  createdByName String?
+  createdAt     DateTime @default(now())
+
+  payrollLine PayrollLine @relation(fields: [payrollLineId], references: [id], onDelete: Cascade)
+
+  @@index([payrollLineId])
+  @@index([type])
+  @@index([createdAt])
+}
