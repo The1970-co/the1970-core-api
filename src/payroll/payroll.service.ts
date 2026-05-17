@@ -513,6 +513,186 @@ export class PayrollService {
     });
   }
 
+
+
+  private branchTemplateConfigData(body: any) {
+    return {
+      name: String(body?.name || "Cấu hình mặc định").trim() || "Cấu hình mặc định",
+      salaryType: body?.salaryType || "MONTHLY",
+      baseSalary: this.money(body?.baseSalary),
+      dailyRate: this.money(body?.dailyRate),
+      standardWorkingDays: this.decimal2(body?.standardWorkingDays || 26),
+      orderAttributionMode: this.normalizeAttributionMode(body?.orderAttributionMode),
+      commissionPerOrderEnabled: Boolean(body?.commissionPerOrderEnabled),
+      commissionPerOrderAmount: this.money(body?.commissionPerOrderAmount),
+      commissionPerItemEnabled: Boolean(body?.commissionPerItemEnabled),
+      commissionPerItemAmount: this.money(body?.commissionPerItemAmount),
+      commissionPercentEnabled: Boolean(body?.commissionPercentEnabled),
+      commissionRate: this.decimal2(body?.commissionRate || 0),
+      hourlyEnabled: Boolean(body?.hourlyEnabled),
+      hourlyRate: this.money(body?.hourlyRate),
+      standardHoursPerDay: this.decimal2(body?.standardHoursPerDay || 9.5),
+      overtimeRate: this.decimal2(body?.overtimeRate || 1),
+      holidayRate: this.decimal2(body?.holidayRate || 2),
+      paidLeaveEnabled: Boolean(body?.paidLeaveEnabled),
+      paidLeaveHoursPerDay: this.decimal2(body?.paidLeaveHoursPerDay || body?.standardHoursPerDay || 9.5),
+      mealAllowanceEnabled: Boolean(body?.mealAllowanceEnabled),
+      mealHoursPerUnit: this.decimal2(body?.mealHoursPerUnit || body?.standardHoursPerDay || 9.5),
+      mealAmountPerUnit: this.money(body?.mealAmountPerUnit || 30000),
+      insuranceDeductionAmount: this.money(body?.insuranceDeductionAmount),
+      taggedProductEnabled: Boolean(body?.taggedProductEnabled),
+      taggedProductRate: this.money(body?.taggedProductRate),
+      ghnCodBonusEnabled: Boolean(body?.ghnCodBonusEnabled),
+      ghnCodBonusPerOrder: this.money(body?.ghnCodBonusPerOrder),
+      applyPos: body?.applyPos !== false,
+      applyOnline: body?.applyOnline !== false,
+      applyFacebook: body?.applyFacebook !== false,
+      applyCod: body?.applyCod !== false,
+      allowanceDefault: this.money(body?.allowanceDefault),
+      note: body?.note || null,
+      isActive: body?.isActive !== false,
+    };
+  }
+
+  private payrollConfigDataFromTemplate(template: any, staff: any, effectiveFrom?: string | Date | null) {
+    return {
+      staffId: staff.id,
+      staffCode: staff.code || null,
+      staffName: staff.name || null,
+      branchId: template.branchId || staff.branchId || null,
+      branchName: template.branchName || staff.branchName || null,
+      salaryType: template.salaryType || "MONTHLY",
+      baseSalary: template.baseSalary || 0,
+      dailyRate: template.dailyRate || 0,
+      standardWorkingDays: template.standardWorkingDays || 26,
+      orderAttributionMode: template.orderAttributionMode || "ASSIGNED_OR_CREATOR",
+      commissionPerOrderEnabled: Boolean(template.commissionPerOrderEnabled),
+      commissionPerOrderAmount: template.commissionPerOrderAmount || 0,
+      commissionPerItemEnabled: Boolean(template.commissionPerItemEnabled),
+      commissionPerItemAmount: template.commissionPerItemAmount || 0,
+      commissionPercentEnabled: Boolean(template.commissionPercentEnabled),
+      commissionRate: template.commissionRate || 0,
+      hourlyEnabled: Boolean(template.hourlyEnabled),
+      hourlyRate: template.hourlyRate || 0,
+      standardHoursPerDay: template.standardHoursPerDay || 9.5,
+      overtimeRate: template.overtimeRate || 1,
+      holidayRate: template.holidayRate || 2,
+      paidLeaveEnabled: Boolean(template.paidLeaveEnabled),
+      paidLeaveHoursPerDay: template.paidLeaveHoursPerDay || template.standardHoursPerDay || 9.5,
+      mealAllowanceEnabled: Boolean(template.mealAllowanceEnabled),
+      mealHoursPerUnit: template.mealHoursPerUnit || template.standardHoursPerDay || 9.5,
+      mealAmountPerUnit: template.mealAmountPerUnit || 30000,
+      insuranceDeductionAmount: template.insuranceDeductionAmount || 0,
+      taggedProductEnabled: Boolean(template.taggedProductEnabled),
+      taggedProductRate: template.taggedProductRate || 0,
+      ghnCodBonusEnabled: Boolean(template.ghnCodBonusEnabled),
+      ghnCodBonusPerOrder: template.ghnCodBonusPerOrder || 0,
+      applyPos: template.applyPos !== false,
+      applyOnline: template.applyOnline !== false,
+      applyFacebook: template.applyFacebook !== false,
+      applyCod: template.applyCod !== false,
+      allowanceDefault: template.allowanceDefault || 0,
+      effectiveFrom: this.startOfDate(effectiveFrom || new Date()),
+      effectiveTo: null,
+      isActive: true,
+      note: template.note || null,
+    };
+  }
+
+  async listBranchConfigTemplates(query: any = {}, user?: AnyUser) {
+    const branchId = this.scopedBranchId(user, query.branchId || null);
+    const where: any = {};
+    if (branchId) where.branchId = branchId;
+    if (query.isActive !== undefined && query.isActive !== "ALL") where.isActive = String(query.isActive) !== "false";
+    if (query.q?.trim()) {
+      const q = String(query.q).trim();
+      where.OR = [
+        { name: { contains: q, mode: "insensitive" } },
+        { branchName: { contains: q, mode: "insensitive" } },
+        { branchId: { contains: q, mode: "insensitive" } },
+      ];
+    }
+    return (this.prisma as any).payrollBranchConfigTemplate.findMany({
+      where,
+      orderBy: [{ isActive: "desc" }, { branchName: "asc" }, { name: "asc" }],
+    });
+  }
+
+  async createBranchConfigTemplate(body: any, user?: AnyUser) {
+    const branchId = this.scopedBranchId(user, body?.branchId || null);
+    if (!branchId) throw new BadRequestException("Chọn chi nhánh để tạo mẫu cấu hình lương.");
+    const branchName = body?.branchName || await this.resolveBranchName(branchId);
+    const existing = await (this.prisma as any).payrollBranchConfigTemplate.findFirst({ where: { branchId, name: body?.name || "Cấu hình mặc định" } });
+    if (existing) {
+      return (this.prisma as any).payrollBranchConfigTemplate.update({
+        where: { id: existing.id },
+        data: { branchId, branchName, ...this.branchTemplateConfigData(body) },
+      });
+    }
+    return (this.prisma as any).payrollBranchConfigTemplate.create({
+      data: { branchId, branchName, ...this.branchTemplateConfigData(body) },
+    });
+  }
+
+  async updateBranchConfigTemplate(id: string, body: any, user?: AnyUser) {
+    const current = await (this.prisma as any).payrollBranchConfigTemplate.findUnique({ where: { id } });
+    if (!current) throw new NotFoundException("Không tìm thấy mẫu cấu hình chi nhánh.");
+    this.scopedBranchId(user, current.branchId || null);
+    const branchId = body?.branchId ? this.scopedBranchId(user, body.branchId) : current.branchId;
+    const branchName = body?.branchName || await this.resolveBranchName(branchId);
+    return (this.prisma as any).payrollBranchConfigTemplate.update({
+      where: { id },
+      data: { branchId, branchName, ...this.branchTemplateConfigData(body) },
+    });
+  }
+
+  async applyBranchConfigTemplate(body: any, user?: AnyUser) {
+    const templateId = String(body?.templateId || "").trim();
+    const branchId = this.scopedBranchId(user, body?.branchId || null);
+    const overwrite = Boolean(body?.overwrite);
+    const onlyMissing = body?.onlyMissing !== false && !overwrite;
+    const staffIds = Array.isArray(body?.staffIds) ? body.staffIds.map((id: any) => String(id)).filter(Boolean) : [];
+    const effectiveFrom = body?.effectiveFrom || new Date();
+
+    const template = templateId
+      ? await (this.prisma as any).payrollBranchConfigTemplate.findUnique({ where: { id: templateId } })
+      : await (this.prisma as any).payrollBranchConfigTemplate.findFirst({ where: { branchId, isActive: true }, orderBy: { updatedAt: "desc" } });
+    if (!template) throw new NotFoundException("Không tìm thấy mẫu cấu hình chi nhánh.");
+    this.scopedBranchId(user, template.branchId || null);
+
+    const staffWhere: any = { isActive: true };
+    if (staffIds.length) staffWhere.id = { in: staffIds };
+    else staffWhere.branchId = branchId || template.branchId;
+    const staffRows = await this.prisma.staffUser.findMany({ where: staffWhere, orderBy: { name: "asc" } });
+    if (!staffRows.length) throw new BadRequestException("Không có nhân viên phù hợp để áp dụng mẫu.");
+
+    let created = 0;
+    let updated = 0;
+    let skipped = 0;
+    const results: any[] = [];
+    for (const staff of staffRows) {
+      const configWhere: any = { staffId: staff.id, branchId: template.branchId || staff.branchId || null, isActive: true };
+      const existing = await this.prisma.payrollConfig.findFirst({ where: configWhere, orderBy: { updatedAt: "desc" } });
+      const data = this.payrollConfigDataFromTemplate(template, staff, effectiveFrom);
+      if (existing) {
+        if (onlyMissing) {
+          skipped += 1;
+          results.push({ staffId: staff.id, staffName: staff.name, status: "SKIPPED", configId: existing.id });
+          continue;
+        }
+        const updatedConfig = await this.prisma.payrollConfig.update({ where: { id: existing.id }, data: { ...data, attendanceCode: existing.attendanceCode || undefined } as any });
+        updated += 1;
+        results.push({ staffId: staff.id, staffName: staff.name, status: "UPDATED", configId: updatedConfig.id });
+      } else {
+        const createdConfig = await this.prisma.payrollConfig.create({ data: data as any });
+        created += 1;
+        results.push({ staffId: staff.id, staffName: staff.name, status: "CREATED", configId: createdConfig.id });
+      }
+    }
+
+    return { templateId: template.id, branchId: template.branchId, created, updated, skipped, total: staffRows.length, results };
+  }
+
   private async activeConfigsForPeriod(period: any) {
     const where: Prisma.PayrollConfigWhereInput = {
       isActive: true,
@@ -879,7 +1059,7 @@ export class PayrollService {
     return { fileName, summary, rows };
   }
 
-  async applyAttendanceImport(id: string, body: { rows?: any[]; fileName?: string; autoCalculate?: boolean } = {}, user?: AnyUser) {
+  async applyAttendanceImport(id: string, body: { rows?: any[]; fileName?: string; autoCalculate?: boolean; saveMappings?: boolean } = {}, user?: AnyUser) {
     const period = await this.prisma.payrollPeriod.findUnique({ where: { id }, include: { lines: true } });
     if (!period) throw new NotFoundException("Không tìm thấy kỳ lương.");
     this.scopedBranchId(user, period.branchId || null);
@@ -911,6 +1091,16 @@ export class PayrollService {
       totalHours += this.toNumber(row.normalHours) + this.toNumber(row.overtimeHours) + this.toNumber(row.holidayHours);
       totalLateMinutes += Number(row.lateMinutes || 0);
       totalEarlyMinutes += Number(row.earlyMinutes || 0);
+      if (body?.saveMappings !== false && row.attendanceCode) {
+        const existingConfig = await this.prisma.payrollConfig.findFirst({
+          where: { staffId, isActive: true, OR: [{ branchId: line.branchId }, { branchId: null }] },
+          orderBy: { updatedAt: "desc" },
+        });
+        if (existingConfig && (!existingConfig.attendanceCode || existingConfig.attendanceCode !== row.attendanceCode)) {
+          await this.prisma.payrollConfig.update({ where: { id: existingConfig.id }, data: { attendanceCode: row.attendanceCode } });
+        }
+      }
+
       await this.updateLine(line.id, {
         normalHours: row.normalHours,
         overtimeHours: row.overtimeHours,

@@ -136,4 +136,29 @@ export class PayrollController {
   updateConfig(@Param("id") id: string, @Body() body: PayrollConfigDto, @Req() req: Request & { user?: any }) {
     return this.payrollService.updateConfig(id, body, req.user);
   }
+
+  @Get("branch-config-templates")
+  @RequirePermissions("payroll.config")
+  listBranchConfigTemplates(@Query() query: any, @Req() req: Request & { user?: any }) {
+    return this.payrollService.listBranchConfigTemplates(query || {}, req.user);
+  }
+
+  @Post("branch-config-templates")
+  @RequirePermissions("payroll.config")
+  createBranchConfigTemplate(@Body() body: any, @Req() req: Request & { user?: any }) {
+    return this.payrollService.createBranchConfigTemplate(body || {}, req.user);
+  }
+
+  @Patch("branch-config-templates/:id")
+  @RequirePermissions("payroll.config")
+  updateBranchConfigTemplate(@Param("id") id: string, @Body() body: any, @Req() req: Request & { user?: any }) {
+    return this.payrollService.updateBranchConfigTemplate(id, body || {}, req.user);
+  }
+
+  @Post("branch-config-templates/apply")
+  @RequirePermissions("payroll.config")
+  applyBranchConfigTemplate(@Body() body: any, @Req() req: Request & { user?: any }) {
+    return this.payrollService.applyBranchConfigTemplate(body || {}, req.user);
+  }
+
 }

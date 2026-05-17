@@ -1997,3 +1997,60 @@ model PayrollAdjustment {
   @@index([type])
   @@index([createdAt])
 }
+
+model PayrollBranchConfigTemplate {
+  id         String  @id @default(cuid())
+  branchId   String
+  branchName String?
+  name       String  @default("Cấu hình mặc định")
+  isActive   Boolean @default(true)
+
+  salaryType          String  @default("MONTHLY")
+  baseSalary          Decimal @default(0) @db.Decimal(18, 2)
+  dailyRate           Decimal @default(0) @db.Decimal(18, 2)
+  standardWorkingDays Decimal @default(26) @db.Decimal(8, 2)
+
+  orderAttributionMode String @default("ASSIGNED_OR_CREATOR")
+
+  commissionPerOrderEnabled Boolean @default(false)
+  commissionPerOrderAmount  Decimal @default(0) @db.Decimal(18, 2)
+  commissionPerItemEnabled  Boolean @default(false)
+  commissionPerItemAmount   Decimal @default(0) @db.Decimal(18, 2)
+  commissionPercentEnabled  Boolean @default(false)
+  commissionRate            Decimal @default(0) @db.Decimal(8, 4)
+
+  hourlyEnabled       Boolean @default(false)
+  hourlyRate          Decimal @default(0) @db.Decimal(18, 2)
+  standardHoursPerDay Decimal @default(9.5) @db.Decimal(8, 2)
+  overtimeRate        Decimal @default(1) @db.Decimal(8, 2)
+  holidayRate         Decimal @default(2) @db.Decimal(8, 2)
+
+  paidLeaveEnabled     Boolean @default(false)
+  paidLeaveHoursPerDay Decimal @default(9.5) @db.Decimal(8, 2)
+
+  mealAllowanceEnabled Boolean @default(false)
+  mealHoursPerUnit     Decimal @default(9.5) @db.Decimal(8, 2)
+  mealAmountPerUnit    Decimal @default(30000) @db.Decimal(18, 2)
+
+  insuranceDeductionAmount Decimal @default(0) @db.Decimal(18, 2)
+
+  taggedProductEnabled Boolean @default(false)
+  taggedProductRate    Decimal @default(0) @db.Decimal(18, 2)
+
+  ghnCodBonusEnabled  Boolean @default(false)
+  ghnCodBonusPerOrder Decimal @default(0) @db.Decimal(18, 2)
+
+  applyPos      Boolean @default(true)
+  applyOnline   Boolean @default(true)
+  applyFacebook Boolean @default(true)
+  applyCod      Boolean @default(true)
+
+  allowanceDefault Decimal  @default(0) @db.Decimal(18, 2)
+  note             String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([branchId, name])
+  @@index([branchId])
+  @@index([isActive])
+}
