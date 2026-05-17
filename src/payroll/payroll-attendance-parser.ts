@@ -43,26 +43,68 @@ function mostCommon(values: string[]) {
   return Array.from(counter.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
 }
 
-function getSummaryNumber(block: any[][], label: string, preferredIndex = -1) {
+function numericValuesBetween(row: any[], startIndex: number, stopPatterns: RegExp[] = []) {
+  const values: number[] = [];
+  for (let i = Math.max(0, startIndex); i < row.length; i++) {
+    const cellText = norm(row[i]);
+    if (cellText && stopPatterns.some((pattern) => pattern.test(cellText))) break;
+    const value = num(row[i]);
+    if (String(row[i] ?? "").trim() !== "" && Number.isFinite(value)) values.push(value);
+  }
+  return values;
+}
+
+function findLabelIndex(row: any[], label: string) {
   const labelNorm = norm(label);
-  const row = block.find((r) => norm(r[0]).includes(labelNorm));
+  return row.findIndex((cell) => norm(cell).includes(labelNorm));
+}
+
+function findRowByLabel(block: any[][], label: string) {
+  const labelNorm = norm(label);
+  return block.find((r) => r.some((cell) => norm(cell).includes(labelNorm))) || null;
+}
+
+function getWorkHoursFromSummary(block: any[][], label: string) {
+  const row = findRowByLabel(block, label);
   if (!row) return 0;
-  if (preferredIndex >= 0 && row[preferredIndex] !== undefined) return num(row[preferredIndex]);
-  for (let i = row.length - 1; i >= 1; i--) {
-    const n = num(row[i]);
-    if (n) return n;
+  const idx = findLabelIndex(row, label);
+  const values = numericValuesBetween(row, idx + 1, [/tang ca/i, /di tre/i, /ve som/i]);
+  // File vân tay đang có cặp: số công, số giờ. Lấy số giờ (giá trị thứ 2), không lấy số công.
+  return values.length >= 2 ? values[1] : values[0] || 0;
+}
+
+function getFirstNumberAfterLabel(block: any[][], label: string) {
+  for (const row of block) {
+    const idx = findLabelIndex(row, label);
+    if (idx < 0) continue;
+    const values = numericValuesBetween(row, idx + 1, [/di tre/i, /ve som/i, /so lan/i, /so phut/i]);
+    if (values.length) return values[0];
   }
   return 0;
 }
 
-function getCountAndMinutes(block: any[][], label: string) {
+function getRepeatedMetricPair(block: any[][], label: string) {
   const labelNorm = norm(label);
-  const row = block.find((r) => norm(r[0]).includes(labelNorm));
-  if (!row) return { count: 0, minutes: 0 };
-  const numbers = row.slice(1).map(num).filter((v) => Number.isFinite(v));
+  for (const row of block) {
+    const found: number[] = [];
+    for (let i = 0; i < row.length; i++) {
+      if (!norm(row[i]).includes(labelNorm)) continue;
+      const values = numericValuesBetween(row, i + 1, [/so lan/i, /so phut/i, /tang ca/i, /di tre/i, /ve som/i]);
+      found.push(values[0] || 0);
+    }
+    if (found.length) return { first: found[0] || 0, second: found[1] || 0 };
+  }
+  return { first: 0, second: 0 };
+}
+
+function getAttendanceLateEarly(block: any[][]) {
+  const counts = getRepeatedMetricPair(block, "Số lần");
+  const minutes = getRepeatedMetricPair(block, "Số phút");
   return {
-    count: numbers[0] || 0,
-    minutes: numbers[1] || numbers[numbers.length - 1] || 0,
+    lateCount: counts.first,
+    earlyCount: counts.second,
+    lateMinutes: minutes.first,
+    earlyMinutes: minutes.second,
   };
 }
 
@@ -118,15 +160,15 @@ export function parseAttendanceWorkbook(buffer: Buffer | Uint8Array): ParsedAtte
     if (!header?.attendanceCode && !header?.staffName) continue;
     const block = rows.slice(start, end);
 
-    const totalWorkHours = getSummaryNumber(block, "TỔNG", 2) || getSummaryNumber(block, "TONG", 2);
-    const normalHours = getSummaryNumber(block, "Ngày thường", 2) || getSummaryNumber(block, "Ngay thuong", 2) || totalWorkHours;
-    const overtimeHours = getSummaryNumber(block, "Tăng ca 1", 2) || getSummaryNumber(block, "Tang ca 1", 2);
-    const holidayHours = getSummaryNumber(block, "Tăng ca 2", 2) || getSummaryNumber(block, "Tang ca 2", 2);
-    const overtime3Hours = getSummaryNumber(block, "Tăng ca 3", 2) || getSummaryNumber(block, "Tang ca 3", 2);
-    const late = getCountAndMinutes(block, "Đi trễ");
-    const early = getCountAndMinutes(block, "Về sớm");
+    const totalWorkHours = getWorkHoursFromSummary(block, "TỔNG") || getWorkHoursFromSummary(block, "TONG");
+    // Lương giờ dùng tổng giờ thực tế của tháng. Không lấy cột "số công".
+    const normalHours = totalWorkHours || getWorkHoursFromSummary(block, "Ngày thường") || getWorkHoursFromSummary(block, "Ngay thuong");
+    const overtimeHours = getFirstNumberAfterLabel(block, "Tăng ca 1") || getFirstNumberAfterLabel(block, "Tang ca 1");
+    const holidayHours = getFirstNumberAfterLabel(block, "Tăng ca 2") || getFirstNumberAfterLabel(block, "Tang ca 2");
+    const overtime3Hours = getFirstNumberAfterLabel(block, "Tăng ca 3") || getFirstNumberAfterLabel(block, "Tang ca 3");
+    const attendance = getAttendanceLateEarly(block);
 
-    const meaningful = totalWorkHours || normalHours || overtimeHours || holidayHours || late.minutes || early.minutes;
+    const meaningful = totalWorkHours || normalHours || overtimeHours || holidayHours || attendance.lateMinutes || attendance.earlyMinutes;
     if (!meaningful) continue;
 
     result.push({
@@ -139,10 +181,10 @@ export function parseAttendanceWorkbook(buffer: Buffer | Uint8Array): ParsedAtte
       holidayHours,
       overtime3Hours,
       totalWorkHours: totalWorkHours || normalHours + overtimeHours + holidayHours + overtime3Hours,
-      lateCount: Math.round(late.count),
-      lateMinutes: Math.round(late.minutes),
-      earlyCount: Math.round(early.count),
-      earlyMinutes: Math.round(early.minutes),
+      lateCount: Math.round(attendance.lateCount),
+      lateMinutes: Math.round(attendance.lateMinutes),
+      earlyCount: Math.round(attendance.earlyCount),
+      earlyMinutes: Math.round(attendance.earlyMinutes),
       raw: { sheetName, startRow: start + 1 },
     });
   }
