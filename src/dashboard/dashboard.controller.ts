@@ -7,7 +7,12 @@ export class DashboardController {
   constructor(private readonly dashboardService: DashboardService) {}
 
   @Get('overview')
-  overview(@Query('branchId') branchId?: string) {
-    return this.dashboardService.getOverview(branchId);
+  overview(
+    @Query('branchId') branchId?: string,
+    @Query('range') range?: any,
+    @Query('fromDate') fromDate?: string,
+    @Query('toDate') toDate?: string,
+  ) {
+    return this.dashboardService.getOverview(branchId, range, fromDate, toDate);
   }
 }

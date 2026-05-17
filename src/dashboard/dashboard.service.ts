@@ -1,7 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { MetaAdsService } from '../meta-ads/meta-ads.service';
 
 type Tone = 'safe' | 'warning' | 'critical';
+type DashboardRange = 'today' | 'yesterday' | '7d' | '10d' | '30d' | 'custom';
 
 type CriticalSku = {
   variantId: string;
@@ -28,7 +30,10 @@ type CriticalSku = {
 
 @Injectable()
 export class DashboardService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly metaAdsService: MetaAdsService,
+  ) {}
 
   private n(value: any) {
     const parsed = Number(value || 0);
@@ -88,7 +93,7 @@ export class DashboardService {
     return attrs ? `${item.productName} - ${attrs}` : item.productName || item.sku;
   }
 
-  async getOverview(branchId?: string) {
+  async getOverview(branchId?: string, range?: DashboardRange, fromDate?: string, toDate?: string) {
     const selectedBranchId = branchId && branchId !== 'ALL' ? branchId : undefined;
     const now = new Date();
     const todayStart = this.startOfDay(now);
@@ -450,8 +455,24 @@ export class DashboardService {
       })
       .sort((a, b) => this.n((b as any).orders) - this.n((a as any).orders));
 
+    const metaSummary = await this.metaAdsService
+      .getSummary({ range: range || 'today', fromDate, toDate })
+      .catch(() => ({
+        connected: false,
+        adAccountId: '',
+        accountName: '',
+        totalAdsCost: 0,
+        impressions: 0,
+        clicks: 0,
+        campaigns: [] as Array<{ date_start?: string; spend?: string | number }>,
+      }));
+
     const adsCostByDay = new Map<string, number>();
-    // Chưa có bảng ads spend live. Giữ 0 để công thức profit chuẩn: doanh thu - giá vốn - ads.
+    for (const campaign of metaSummary.campaigns || []) {
+      const key = campaign.date_start;
+      if (!key) continue;
+      adsCostByDay.set(key, (adsCostByDay.get(key) || 0) + this.n(campaign.spend));
+    }
 
     const dailyMap = new Map<string, { revenue: number; cost: number; adsCost: number; profit: number; orders: number }>();
     for (let d = new Date(monthStart); d <= todayStart; d = this.addDays(d, 1)) {
@@ -700,8 +721,8 @@ export class DashboardService {
         subtitle: `Doanh thu ${this.money(revenue)} · ${this.qty(totalOrders)} đơn · ${this.qty(criticalCandidates.length)} SKU critical`,
         chips: [`${this.qty(totalOrders)} đơn`, `${this.money(revenue)} doanh thu`, `${this.qty(criticalCandidates.length)} SKU critical`],
         autoMode: 'SEMI',
-        metaMode: 'DISCONNECTED',
-        metaAccount: 'Meta Ads chưa nối live data',
+        metaMode: metaSummary.connected ? 'LIVE' : 'DISCONNECTED',
+        metaAccount: metaSummary.connected ? `Meta Ads · ${metaSummary.accountName || 'Nam Nguyen'}` : 'Meta Ads chưa nối live data',
         scheduler: { label: 'Chưa có lịch live', times: [] },
       },
       warningSummary: {
