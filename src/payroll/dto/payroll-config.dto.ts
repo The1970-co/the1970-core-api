@@ -10,12 +10,35 @@ export class PayrollConfigDto {
   dailyRate?: number;
   standardWorkingDays?: number;
 
+  orderAttributionMode?: "CREATED_BY" | "ASSIGNED_OR_CREATOR" | "ASSIGNED_ONLY";
+
   commissionPerOrderEnabled?: boolean;
   commissionPerOrderAmount?: number;
   commissionPerItemEnabled?: boolean;
   commissionPerItemAmount?: number;
   commissionPercentEnabled?: boolean;
   commissionRate?: number;
+
+  hourlyEnabled?: boolean;
+  hourlyRate?: number;
+  standardHoursPerDay?: number;
+  overtimeRate?: number;
+  holidayRate?: number;
+
+  paidLeaveEnabled?: boolean;
+  paidLeaveHoursPerDay?: number;
+
+  mealAllowanceEnabled?: boolean;
+  mealHoursPerUnit?: number;
+  mealAmountPerUnit?: number;
+
+  insuranceDeductionAmount?: number;
+
+  taggedProductEnabled?: boolean;
+  taggedProductRate?: number;
+
+  ghnCodBonusEnabled?: boolean;
+  ghnCodBonusPerOrder?: number;
 
   applyPos?: boolean;
   applyOnline?: boolean;

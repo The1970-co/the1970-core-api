@@ -10,6 +10,10 @@ type ReconciliationStatus =
   | "NOT_FOUND"
   | "MATCHED_BY_PARTIAL_DELIVERY";
 
+const SAVED_MARKER = "BATCH_SAVED";
+const CONFIRMED_MARKER = "USER_CONFIRMED";
+const PAID_MARKER = "COD_RECONCILIATION_PAID";
+
 @Injectable()
 export class GhnCodReconciliationService {
   constructor(private readonly prisma: PrismaService) {}
@@ -19,7 +23,10 @@ export class GhnCodReconciliationService {
       throw new BadRequestException("Không nhận được file Excel.");
     }
 
-    const workbook = XLSX.read(file.buffer, { type: "buffer", cellDates: true });
+    const workbook = XLSX.read(file.buffer, {
+      type: "buffer",
+      cellDates: true,
+    });
     const sheetName = workbook.SheetNames[0];
 
     if (!sheetName) {
@@ -67,13 +74,16 @@ export class GhnCodReconciliationService {
         transferFee: summary.transferFee,
         netAmount: summary.netAmount,
         parserMode,
+        sourceType: "EXCEL",
+        note: body?.note || null,
+        status: "DRAFT",
       },
     });
 
     const partialReturnBaseCodes = new Set(
       rows
         .filter((r) => /_PR$/i.test(r.ghnOrderCode))
-        .map((r) => r.ghnOrderCode.replace(/_PR$/i, ""))
+        .map((r) => r.ghnOrderCode.replace(/_PR$/i, "")),
     );
 
     const enrichedRows = await Promise.all(
@@ -89,7 +99,10 @@ export class GhnCodReconciliationService {
 
         const shipment = await this.prisma.shipment.findFirst({
           where: {
-            OR: [{ trackingCode: row.ghnOrderCode }, { trackingCode: baseGhnCode }],
+            OR: [
+              { trackingCode: row.ghnOrderCode },
+              { trackingCode: baseGhnCode },
+            ],
           },
           include: { order: true },
         });
@@ -122,10 +135,16 @@ export class GhnCodReconciliationService {
         const originalCod = Number(partialRecord?.originalCod || 0);
 
         const partialAmountMatched =
-          Boolean(partialRecord) && adjustedCod > 0 && row.codAmount === adjustedCod;
+          Boolean(partialRecord) &&
+          adjustedCod > 0 &&
+          row.codAmount === adjustedCod;
 
         if (shipment?.order) {
-          if (row.codAmount && systemCodAmount && row.codAmount !== systemCodAmount) {
+          if (
+            row.codAmount &&
+            systemCodAmount &&
+            row.codAmount !== systemCodAmount
+          ) {
             if (hasPrInFile || isPartialReturn) {
               if (!partialRecord) {
                 issueTypes.push("MISSING_PARTIAL_DELIVERY_RECORD");
@@ -139,7 +158,11 @@ export class GhnCodReconciliationService {
             }
           }
 
-          if (row.serviceFee && systemShippingFee && row.serviceFee !== systemShippingFee) {
+          if (
+            row.serviceFee &&
+            systemShippingFee &&
+            row.serviceFee !== systemShippingFee
+          ) {
             issueTypes.push("FEE_MISMATCH");
           }
         }
@@ -147,7 +170,11 @@ export class GhnCodReconciliationService {
         const returnReceivedAt = partialRecord?.returnReceivedAt || null;
         const returnReceived = Boolean(returnReceivedAt);
 
-        if ((hasPrInFile || isPartialReturn) && partialRecord && !returnReceived) {
+        if (
+          (hasPrInFile || isPartialReturn) &&
+          partialRecord &&
+          !returnReceived
+        ) {
           issueTypes.push("PARTIAL_RETURN_NOT_RECEIVED");
         }
 
@@ -167,6 +194,8 @@ export class GhnCodReconciliationService {
             totalReconcileAmount: row.totalReconcileAmount || 0,
             reconciliationStatus,
             issues: issueTypes,
+            sourceType: "EXCEL",
+            actionStatus: "DRAFT",
             partialDeliveryRecordId: partialRecord?.id || null,
             partialDeliveryAdjustedCod: adjustedCod || null,
             partialReturnReceived: partialRecord ? returnReceived : null,
@@ -205,14 +234,21 @@ export class GhnCodReconciliationService {
           partialReturnReceived: returnReceived,
           partialReturnReceivedAt: returnReceivedAt,
           issueTypes,
+          sourceType: "EXCEL",
+          actionStatus: "DRAFT",
+          savedAt: null,
+          confirmedAt: null,
+          paidAt: null,
+          paymentSourceId: null,
+          paymentAmount: 0,
         };
-      })
+      }),
     );
 
     const matchedRows = enrichedRows.filter(
       (r) =>
         r.reconciliationStatus === "MATCHED" ||
-        r.reconciliationStatus === "MATCHED_BY_PARTIAL_DELIVERY"
+        r.reconciliationStatus === "MATCHED_BY_PARTIAL_DELIVERY",
     ).length;
 
     const mismatchRows = enrichedRows.length - matchedRows;
@@ -239,37 +275,742 @@ export class GhnCodReconciliationService {
         totalFeeAmount: summary.transferFee,
         totalNetAmount: summary.netAmount,
         parserMode,
+        sourceType: "EXCEL",
+        status: "DRAFT",
+        savedAt: null,
+        confirmedAt: null,
+        paidAt: null,
       },
       rows: enrichedRows,
       summary: {
         notFoundOrder: enrichedRows.filter((r) =>
-          r.issueTypes.includes("NOT_FOUND_INTERNAL_ORDER")
+          r.issueTypes.includes("NOT_FOUND_INTERNAL_ORDER"),
         ).length,
         codMismatch: enrichedRows.filter((r) =>
-          r.issueTypes.includes("COD_MISMATCH")
+          r.issueTypes.includes("COD_MISMATCH"),
         ).length,
         feeMismatch: enrichedRows.filter((r) =>
-          r.issueTypes.includes("FEE_MISMATCH")
+          r.issueTypes.includes("FEE_MISMATCH"),
         ).length,
         partialReturn: enrichedRows.filter((r) =>
-          r.issueTypes.includes("PARTIAL_RETURN")
+          r.issueTypes.includes("PARTIAL_RETURN"),
         ).length,
         matchedByPartialDelivery: enrichedRows.filter((r) =>
-          r.issueTypes.includes("MATCHED_BY_PARTIAL_DELIVERY")
+          r.issueTypes.includes("MATCHED_BY_PARTIAL_DELIVERY"),
         ).length,
         partialReturnNotReceived: enrichedRows.filter((r) =>
-          r.issueTypes.includes("PARTIAL_RETURN_NOT_RECEIVED")
+          r.issueTypes.includes("PARTIAL_RETURN_NOT_RECEIVED"),
         ).length,
         noMoney: 0,
       },
     };
   }
 
+
+  async parseManual(body: any = {}) {
+    const codes = this.extractManualCodes(
+      body?.codesText || body?.text || body?.orderCodes || body?.codes || "",
+    );
+
+    if (!codes.length) {
+      throw new BadRequestException(
+        "Chưa có mã đơn để đối soát. Dán mã đơn nội bộ hoặc mã vận đơn GHN trước.",
+      );
+    }
+
+    const transferCode = body?.transferCode || `MANUAL_${Date.now()}`;
+    const transferDate = body?.transferDate || null;
+
+    const batch = await this.prisma.ghnCodReconciliationBatch.create({
+      data: {
+        fileName: `Đối soát nhập tay ${codes.length} đơn`,
+        transferCode,
+        transferDate,
+        totalRows: codes.length,
+        totalAmount: 0,
+        transferFee: 0,
+        netAmount: 0,
+        parserMode: "MANUAL_INPUT",
+        sourceType: "MANUAL_INPUT",
+        note: body?.note || null,
+        status: "DRAFT",
+      },
+    });
+
+    const enrichedRows = await Promise.all(
+      codes.map(async (code, index) => {
+        const issueTypes: string[] = [];
+        const isPartialReturn = /_PR$/i.test(code);
+        const baseCode = isPartialReturn ? code.replace(/_PR$/i, "") : code;
+
+        const shipmentByTracking = await this.prisma.shipment.findFirst({
+          where: {
+            OR: [{ trackingCode: code }, { trackingCode: baseCode }],
+          },
+          include: { order: true },
+        });
+
+        const order =
+          shipmentByTracking?.order ||
+          (await (this.prisma as any).order
+            .findFirst({
+              where: {
+                OR: [{ orderCode: code }, { orderCode: baseCode }],
+              },
+            })
+            .catch(() => null));
+
+        const shipment =
+          shipmentByTracking ||
+          (order?.id
+            ? await this.prisma.shipment.findFirst({
+                where: { orderId: order.id },
+                orderBy: { createdAt: "desc" },
+                include: { order: true },
+              })
+            : null);
+
+        const finalOrder = shipment?.order || order || null;
+
+        if (!finalOrder) {
+          issueTypes.push("NOT_FOUND_INTERNAL_ORDER");
+        }
+
+        if (isPartialReturn) {
+          issueTypes.push("PARTIAL_RETURN");
+        }
+
+        const partialRecord = finalOrder
+          ? await (this.prisma as any).partialDeliveryRecord
+              .findFirst({
+                where: {
+                  OR: [
+                    { orderId: finalOrder.id },
+                    { orderCode: finalOrder.orderCode },
+                    { ghnTrackingCode: baseCode },
+                  ],
+                },
+                orderBy: { createdAt: "desc" },
+              })
+              .catch(() => null)
+          : null;
+
+        const systemCodAmount = Number((shipment as any)?.codAmount || 0);
+        const systemShippingFee = Number((shipment as any)?.shippingFee || 0);
+        const codAmount = systemCodAmount;
+        const serviceFee = systemShippingFee;
+        const totalReconcileAmount = codAmount - serviceFee;
+        const adjustedCod = Number(partialRecord?.adjustedCod || 0);
+        const originalCod = Number(partialRecord?.originalCod || 0);
+        const returnReceivedAt = partialRecord?.returnReceivedAt || null;
+        const returnReceived = Boolean(returnReceivedAt);
+
+        if ((isPartialReturn || Boolean(partialRecord)) && partialRecord && !returnReceived) {
+          issueTypes.push("PARTIAL_RETURN_NOT_RECEIVED");
+        }
+
+        const reconciliationStatus = this.getReconciliationStatus(issueTypes);
+
+        const savedRow = await this.prisma.ghnCodReconciliationRow.create({
+          data: {
+            batchId: batch.id,
+            orderId: finalOrder?.id || null,
+            orderCode: finalOrder?.orderCode || null,
+            shipmentId: shipment?.id || null,
+            ghnCode: shipment?.trackingCode || code,
+            customerOrderCode: finalOrder?.orderCode || code,
+            ghnStatus:
+              (shipment as any)?.shippingStatus ||
+              (shipment as any)?.partnerStatus ||
+              (shipment as any)?.status ||
+              "Nhập tay",
+            codAmount,
+            serviceFee,
+            totalReconcileAmount,
+            reconciliationStatus,
+            issues: issueTypes,
+            inputCode: code,
+            sourceType: "MANUAL_INPUT",
+            actionStatus: "DRAFT",
+            partialDeliveryRecordId: partialRecord?.id || null,
+            partialDeliveryAdjustedCod: adjustedCod || null,
+            partialReturnReceived: partialRecord ? returnReceived : null,
+          },
+        });
+
+        if (shipment?.id) {
+          await this.prisma.shipment.update({
+            where: { id: shipment.id },
+            data: {
+              codReconciliationStatus: reconciliationStatus,
+              codReconciledAt: new Date(),
+              codReconciliationBatchId: batch.id,
+              codReconciliationRowId: savedRow.id,
+              codReconciliationIssue: issueTypes.join(", "),
+              codReconciliationAmount: totalReconcileAmount,
+            } as any,
+          });
+        }
+
+        return {
+          rowNumber: index + 1,
+          reconciliationRowId: savedRow.id,
+          reconciliationStatus,
+          reconciledAt: savedRow.createdAt,
+          ghnOrderCode: shipment?.trackingCode || code,
+          customerOrderCode: finalOrder?.orderCode || code,
+          systemOrderCode: finalOrder?.orderCode || null,
+          internalOrderId: finalOrder?.id || null,
+          systemOrderStatus: finalOrder?.status || null,
+          storeName:
+            (finalOrder as any)?.branch?.name ||
+            (finalOrder as any)?.branchName ||
+            "Đối soát nhập tay",
+          recipientName: (finalOrder as any)?.customerName || null,
+          ghnStatus:
+            (shipment as any)?.shippingStatus ||
+            (shipment as any)?.partnerStatus ||
+            (shipment as any)?.status ||
+            "Nhập tay",
+          codAmount,
+          serviceFee,
+          totalReconcileAmount,
+          systemCodAmount,
+          systemShippingFee,
+          hasPrInFile: false,
+          partialDeliveryRecordId: partialRecord?.id || null,
+          partialDeliveryAdjustedCod: adjustedCod,
+          partialDeliveryOriginalCod: originalCod,
+          partialDeliveryMatched: Boolean(partialRecord),
+          partialReturnReceived: partialRecord ? returnReceived : null,
+          partialReturnReceivedAt: returnReceivedAt,
+          issueTypes,
+          inputCode: code,
+          sourceType: "MANUAL_INPUT",
+          actionStatus: "DRAFT",
+          savedAt: null,
+          confirmedAt: null,
+          paidAt: null,
+          paymentSourceId: null,
+          paymentAmount: 0,
+        };
+      }),
+    );
+
+    const matchedRows = enrichedRows.filter(
+      (r) =>
+        r.reconciliationStatus === "MATCHED" ||
+        r.reconciliationStatus === "MATCHED_BY_PARTIAL_DELIVERY",
+    ).length;
+    const mismatchRows = enrichedRows.length - matchedRows;
+    const totalCodAmount = enrichedRows.reduce(
+      (sum, row) => sum + Number(row.codAmount || 0),
+      0,
+    );
+    const totalFeeAmount = enrichedRows.reduce(
+      (sum, row) => sum + Number(row.serviceFee || 0),
+      0,
+    );
+    const totalNetAmount = enrichedRows.reduce(
+      (sum, row) => sum + Number(row.totalReconcileAmount || 0),
+      0,
+    );
+
+    await this.prisma.ghnCodReconciliationBatch.update({
+      where: { id: batch.id },
+      data: {
+        totalRows: enrichedRows.length,
+        matchedRows,
+        mismatchRows,
+        totalAmount: totalCodAmount,
+        transferFee: totalFeeAmount,
+        netAmount: totalNetAmount,
+      },
+    });
+
+    return {
+      batch: {
+        id: batch.id,
+        fileName: `Đối soát nhập tay ${codes.length} đơn`,
+        transferCode,
+        transferDate,
+        totalRows: enrichedRows.length,
+        matchedRows,
+        mismatchRows,
+        totalCodAmount,
+        totalFeeAmount,
+        totalNetAmount,
+        parserMode: "MANUAL_INPUT",
+        sourceType: "MANUAL_INPUT",
+        status: "DRAFT",
+        savedAt: null,
+        confirmedAt: null,
+        paidAt: null,
+      },
+      rows: enrichedRows,
+      summary: {
+        notFoundOrder: enrichedRows.filter((r) =>
+          r.issueTypes.includes("NOT_FOUND_INTERNAL_ORDER"),
+        ).length,
+        codMismatch: 0,
+        feeMismatch: 0,
+        partialReturn: enrichedRows.filter((r) =>
+          r.issueTypes.includes("PARTIAL_RETURN"),
+        ).length,
+        matchedByPartialDelivery: enrichedRows.filter((r) =>
+          r.issueTypes.includes("MATCHED_BY_PARTIAL_DELIVERY"),
+        ).length,
+        partialReturnNotReceived: enrichedRows.filter((r) =>
+          r.issueTypes.includes("PARTIAL_RETURN_NOT_RECEIVED"),
+        ).length,
+        noMoney: 0,
+      },
+    };
+  }
+
+  async saveBatch(batchId: string, body: any = {}) {
+    const rowIds = this.normalizeIdList(body?.rowIds);
+    const rows = await this.findReconciliationRows(batchId, rowIds, body?.scope);
+
+    if (!rows.length) {
+      throw new BadRequestException("Không có dòng đối soát để lưu.");
+    }
+
+    const now = new Date();
+    const actorId = this.getActorId(body);
+
+    await (this.prisma as any).ghnCodReconciliationRow.updateMany({
+      where: { id: { in: rows.map((row: any) => row.id) } },
+      data: {
+        actionStatus: "SAVED",
+        savedAt: now,
+        savedById: actorId,
+        actionNote: body?.note || null,
+      },
+    });
+
+    await (this.prisma as any).ghnCodReconciliationBatch.update({
+      where: { id: batchId },
+      data: {
+        status: "SAVED",
+        savedAt: now,
+        savedById: actorId,
+        note: body?.note || undefined,
+      },
+    });
+
+    await this.recalculateBatchTotals(batchId);
+
+    return {
+      ok: true,
+      batchId,
+      actionStatus: "SAVED",
+      savedAt: now,
+      affectedRows: rows.length,
+      affectedRowIds: rows.map((row: any) => row.id),
+      message: `Đã lưu ${rows.length} dòng đối soát GHN vào database.`,
+      note: body?.note || null,
+    };
+  }
+
+  async confirmBatch(batchId: string, body: any = {}) {
+    const rowIds = this.normalizeIdList(body?.rowIds);
+    const rows = await this.findReconciliationRows(batchId, rowIds, body?.scope);
+
+    if (!rows.length) {
+      throw new BadRequestException("Không có dòng đối soát để xác nhận.");
+    }
+
+    const now = new Date();
+    const actorId = this.getActorId(body);
+    const ids = rows.map((row: any) => row.id);
+
+    await (this.prisma as any).ghnCodReconciliationRow.updateMany({
+      where: { id: { in: ids } },
+      data: {
+        actionStatus: "CONFIRMED",
+        savedAt: now,
+        savedById: actorId,
+        confirmedAt: now,
+        confirmedById: actorId,
+        actionNote: body?.note || null,
+      },
+    });
+
+    await Promise.all(
+      rows
+        .filter((row: any) => row.shipmentId)
+        .map((row: any) =>
+          this.prisma.shipment.update({
+            where: { id: row.shipmentId },
+            data: {
+              codReconciliationStatus: row.reconciliationStatus || "MATCHED",
+              codReconciledAt: now,
+              codReconciliationBatchId: batchId,
+              codReconciliationRowId: row.id,
+              codReconciliationIssue: Array.isArray(row.issues) ? row.issues.join(", ") : String(row.issues || ""),
+              codReconciliationAmount: Number(row.totalReconcileAmount || 0),
+            } as any,
+          }),
+        ),
+    );
+
+    await (this.prisma as any).ghnCodReconciliationBatch.update({
+      where: { id: batchId },
+      data: {
+        status: "CONFIRMED",
+        savedAt: now,
+        savedById: actorId,
+        confirmedAt: now,
+        confirmedById: actorId,
+        note: body?.note || undefined,
+      },
+    });
+
+    await this.recalculateBatchTotals(batchId);
+
+    return {
+      ok: true,
+      batchId,
+      actionStatus: "CONFIRMED",
+      savedAt: now,
+      confirmedAt: now,
+      affectedRows: rows.length,
+      affectedRowIds: ids,
+      message: `Đã xác nhận ${rows.length} dòng đối soát GHN và lưu vào database.`,
+    };
+  }
+
+  async markBatchPaid(batchId: string, body: any = {}) {
+    const rowIds = this.normalizeIdList(body?.rowIds);
+    const rows = await this.findReconciliationRows(batchId, rowIds, body?.scope);
+
+    if (!rows.length) {
+      throw new BadRequestException("Không có dòng đối soát để thanh toán.");
+    }
+
+    const now = new Date();
+    const actorId = this.getActorId(body);
+    const ids = rows.map((row: any) => row.id);
+    const totalAmount = rows.reduce(
+      (sum: number, row: any) => sum + Number(row.totalReconcileAmount || 0),
+      0,
+    );
+
+    await Promise.all(
+      rows.map((row: any) =>
+        (this.prisma as any).ghnCodReconciliationRow.update({
+          where: { id: row.id },
+          data: {
+            actionStatus: "PAID",
+            savedAt: row.savedAt || now,
+            savedById: row.savedById || actorId,
+            confirmedAt: row.confirmedAt || now,
+            confirmedById: row.confirmedById || actorId,
+            paidAt: now,
+            paidById: actorId,
+            paymentSourceId: body?.paymentSourceId || row.paymentSourceId || null,
+            paymentAmount: Number(row.totalReconcileAmount || 0),
+            paymentNote: body?.paymentNote || body?.note || null,
+            actionNote: body?.note || null,
+          },
+        }),
+      ),
+    );
+
+    await Promise.all(
+      rows
+        .filter((row: any) => row.shipmentId)
+        .map((row: any) =>
+          this.prisma.shipment.update({
+            where: { id: row.shipmentId },
+            data: {
+              codReconciliationStatus: "PAID",
+              codReconciledAt: now,
+              codReconciliationBatchId: batchId,
+              codReconciliationRowId: row.id,
+              codReconciliationIssue: Array.isArray(row.issues) ? row.issues.join(", ") : String(row.issues || ""),
+              codReconciliationAmount: Number(row.totalReconcileAmount || 0),
+            } as any,
+          }),
+        ),
+    );
+
+    await (this.prisma as any).ghnCodReconciliationBatch.update({
+      where: { id: batchId },
+      data: {
+        status: "PAID",
+        savedAt: now,
+        savedById: actorId,
+        confirmedAt: now,
+        confirmedById: actorId,
+        paidAt: now,
+        paidById: actorId,
+        paymentSourceId: body?.paymentSourceId || null,
+        paymentAmount: totalAmount,
+        paymentNote: body?.paymentNote || body?.note || null,
+        note: body?.note || undefined,
+      },
+    });
+
+    await this.recalculateBatchTotals(batchId);
+
+    return {
+      ok: true,
+      batchId,
+      actionStatus: "PAID",
+      savedAt: now,
+      confirmedAt: now,
+      paidAt: now,
+      affectedRows: rows.length,
+      affectedRowIds: ids,
+      totalAmount,
+      message: `Đã ghi nhận thanh toán ${rows.length} dòng đối soát GHN và lưu vào database.`,
+    };
+  }
+
+
+  async deleteRows(rowIdsInput: any, batchId?: string) {
+    const rowIds = this.normalizeIdList(rowIdsInput);
+
+    if (!rowIds.length) {
+      throw new BadRequestException("Chọn ít nhất 1 dòng đối soát để xóa.");
+    }
+
+    const where: any = { id: { in: rowIds } };
+    if (batchId) where.batchId = batchId;
+
+    const rows = await (this.prisma as any).ghnCodReconciliationRow.findMany({
+      where,
+      select: {
+        id: true,
+        batchId: true,
+        shipmentId: true,
+      },
+    });
+
+    if (!rows.length) {
+      throw new BadRequestException("Không tìm thấy dòng đối soát cần xóa.");
+    }
+
+    const affectedBatchIds: string[] = Array.from(
+      new Set<string>(rows.map((row: any) => String(row.batchId || "")).filter(Boolean)),
+    );
+    const shipmentIds: string[] = Array.from(
+      new Set<string>(rows.map((row: any) => String(row.shipmentId || "")).filter(Boolean)),
+    );
+
+    if (shipmentIds.length) {
+      await (this.prisma as any).shipment
+        .updateMany({
+          where: { id: { in: shipmentIds } },
+          data: {
+            codReconciliationStatus: null,
+            codReconciledAt: null,
+            codReconciliationBatchId: null,
+            codReconciliationRowId: null,
+            codReconciliationIssue: null,
+            codReconciliationAmount: null,
+          },
+        })
+        .catch(() => null);
+    }
+
+    await (this.prisma as any).ghnCodReconciliationRow.deleteMany({
+      where: { id: { in: rows.map((row: any) => row.id) } },
+    });
+
+    await Promise.all(
+      affectedBatchIds.map((id) => this.recalculateBatchTotals(id)),
+    );
+
+    return {
+      ok: true,
+      deletedRows: rows.length,
+      deletedRowIds: rows.map((row: any) => row.id),
+      affectedBatchIds,
+      message: `Đã xóa ${rows.length} dòng đối soát GHN.`,
+    };
+  }
+
+  async deleteBatch(batchId: string) {
+    const id = String(batchId || "").trim();
+
+    if (!id) {
+      throw new BadRequestException("Thiếu mã phiên đối soát cần xóa.");
+    }
+
+    const batch = await (this.prisma as any).ghnCodReconciliationBatch.findUnique({
+      where: { id },
+    });
+
+    if (!batch) {
+      throw new BadRequestException("Không tìm thấy phiên đối soát cần xóa.");
+    }
+
+    const rows = await (this.prisma as any).ghnCodReconciliationRow.findMany({
+      where: { batchId: id },
+      select: {
+        id: true,
+        shipmentId: true,
+      },
+    });
+
+    const shipmentIds = Array.from(
+      new Set(rows.map((row: any) => String(row.shipmentId || "")).filter(Boolean)),
+    );
+
+    if (shipmentIds.length) {
+      await (this.prisma as any).shipment
+        .updateMany({
+          where: { id: { in: shipmentIds } },
+          data: {
+            codReconciliationStatus: null,
+            codReconciledAt: null,
+            codReconciliationBatchId: null,
+            codReconciliationRowId: null,
+            codReconciliationIssue: null,
+            codReconciliationAmount: null,
+          },
+        })
+        .catch(() => null);
+    }
+
+    await (this.prisma as any).ghnCodReconciliationRow.deleteMany({
+      where: { batchId: id },
+    });
+
+    await (this.prisma as any).ghnCodReconciliationBatch.delete({
+      where: { id },
+    });
+
+    return {
+      ok: true,
+      batchId: id,
+      deletedRows: rows.length,
+      message: `Đã xóa phiên đối soát GHN và ${rows.length} dòng liên quan.`,
+    };
+  }
+
+  private async findReconciliationRows(
+    batchId: string,
+    rowIds: string[] = [],
+    scope?: string,
+  ) {
+    const where: any = { batchId };
+
+    if (rowIds.length) {
+      where.id = { in: rowIds };
+    } else if (scope && scope !== "all") {
+      if (scope === "matched") {
+        where.reconciliationStatus = {
+          in: ["MATCHED", "MATCHED_BY_PARTIAL_DELIVERY"],
+        };
+      }
+
+      if (scope === "problem") {
+        where.reconciliationStatus = {
+          notIn: ["MATCHED", "MATCHED_BY_PARTIAL_DELIVERY"],
+        };
+      }
+
+      if (scope === "not_found") {
+        where.reconciliationStatus = "NOT_FOUND";
+      }
+    }
+
+    const rows = await (this.prisma as any).ghnCodReconciliationRow.findMany({
+      where,
+    });
+
+    return rows;
+  }
+
+  private async markRows(rows: any[], markers: string[]) {
+    await Promise.all(
+      rows.map((row: any) =>
+        (this.prisma as any).ghnCodReconciliationRow.update({
+          where: { id: row.id },
+          data: {
+            issues: this.mergeIssues(row.issues, markers),
+          },
+        }),
+      ),
+    );
+  }
+
+  private mergeIssues(existing: any, markers: string[]) {
+    const base = Array.isArray(existing)
+      ? existing.map((item) => String(item || "").trim()).filter(Boolean)
+      : String(existing || "")
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean);
+
+    return Array.from(new Set([...base, ...markers]));
+  }
+
+  private async recalculateBatchTotals(batchId: string) {
+    const rows = await (this.prisma as any).ghnCodReconciliationRow.findMany({
+      where: { batchId },
+    });
+
+    const matchedRows = rows.filter((row: any) => {
+      const status = String(row.reconciliationStatus || "");
+      return status === "MATCHED" || status === "MATCHED_BY_PARTIAL_DELIVERY";
+    }).length;
+
+    await (this.prisma as any).ghnCodReconciliationBatch
+      .update({
+        where: { id: batchId },
+        data: {
+          totalRows: rows.length,
+          matchedRows,
+          mismatchRows: rows.length - matchedRows,
+        },
+      })
+      .catch(() => null);
+  }
+
+
+  private getActorId(body: any) {
+    return String(body?.actorId || body?.userId || body?.staffId || "").trim() || null;
+  }
+
+  private normalizeIdList(input: any) {
+    if (!Array.isArray(input)) return [];
+    return Array.from(
+      new Set(input.map((item) => String(item || "").trim()).filter(Boolean)),
+    );
+  }
+
+  private extractManualCodes(input: any) {
+    const raw = Array.isArray(input) ? input.join("\n") : String(input || "");
+    const directMatches = raw.match(/(?:ORD-[A-Z0-9_-]+|SAPO[A-Z0-9_-]+|[A-Z]{2,}[A-Z0-9]{4,}(?:_PR)?)/gi) || [];
+    const tokenMatches = raw
+      .split(/[\s,;|]+/g)
+      .map((item) => item.replace(/["'`<>()[\]{}]/g, "").trim())
+      .filter(Boolean);
+
+    return Array.from(new Set([...directMatches, ...tokenMatches]))
+      .map((item) => item.trim())
+      .filter((item) => {
+        const value = item.toUpperCase();
+        if (value.length < 5) return false;
+        if (value.startsWith("ORD-")) return true;
+        if (value.startsWith("SAPO")) return true;
+        if (!/[0-9]/.test(value)) return false;
+        if (!/^[A-Z0-9_-]+$/.test(value)) return false;
+        return value.length >= 7;
+      })
+      .slice(0, 500);
+  }
+
   private getReconciliationStatus(issueTypes: string[]): ReconciliationStatus {
     if (issueTypes.includes("NOT_FOUND_INTERNAL_ORDER")) return "NOT_FOUND";
 
     const blockingIssues = issueTypes.filter(
-      (x) => x !== "MATCHED_BY_PARTIAL_DELIVERY"
+      (x) => x !== "MATCHED_BY_PARTIAL_DELIVERY",
     );
 
     if (
@@ -293,7 +1034,7 @@ export class GhnCodReconciliationService {
       for (let c = range.s.c; c <= range.e.c; c++) {
         const addr = XLSX.utils.encode_cell({ r, c });
         const cell = sheet[addr];
-        row.push(cell ? cell.v ?? "" : "");
+        row.push(cell ? (cell.v ?? "") : "");
       }
 
       matrix.push(row);
@@ -348,7 +1089,7 @@ export class GhnCodReconciliationService {
   }
 
   private findHeaderRowSmart(
-    matrix: any[][]
+    matrix: any[][],
   ): { headerRowIndex: number; headerMap: HeaderMap } | null {
     for (let rowIndex = 1; rowIndex < matrix.length; rowIndex++) {
       const parentRow = matrix[rowIndex - 1] || [];
@@ -359,12 +1100,12 @@ export class GhnCodReconciliationService {
 
       const findCurrent = (keywords: string[]) =>
         normalizedRow.findIndex((cell) =>
-          keywords.some((keyword) => cell.includes(keyword))
+          keywords.some((keyword) => cell.includes(keyword)),
         );
 
       const findParent = (keywords: string[]) =>
         normalizedParent.findIndex((cell) =>
-          keywords.some((keyword) => cell.includes(keyword))
+          keywords.some((keyword) => cell.includes(keyword)),
         );
 
       const ghnOrderCodeIndex = findCurrent(["ma don ghn"]);
@@ -409,7 +1150,10 @@ export class GhnCodReconciliationService {
     return null;
   }
 
-  private getFallbackHeader(): { headerRowIndex: number; headerMap: HeaderMap } {
+  private getFallbackHeader(): {
+    headerRowIndex: number;
+    headerMap: HeaderMap;
+  } {
     return {
       headerRowIndex: 20,
       headerMap: {

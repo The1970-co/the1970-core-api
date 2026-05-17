@@ -150,11 +150,15 @@ export class FinanceService {
     paymentSourceId?: string;
     status?: string;
     q?: string;
-  }) {
+  }, user?: any) {
     const { from, to, dateFrom, dateTo } = this.makeDateRange(
       params.dateFrom,
       params.dateTo
     );
+
+    const scopedBranchId = user
+      ? this.scopedBranchId(user, params.branchId)
+      : (params.branchId && params.branchId !== "ALL" ? params.branchId : null);
 
     const where: Prisma.PaymentWhereInput = {
       AND: [
@@ -178,9 +182,9 @@ export class FinanceService {
       }
     }
 
-    if (params.branchId && params.branchId !== "ALL") {
+    if (scopedBranchId) {
       where.order = {
-        branchId: params.branchId,
+        branchId: scopedBranchId,
       };
     }
 
@@ -246,8 +250,8 @@ export class FinanceService {
       voucherWhere.push(`v."paymentSourceId" = $${voucherValues.length}`);
     }
 
-    if (params.branchId && params.branchId !== "ALL") {
-      voucherValues.push(params.branchId);
+    if (scopedBranchId) {
+      voucherValues.push(scopedBranchId);
       voucherWhere.push(`v."branchId" = $${voucherValues.length}`);
     }
 
@@ -489,9 +493,28 @@ export class FinanceService {
       (a, b) => Math.abs(b.totalAmount || 0) - Math.abs(a.totalAmount || 0)
     );
 
+    // Một nguồn sự thật duy nhất cho bảng chốt tiền: dùng chính core daily-ledger.
+    // Frontend chỉ render ledgerRows/dailyRows, không tự merge live/snapshot nữa.
+    const ledgerBook = await this.getDailyLedger({
+      dateFrom,
+      dateTo,
+      branchId: scopedBranchId || params.branchId,
+      paymentSourceId: params.paymentSourceId,
+    }, user);
+
+    const ledgerRows = Array.isArray((ledgerBook as any)?.rows) ? (ledgerBook as any).rows : [];
+    const ledgerSummary = (ledgerBook as any)?.summary || {};
+    const cashClosingBalance = ledgerRows
+      .filter((row: any) => String(row.sourceType || row.paymentSourceType || "").toUpperCase() === "CASH" || /tien mat|tiền mặt|cash/i.test(String([row.paymentSourceName, row.paymentSourceCode].filter(Boolean).join(" "))))
+      .filter((row: any) => String(row.date || "").slice(0, 10) === dateTo)
+      .reduce((sum: number, row: any) => sum + this.toNumber(row.closingBalance), 0);
+
     return {
       dateFrom,
       dateTo,
+      ledger: ledgerBook,
+      ledgerRows,
+      dailyRows: ledgerRows,
       summary: {
         // totalPaid giữ tên cũ cho frontend cũ, nhưng hiểu là tiền đã thực thu.
         // Tiền CK của đơn COD đã thanh toán trước vẫn vào đây vì lấy từ bảng Payment, không lọc Order COMPLETED.
@@ -512,6 +535,12 @@ export class FinanceService {
           moneyPayments.length + mappedCashVouchers.length > 0
             ? Math.round(totalAll / (moneyPayments.length + mappedCashVouchers.length))
             : 0,
+        ledgerOpeningBalance: this.toNumber(ledgerSummary.openingBalance),
+        ledgerClosingBalance: this.toNumber(ledgerSummary.closingBalance),
+        ledgerTotalReceipt: this.toNumber(ledgerSummary.totalReceipt),
+        ledgerTotalPayment: this.toNumber(ledgerSummary.totalPayment),
+        ledgerNetAmount: this.toNumber(ledgerSummary.netAmount),
+        cashClosingBalance,
       },
       bySource: bySourceRows,
       payments: [
@@ -1567,11 +1596,25 @@ export class FinanceService {
 
 
   private dateKey(value: Date | string) {
-    const d = typeof value === "string" ? new Date(`${value}T00:00:00.000+07:00`) : value;
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    return `${y}-${m}-${day}`;
+    return this.vnDateKey(value);
+  }
+
+  private vnDateKey(value: Date | string | null | undefined) {
+    if (!value) return "";
+    if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value.slice(0, 10))) {
+      return value.slice(0, 10);
+    }
+
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value).slice(0, 10);
+
+    // Prisma/Postgres lưu timestamp theo UTC; cộng 7h rồi lấy UTC date để ra đúng ngày vận hành VN.
+    // Không dùng SQL AT TIME ZONE ở ledger vì timestamp without time zone dễ bị lệch ngày giữa local/online.
+    const vn = new Date(date.getTime() + 7 * 60 * 60 * 1000);
+    const y = vn.getUTCFullYear();
+    const m = String(vn.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(vn.getUTCDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
   }
 
   private addDays(dateText: string, days: number) {
@@ -1789,10 +1832,10 @@ export class FinanceService {
       paymentWhere.push(`p."paymentSourceId" = $${paymentValues.length}`);
     }
 
-    const paymentGroupsRaw = await this.prisma.$queryRawUnsafe<any[]>(
+    const paymentRowsRaw = await this.prisma.$queryRawUnsafe<any[]>(
       `
         SELECT
-          TO_CHAR((COALESCE(p."paidAt", p."createdAt") AT TIME ZONE 'Asia/Ho_Chi_Minh')::date, 'YYYY-MM-DD') AS "date",
+          COALESCE(p."paidAt", p."createdAt") AS "moneyAt",
           o."branchId" AS "branchId",
           COALESCE(b."name", o."branchId") AS "branchName",
           p."paymentSourceId" AS "paymentSourceId",
@@ -1800,29 +1843,58 @@ export class FinanceService {
           COALESCE(ps."code", p."paymentSourceId") AS "paymentSourceCode",
           COALESCE(ps."type", '') AS "paymentSourceType",
           COALESCE(ps."type", '') AS "sourceType",
-          COUNT(*)::int AS "paymentCount",
-          SUM(p."amount")::numeric AS "amount"
+          p."amount" AS "amount"
         FROM "Payment" p
         JOIN "Order" o ON o."id" = p."orderId"
         LEFT JOIN "Branch" b ON b."id" = o."branchId"
         LEFT JOIN "PaymentSource" ps ON ps."id" = p."paymentSourceId"
         WHERE ${paymentWhere.join(" AND ")}
-        GROUP BY 1,2,3,4,5,6,7,8
       `,
       ...paymentValues,
     );
 
+    const paymentGroupMap = new Map<string, any>();
+    for (const row of paymentRowsRaw) {
+      const date = this.vnDateKey(row.moneyAt);
+      if (!date) continue;
+      const key = [
+        date,
+        row.branchId || "NO_BRANCH",
+        row.paymentSourceId || "NO_SOURCE",
+        row.paymentSourceName || "",
+        row.paymentSourceCode || "",
+        row.paymentSourceType || row.sourceType || "",
+      ].join("|");
+
+      const current = paymentGroupMap.get(key) || {
+        date,
+        branchId: row.branchId,
+        branchName: row.branchName,
+        paymentSourceId: row.paymentSourceId,
+        paymentSourceName: row.paymentSourceName,
+        paymentSourceCode: row.paymentSourceCode,
+        paymentSourceType: row.paymentSourceType || row.sourceType,
+        sourceType: row.sourceType || row.paymentSourceType,
+        paymentCount: 0,
+        amount: 0,
+      };
+
+      current.paymentCount += 1;
+      current.amount += this.toNumber(row.amount);
+      paymentGroupMap.set(key, current);
+    }
+
+    const paymentGroupsRaw = Array.from(paymentGroupMap.values());
+
     const voucherValues: any[] = [calcFrom, calcTo];
-    const voucherWhere = [
+    const voucherWhere: string[] = [
       `COALESCE(v."confirmedAt", v."createdAt") BETWEEN $1 AND $2`,
       `COALESCE(v."status", 'DRAFT') = 'CONFIRMED'`,
-      `v."paymentSourceId" IS NOT NULL`,
-      `v."branchId" IS NOT NULL`,
     ];
 
     if (scopedBranchId) {
       voucherValues.push(scopedBranchId);
-      voucherWhere.push(`(v."branchId" = $${voucherValues.length} OR ps."branchId" = $${voucherValues.length})`);
+      voucherWhere.push(`v."branchId" = $${voucherValues.length}`);
     }
 
     if (paymentSourceFilter) {
@@ -1830,10 +1902,10 @@ export class FinanceService {
       voucherWhere.push(`v."paymentSourceId" = $${voucherValues.length}`);
     }
 
-    const voucherGroupsRaw = await this.prisma.$queryRawUnsafe<any[]>(
+    const voucherRowsRaw = await this.prisma.$queryRawUnsafe<any[]>(
       `
         SELECT
-          TO_CHAR((COALESCE(v."confirmedAt", v."createdAt") AT TIME ZONE 'Asia/Ho_Chi_Minh')::date, 'YYYY-MM-DD') AS "date",
+          COALESCE(v."confirmedAt", v."createdAt") AS "moneyAt",
           v."branchId" AS "branchId",
           COALESCE(b."name", v."branchId") AS "branchName",
           v."paymentSourceId" AS "paymentSourceId",
@@ -1842,8 +1914,7 @@ export class FinanceService {
           COALESCE(ps."type", '') AS "paymentSourceType",
           COALESCE(ps."type", '') AS "sourceType",
           ${this.cashVoucherTypeSql("v")} AS "type",
-          COUNT(*)::int AS "voucherCount",
-          SUM(v."amount")::numeric AS "amount"
+          v."amount" AS "amount"
         FROM "CashVoucher" v
         LEFT JOIN "Branch" b ON b."id" = v."branchId"
         LEFT JOIN "PaymentSource" ps ON ps."id" = v."paymentSourceId"
@@ -1860,10 +1931,45 @@ export class FinanceService {
                 AND p2."status" IN ('PAID', 'PARTIAL')
             )
           )
-        GROUP BY 1,2,3,4,5,6,7,8,9
       `,
       ...voucherValues,
     );
+
+    const voucherGroupMap = new Map<string, any>();
+    for (const row of voucherRowsRaw) {
+      const date = this.vnDateKey(row.moneyAt);
+      if (!date) continue;
+      const type = String(row.type || "RECEIPT").toUpperCase() === "PAYMENT" ? "PAYMENT" : "RECEIPT";
+      const key = [
+        date,
+        row.branchId || "NO_BRANCH",
+        row.paymentSourceId || "NO_SOURCE",
+        row.paymentSourceName || "",
+        row.paymentSourceCode || "",
+        row.paymentSourceType || row.sourceType || "",
+        type,
+      ].join("|");
+
+      const current = voucherGroupMap.get(key) || {
+        date,
+        branchId: row.branchId,
+        branchName: row.branchName,
+        paymentSourceId: row.paymentSourceId,
+        paymentSourceName: row.paymentSourceName,
+        paymentSourceCode: row.paymentSourceCode,
+        paymentSourceType: row.paymentSourceType || row.sourceType,
+        sourceType: row.sourceType || row.paymentSourceType,
+        type,
+        voucherCount: 0,
+        amount: 0,
+      };
+
+      current.voucherCount += 1;
+      current.amount += this.toNumber(row.amount);
+      voucherGroupMap.set(key, current);
+    }
+
+    const voucherGroupsRaw = Array.from(voucherGroupMap.values());
 
     const snapshotValues: any[] = [calcDateFrom, dateTo];
     const snapshotWhere = [`d."date" BETWEEN $1::date AND $2::date`];
@@ -2147,6 +2253,187 @@ export class FinanceService {
       dateTo,
       summary,
       rows,
+    };
+  }
+
+  async auditDailyLedger(params: {
+    dateFrom?: string;
+    dateTo?: string;
+    branchId?: string;
+    paymentSourceId?: string;
+  }, user?: any) {
+    const ledgerBook: any = await this.getDailyLedger(params, user);
+    const rows: any[] = Array.isArray(ledgerBook?.rows) ? ledgerBook.rows : [];
+    const summary = ledgerBook?.summary || {};
+    const issues: any[] = [];
+    const checkedAt = new Date().toISOString();
+
+    const roundMoney = (value: unknown) => Math.round(this.toNumber(value));
+    const diffMoney = (actual: unknown, expected: unknown) => roundMoney(actual) - roundMoney(expected);
+    const moneyEquals = (actual: unknown, expected: unknown) => diffMoney(actual, expected) === 0;
+    const rowLabel = (row: any) =>
+      [
+        row?.date,
+        row?.branchName || row?.branchId,
+        row?.paymentSourceName || row?.paymentSourceCode || row?.paymentSourceId,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+
+    const pushIssue = (row: any, field: string, expected: number, actual: number, message: string) => {
+      const diff = roundMoney(actual) - roundMoney(expected);
+      if (diff === 0) return;
+      issues.push({
+        level: "ERROR",
+        date: row?.date ? String(row.date).slice(0, 10) : undefined,
+        branchId: row?.branchId,
+        branchName: row?.branchName,
+        paymentSourceId: row?.paymentSourceId,
+        paymentSourceName: row?.paymentSourceName || row?.paymentSourceCode,
+        field,
+        expected: roundMoney(expected),
+        actual: roundMoney(actual),
+        diff,
+        message,
+      });
+    };
+
+    for (const row of rows) {
+      const posReceiptAmount = roundMoney(row.posReceiptAmount);
+      const manualReceiptAmount = roundMoney(row.manualReceiptAmount);
+      const manualPaymentAmount = roundMoney(row.manualPaymentAmount);
+      const totalReceipt = roundMoney(row.totalReceipt);
+      const totalPayment = roundMoney(row.totalPayment);
+      const openingBalance = roundMoney(row.openingBalance);
+      const netAmount = roundMoney(row.netAmount);
+      const closingBalance = roundMoney(row.closingBalance);
+      const countedAmount = row.countedAmount == null ? null : roundMoney(row.countedAmount);
+      const differenceAmount = row.differenceAmount == null ? null : roundMoney(row.differenceAmount);
+
+      pushIssue(
+        row,
+        "totalReceipt",
+        posReceiptAmount + manualReceiptAmount,
+        totalReceipt,
+        `${rowLabel(row)}: tổng thu phải bằng POS/PAYMENT + phiếu thu.`,
+      );
+      pushIssue(
+        row,
+        "totalPayment",
+        manualPaymentAmount,
+        totalPayment,
+        `${rowLabel(row)}: tổng chi phải bằng phiếu chi đã xác nhận.`,
+      );
+      pushIssue(
+        row,
+        "netAmount",
+        totalReceipt - totalPayment,
+        netAmount,
+        `${rowLabel(row)}: thu - chi đang không khớp.`,
+      );
+      pushIssue(
+        row,
+        "closingBalance",
+        openingBalance + netAmount,
+        closingBalance,
+        `${rowLabel(row)}: số dư cuối phải bằng số dư đầu + thu - chi.`,
+      );
+
+      if (countedAmount !== null && differenceAmount !== null) {
+        pushIssue(
+          row,
+          "differenceAmount",
+          countedAmount - closingBalance,
+          differenceAmount,
+          `${rowLabel(row)}: lệch phải bằng thực đếm - số dư cuối.`,
+        );
+      }
+    }
+
+    const sortedRows = [...rows].sort((a, b) => {
+      const dateDiff = String(a.date || "").localeCompare(String(b.date || ""));
+      if (dateDiff !== 0) return dateDiff;
+      return String(a.branchId || "").localeCompare(String(b.branchId || "")) ||
+        String(a.paymentSourceId || "").localeCompare(String(b.paymentSourceId || ""));
+    });
+    const previousByPair = new Map<string, any>();
+    for (const row of sortedRows) {
+      const pairKey = `${row.branchId || ""}|${row.paymentSourceId || ""}`;
+      const previous = previousByPair.get(pairKey);
+      if (previous && !moneyEquals(row.openingBalance, previous.closingBalance)) {
+        pushIssue(
+          row,
+          "openingBalance",
+          roundMoney(previous.closingBalance),
+          roundMoney(row.openingBalance),
+          `${rowLabel(row)}: số dư đầu phải bằng số dư cuối ngày trước của cùng chi nhánh + nguồn tiền.`,
+        );
+      }
+      previousByPair.set(pairKey, row);
+    }
+
+    const days = this.daysBetween(ledgerBook?.dateFrom, ledgerBook?.dateTo);
+    const firstDate = days[0];
+    const lastDate = days[days.length - 1];
+    const expectedSummary = rows.reduce(
+      (acc, row) => {
+        if (row.date === firstDate) acc.openingBalance += roundMoney(row.openingBalance);
+        acc.totalReceipt += roundMoney(row.totalReceipt);
+        acc.totalPayment += roundMoney(row.totalPayment);
+        acc.netAmount += roundMoney(row.netAmount);
+        if (row.date === lastDate) acc.closingBalance += roundMoney(row.closingBalance);
+        if (String(row.status || "").toUpperCase() === "LOCKED") acc.lockedRows += 1;
+        if (row.differenceAmount !== null && row.differenceAmount !== undefined && roundMoney(row.differenceAmount) !== 0) acc.diffRows += 1;
+        return acc;
+      },
+      {
+        openingBalance: 0,
+        totalReceipt: 0,
+        totalPayment: 0,
+        netAmount: 0,
+        closingBalance: 0,
+        lockedRows: 0,
+        diffRows: 0,
+        totalRows: rows.length,
+      },
+    );
+
+    const summaryChecks: Array<[string, number, number, string]> = [
+      ["summary.openingBalance", expectedSummary.openingBalance, roundMoney(summary.openingBalance), "Tổng số dư đầu kỳ không khớp chi tiết."],
+      ["summary.totalReceipt", expectedSummary.totalReceipt, roundMoney(summary.totalReceipt), "Tổng thu không khớp chi tiết."],
+      ["summary.totalPayment", expectedSummary.totalPayment, roundMoney(summary.totalPayment), "Tổng chi không khớp chi tiết."],
+      ["summary.netAmount", expectedSummary.netAmount, roundMoney(summary.netAmount), "Thu - chi tổng không khớp chi tiết."],
+      ["summary.closingBalance", expectedSummary.closingBalance, roundMoney(summary.closingBalance), "Số dư cuối tổng không khớp chi tiết."],
+      ["summary.totalRows", expectedSummary.totalRows, Number(summary.totalRows || 0), "Số dòng sổ không khớp chi tiết."],
+    ];
+
+    for (const [field, expected, actual, message] of summaryChecks) {
+      const diff = actual - expected;
+      if (diff === 0) continue;
+      issues.push({
+        level: "ERROR",
+        date: undefined,
+        field,
+        expected,
+        actual,
+        diff,
+        message,
+      });
+    }
+
+    return {
+      ok: issues.length === 0,
+      checkedAt,
+      range: {
+        fromDate: ledgerBook?.dateFrom || params.dateFrom,
+        toDate: ledgerBook?.dateTo || params.dateTo,
+      },
+      summary: {
+        checkedDays: days.length,
+        checkedRows: rows.length,
+        issueCount: issues.length,
+      },
+      issues,
     };
   }
 

@@ -106,6 +106,7 @@ export class FinanceController {
   @Get("daily")
   @RequirePermissions("finance.view")
   getDaily(
+    @Req() req: any,
     @Query("dateFrom") dateFrom?: string,
     @Query("dateTo") dateTo?: string,
     @Query("branchId") branchId?: string,
@@ -120,7 +121,25 @@ export class FinanceController {
       paymentSourceId,
       status,
       q,
-    });
+    }, req.user);
+  }
+
+
+  @Get("daily-ledger/audit")
+  @RequirePermissions("finance.view")
+  auditDailyLedger(
+    @Req() req: any,
+    @Query("dateFrom") dateFrom?: string,
+    @Query("dateTo") dateTo?: string,
+    @Query("branchId") branchId?: string,
+    @Query("paymentSourceId") paymentSourceId?: string
+  ) {
+    return this.financeService.auditDailyLedger({
+      dateFrom,
+      dateTo,
+      branchId,
+      paymentSourceId,
+    }, req.user);
   }
 
 
