@@ -539,7 +539,7 @@ model StaffBranchPermission {
 
   note      String?
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   staff  StaffUser @relation(fields: [staffId], references: [id], onDelete: Cascade)
   branch Branch    @relation(fields: [branchId], references: [id], onDelete: Cascade)
@@ -1014,19 +1014,14 @@ model GhnCodReconciliationBatch {
   netAmount    Int     @default(0)
   parserMode   String?
 
-  // EXCEL | MANUAL_INPUT. Dùng để phân biệt phiên upload file GHN và phiên paste mã đơn đối soát nhanh.
-  sourceType String  @default("EXCEL")
-  note       String?
-
-  // DRAFT | SAVED | CONFIRMED | PAID. Trạng thái thao tác kế toán trên cả phiên.
-  status String @default("DRAFT")
-
-  savedAt   DateTime?
-  savedById String?
-
-  confirmedAt   DateTime?
-  confirmedById String?
-
+  // Reconciliation workflow fields
+  sourceType      String    @default("EXCEL") // EXCEL | MANUAL_INPUT
+  note            String?
+  status          String    @default("DRAFT") // DRAFT | SAVED | CONFIRMED | PAID
+  savedAt         DateTime?
+  savedById       String?
+  confirmedAt     DateTime?
+  confirmedById   String?
   paidAt          DateTime?
   paidById        String?
   paymentSourceId String?
@@ -1034,14 +1029,14 @@ model GhnCodReconciliationBatch {
   paymentNote     String?
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   rows GhnCodReconciliationRow[]
 
-  @@index([status])
-  @@index([sourceType])
   @@index([transferCode])
   @@index([transferDate])
+  @@index([sourceType])
+  @@index([status])
   @@index([confirmedAt])
   @@index([paidAt])
   @@index([paymentSourceId])
@@ -1065,20 +1060,15 @@ model GhnCodReconciliationRow {
   partialDeliveryAdjustedCod Int?
   partialReturnReceived      Boolean?
 
-  // Mã người dùng paste vào ô đối soát nhanh. Với file Excel thì để null.
-  inputCode  String?
-  sourceType String  @default("EXCEL")
-
-  // DRAFT | SAVED | CONFIRMED | PAID. Trạng thái thao tác kế toán trên từng dòng.
-  actionStatus String  @default("DRAFT")
-  actionNote   String?
-
-  savedAt   DateTime?
-  savedById String?
-
-  confirmedAt   DateTime?
-  confirmedById String?
-
+  // Reconciliation workflow fields
+  inputCode       String?
+  sourceType      String    @default("EXCEL") // EXCEL | MANUAL_INPUT
+  actionStatus    String    @default("DRAFT") // DRAFT | SAVED | CONFIRMED | PAID
+  actionNote      String?
+  savedAt         DateTime?
+  savedById       String?
+  confirmedAt     DateTime?
+  confirmedById   String?
   paidAt          DateTime?
   paidById        String?
   paymentSourceId String?
@@ -1113,7 +1103,7 @@ model StocktakeSession {
   finishedAt  DateTime?
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   workers    StocktakeWorker[]
   scanEvents StocktakeScanEvent[]
@@ -1137,7 +1127,7 @@ model StocktakeWorker {
   finishedAt DateTime?
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   session    StocktakeSession     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   scanEvents StocktakeScanEvent[]
@@ -1183,7 +1173,7 @@ model WarehouseMap {
   isActive Boolean @default(true)
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   racks  WarehouseRack[]
   floors WarehouseFloor[]
@@ -1219,7 +1209,7 @@ model WarehouseRack {
   isActive Boolean @default(true)
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   map              WarehouseMap             @relation(fields: [mapId], references: [id], onDelete: Cascade)
   shelves          WarehouseShelf[]
@@ -1243,7 +1233,7 @@ model WarehouseShelf {
   note     String?
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   rack             WarehouseRack            @relation(fields: [rackId], references: [id], onDelete: Cascade)
   variantLocations ProductVariantLocation[]
@@ -1266,7 +1256,7 @@ model ProductVariantLocation {
   isActive Boolean @default(true)
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   variant   ProductVariant  @relation(fields: [variantId], references: [id], onDelete: Cascade)
   branch    Branch?         @relation(fields: [branchId], references: [id], onDelete: SetNull)
@@ -1319,7 +1309,7 @@ model WarehouseFloor {
   note  String?
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   map   WarehouseMap    @relation(fields: [mapId], references: [id], onDelete: Cascade)
   zones WarehouseZone[]
@@ -1343,7 +1333,7 @@ model WarehouseZone {
   note   String?
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   map   WarehouseMap   @relation(fields: [mapId], references: [id], onDelete: Cascade)
   floor WarehouseFloor @relation(fields: [floorId], references: [id], onDelete: Cascade)
@@ -1364,7 +1354,7 @@ model WarehouseDoor {
   width   Float  @default(180)
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   map   WarehouseMap   @relation(fields: [mapId], references: [id], onDelete: Cascade)
   floor WarehouseFloor @relation(fields: [floorId], references: [id], onDelete: Cascade)
@@ -1382,7 +1372,7 @@ model StocktakeSnapshot {
   snapshotQty Int    @default(0)
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   @@unique([sessionId, variantId, branchId])
   @@index([sessionId])
@@ -1558,7 +1548,7 @@ model DailyCashBalance {
   lockedByName String?
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   @@unique([date, branchId, paymentSourceId])
   @@index([date])
@@ -1603,7 +1593,7 @@ model Promotion {
   note     String?
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   products PromotionProduct[]
 
@@ -1653,7 +1643,7 @@ model StaffBranchRole {
   roleCode String
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   staff  StaffUser @relation(fields: [staffId], references: [id], onDelete: Cascade)
   branch Branch    @relation(fields: [branchId], references: [id], onDelete: Cascade)
@@ -1722,18 +1712,23 @@ model PayrollPeriod {
   branchName String?
   status     String   @default("DRAFT")
 
-  totalStaff               Int     @default(0)
-  totalOrders              Int     @default(0)
-  totalItems               Int     @default(0)
-  totalRevenue             Decimal @default(0) @db.Decimal(18, 2)
-  totalHourlyAmount        Decimal @default(0) @db.Decimal(18, 2)
-  totalTaggedProductAmount Decimal @default(0) @db.Decimal(18, 2)
-  totalMealAllowance       Decimal @default(0) @db.Decimal(18, 2)
-  totalInsuranceDeduction  Decimal @default(0) @db.Decimal(18, 2)
-  totalGhnCodBonus         Decimal @default(0) @db.Decimal(18, 2)
-  totalGross               Decimal @default(0) @db.Decimal(18, 2)
-  totalNet                 Decimal @default(0) @db.Decimal(18, 2)
-  totalPaid                Decimal @default(0) @db.Decimal(18, 2)
+  totalStaff               Int       @default(0)
+  totalOrders              Int       @default(0)
+  totalItems               Int       @default(0)
+  totalRevenue             Decimal   @default(0) @db.Decimal(18, 2)
+  totalHourlyAmount        Decimal   @default(0) @db.Decimal(18, 2)
+  totalTaggedProductAmount Decimal   @default(0) @db.Decimal(18, 2)
+  totalMealAllowance       Decimal   @default(0) @db.Decimal(18, 2)
+  totalInsuranceDeduction  Decimal   @default(0) @db.Decimal(18, 2)
+  totalGhnCodBonus         Decimal   @default(0) @db.Decimal(18, 2)
+  totalAttendanceWarnings  Int       @default(0)
+  totalLateMinutes         Int       @default(0)
+  totalEarlyMinutes        Int       @default(0)
+  attendanceImportedAt     DateTime?
+  attendanceImportFileName String?
+  totalGross               Decimal   @default(0) @db.Decimal(18, 2)
+  totalNet                 Decimal   @default(0) @db.Decimal(18, 2)
+  totalPaid                Decimal   @default(0) @db.Decimal(18, 2)
 
   lockedAt         DateTime?
   lockedById       String?
@@ -1746,9 +1741,10 @@ model PayrollPeriod {
   note             String?
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
-  lines PayrollLine[]
+  lines             PayrollLine[]
+  attendanceImports PayrollAttendanceImport[]
 
   @@index([fromDate])
   @@index([toDate])
@@ -1776,6 +1772,18 @@ model PayrollLine {
   successOrderCount    Int     @default(0)
   successItemQty       Int     @default(0)
   revenueAmount        Decimal @default(0) @db.Decimal(18, 2)
+
+  attendanceCode         String?
+  attendanceMatchedBy    String?
+  attendanceRawName      String?
+  attendanceSourceFile   String?
+  attendanceImportedAt   DateTime?
+  lateCount              Int       @default(0)
+  lateMinutes            Int       @default(0)
+  earlyCount             Int       @default(0)
+  earlyMinutes           Int       @default(0)
+  attendanceWarningLevel String?
+  attendanceWarningNote  String?
 
   normalHours           Decimal @default(0) @db.Decimal(10, 2)
   overtimeHours         Decimal @default(0) @db.Decimal(10, 2)
@@ -1824,7 +1832,7 @@ model PayrollLine {
   paymentVoucherId String?
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   period      PayrollPeriod       @relation(fields: [periodId], references: [id], onDelete: Cascade)
   orderLinks  PayrollOrderLink[]
@@ -1868,12 +1876,13 @@ model PayrollOrderLink {
 }
 
 model PayrollConfig {
-  id         String  @id @default(cuid())
-  staffId    String
-  staffCode  String?
-  staffName  String?
-  branchId   String?
-  branchName String?
+  id             String  @id @default(cuid())
+  staffId        String
+  staffCode      String?
+  staffName      String?
+  branchId       String?
+  branchName     String?
+  attendanceCode String?
 
   salaryType          String  @default("MONTHLY") // MONTHLY | DAILY | SHIFT | NONE
   baseSalary          Decimal @default(0) @db.Decimal(18, 2)
@@ -1922,12 +1931,54 @@ model PayrollConfig {
   isActive         Boolean   @default(true)
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   @@index([staffId])
   @@index([branchId])
   @@index([isActive])
   @@index([effectiveFrom])
+}
+
+model PayrollSettings {
+  id                   String   @id @default("default")
+  autoCreateEnabled    Boolean  @default(false)
+  autoCreateDay        Int      @default(1)
+  cycleMode            String   @default("MONTHLY") // MONTHLY | HALF_MONTH | CUSTOM
+  cycleStartDay        Int      @default(1)
+  cycleEndDay          Int?
+  autoCalculateMode    String   @default("MANUAL") // MANUAL | ON_CREATE | AFTER_ATTENDANCE_IMPORT
+  autoLockEnabled      Boolean  @default(false)
+  autoLockAfterDays    Int      @default(0)
+  reminderEnabled      Boolean  @default(true)
+  lateWarningCount     Int      @default(3)
+  lateWarningMinutes   Int      @default(60)
+  lateCriticalCount    Int      @default(5)
+  lateCriticalMinutes  Int      @default(120)
+  earlyWarningCount    Int      @default(3)
+  earlyWarningMinutes  Int      @default(60)
+  earlyCriticalCount   Int      @default(5)
+  earlyCriticalMinutes Int      @default(120)
+  updatedAt            DateTime @updatedAt
+}
+
+model PayrollAttendanceImport {
+  id                String   @id @default(cuid())
+  periodId          String
+  fileName          String?
+  totalRows         Int      @default(0)
+  matchedRows       Int      @default(0)
+  unmatchedRows     Int      @default(0)
+  totalHours        Decimal  @default(0) @db.Decimal(18, 2)
+  totalLateMinutes  Int      @default(0)
+  totalEarlyMinutes Int      @default(0)
+  createdById       String?
+  createdByName     String?
+  createdAt         DateTime @default(now())
+
+  period PayrollPeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
+
+  @@index([periodId])
+  @@index([createdAt])
 }
 
 model PayrollAdjustment {

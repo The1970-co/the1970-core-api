@@ -4,6 +4,7 @@ export class PayrollConfigDto {
   staffName?: string;
   branchId?: string;
   branchName?: string;
+  attendanceCode?: string;
 
   salaryType?: "MONTHLY" | "DAILY" | "SHIFT" | "NONE";
   baseSalary?: number;

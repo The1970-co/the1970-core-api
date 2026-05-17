@@ -6,6 +6,7 @@ import { CreatePayrollPeriodDto } from "./dto/create-payroll-period.dto";
 import { PayrollConfigDto } from "./dto/payroll-config.dto";
 import { PayrollAdjustmentDto } from "./dto/payroll-adjustment.dto";
 import { PayrollFilterDto } from "./dto/payroll-filter.dto";
+import { parseAttendanceWorkbook, ParsedAttendanceRow } from "./payroll-attendance-parser";
 
 type AnyUser = any;
 
@@ -124,6 +125,44 @@ export class PayrollService {
     };
   }
 
+
+  private attendanceWarning(row: { lateCount?: number; lateMinutes?: number; earlyCount?: number; earlyMinutes?: number }, settings: any) {
+    const lateCount = Number(row.lateCount || 0);
+    const lateMinutes = Number(row.lateMinutes || 0);
+    const earlyCount = Number(row.earlyCount || 0);
+    const earlyMinutes = Number(row.earlyMinutes || 0);
+    const critical =
+      lateCount >= Number(settings.lateCriticalCount || 5) ||
+      lateMinutes >= Number(settings.lateCriticalMinutes || 120) ||
+      earlyCount >= Number(settings.earlyCriticalCount || 5) ||
+      earlyMinutes >= Number(settings.earlyCriticalMinutes || 120);
+    const warning =
+      lateCount >= Number(settings.lateWarningCount || 3) ||
+      lateMinutes >= Number(settings.lateWarningMinutes || 60) ||
+      earlyCount >= Number(settings.earlyWarningCount || 3) ||
+      earlyMinutes >= Number(settings.earlyWarningMinutes || 60);
+
+    if (critical) {
+      return {
+        level: "CRITICAL",
+        note: `Đi muộn ${lateCount} lần/${lateMinutes} phút · về sớm ${earlyCount} lần/${earlyMinutes} phút`,
+      };
+    }
+    if (warning) {
+      return {
+        level: "WARNING",
+        note: `Cần nhắc: đi muộn ${lateCount} lần/${lateMinutes} phút · về sớm ${earlyCount} lần/${earlyMinutes} phút`,
+      };
+    }
+    return { level: "OK", note: "Chấm công ổn" };
+  }
+
+  private async getOrCreateSettings() {
+    const existing = await (this.prisma as any).payrollSettings.findUnique({ where: { id: "default" } }).catch(() => null);
+    if (existing) return existing;
+    return (this.prisma as any).payrollSettings.create({ data: { id: "default" } });
+  }
+
   private isOrderSuccessForPayroll(order: any) {
     const status = String(order?.status || "").toUpperCase();
     const paymentStatus = String(order?.paymentStatus || "").toUpperCase();
@@ -201,6 +240,82 @@ export class PayrollService {
       : "";
     const hasCod = String(order?.paymentStatus || "").toUpperCase() === "PENDING_COD" || sourceType.includes("COD") || this.toNumber(order?.shipment?.codAmount) > 0;
     return hasCod && (carrier.includes("GHN") || carrier.includes("GIAOHANGNHANH"));
+  }
+
+
+  async getDashboard(query: PayrollFilterDto, user?: AnyUser) {
+    const periods = await this.listPeriods({ ...(query || {}), pageSize: 100 } as any, user);
+    const rows = periods.rows || [];
+    const branchMap = new Map<string, any>();
+    let totalNet = 0;
+    let totalPaid = 0;
+    let totalStaff = 0;
+    let totalWarnings = 0;
+    let totalLateMinutes = 0;
+    let totalEarlyMinutes = 0;
+
+    for (const row of rows as any[]) {
+      totalNet += this.toNumber(row.totalNet);
+      totalPaid += this.toNumber(row.totalPaid);
+      totalStaff += Number(row.totalStaff || 0);
+      totalWarnings += Number(row.totalAttendanceWarnings || 0);
+      totalLateMinutes += Number(row.totalLateMinutes || 0);
+      totalEarlyMinutes += Number(row.totalEarlyMinutes || 0);
+      const key = row.branchId || "ALL";
+      if (!branchMap.has(key)) {
+        branchMap.set(key, {
+          branchId: row.branchId || null,
+          branchName: row.branchName || "Tất cả",
+          totalPeriods: 0,
+          totalStaff: 0,
+          totalNet: 0,
+          totalPaid: 0,
+          totalWarnings: 0,
+        });
+      }
+      const b = branchMap.get(key);
+      b.totalPeriods += 1;
+      b.totalStaff += Number(row.totalStaff || 0);
+      b.totalNet += this.toNumber(row.totalNet);
+      b.totalPaid += this.toNumber(row.totalPaid);
+      b.totalWarnings += Number(row.totalAttendanceWarnings || 0);
+    }
+
+    return {
+      summary: {
+        totalPeriods: rows.length,
+        totalNet,
+        totalPaid,
+        remaining: Math.max(0, totalNet - totalPaid),
+        totalStaff,
+        totalWarnings,
+        totalLateMinutes,
+        totalEarlyMinutes,
+      },
+      byBranch: Array.from(branchMap.values()).sort((a, b) => b.totalNet - a.totalNet),
+      latestPeriods: rows.slice(0, 5),
+    };
+  }
+
+  async getSettings(user?: AnyUser) {
+    this.scopedBranchId(user, null);
+    return this.getOrCreateSettings();
+  }
+
+  async updateSettings(body: any, user?: AnyUser) {
+    this.scopedBranchId(user, null);
+    const data: any = {};
+    const allowed = [
+      "autoCreateEnabled", "autoCreateDay", "cycleMode", "cycleStartDay", "cycleEndDay",
+      "autoCalculateMode", "autoLockEnabled", "autoLockAfterDays", "reminderEnabled",
+      "lateWarningCount", "lateWarningMinutes", "lateCriticalCount", "lateCriticalMinutes",
+      "earlyWarningCount", "earlyWarningMinutes", "earlyCriticalCount", "earlyCriticalMinutes",
+    ];
+    for (const key of allowed) {
+      if (body?.[key] !== undefined) data[key] = body[key];
+    }
+    await this.getOrCreateSettings();
+    return (this.prisma as any).payrollSettings.update({ where: { id: "default" }, data });
   }
 
   async listPeriods(query: PayrollFilterDto, user?: AnyUser) {
@@ -307,6 +422,7 @@ export class PayrollService {
         staffName: body.staffName || staff.name,
         branchId,
         branchName,
+        attendanceCode: (body as any).attendanceCode || null,
         salaryType: body.salaryType || "MONTHLY",
         baseSalary: this.money(body.baseSalary),
         dailyRate: this.money(body.dailyRate),
@@ -357,6 +473,7 @@ export class PayrollService {
         staffCode: body.staffCode ?? undefined,
         staffName: body.staffName ?? undefined,
         branchName: body.branchName ?? undefined,
+        attendanceCode: (body as any).attendanceCode ?? undefined,
         salaryType: body.salaryType ?? undefined,
         baseSalary: body.baseSalary === undefined ? undefined : this.money(body.baseSalary),
         dailyRate: body.dailyRate === undefined ? undefined : this.money(body.dailyRate),
@@ -419,6 +536,14 @@ export class PayrollService {
     const configs = await this.activeConfigsForPeriod(period);
     if (!configs.length) throw new BadRequestException("Chưa có cấu hình lương nào phù hợp kỳ này.");
 
+    // Giữ lại dữ liệu nhập tay theo kỳ lương (giờ thường, CT1, CT2, SP thưởng...)
+    // khi admin bấm Tính lại. Nếu không giữ, hệ thống sẽ xóa line cũ rồi tính về 0 giờ/SP.
+    const existingLines = await this.prisma.payrollLine.findMany({ where: { periodId: id } });
+    const existingInputByStaff = new Map<string, any>(
+      existingLines.map((line: any) => [String(line.staffId), line]),
+    );
+    const manualInputsByStaff = (body as any).manualInputsByStaff || (body as any).inputsByStaff || {};
+
     const staffIds = Array.from(new Set(configs.map((c) => c.staffId)));
     const staffRows = await this.prisma.staffUser.findMany({
       where: { id: { in: staffIds }, isActive: true },
@@ -438,6 +563,9 @@ export class PayrollService {
       let totalMealAllowance = 0;
       let totalInsuranceDeduction = 0;
       let totalGhnCodBonus = 0;
+      let totalAttendanceWarnings = 0;
+      let totalLateMinutes = 0;
+      let totalEarlyMinutes = 0;
       let totalGross = 0;
       let totalNet = 0;
 
@@ -447,7 +575,19 @@ export class PayrollService {
 
         const lineBranchId = period.branchId || config.branchId || staff.branchId || null;
         const lineBranchName = period.branchName || config.branchName || staff.branchName || null;
-        const workingDays = this.toNumber(body.workingDaysByStaff?.[config.staffId] ?? config.standardWorkingDays ?? 26);
+        const input = { ...(existingInputByStaff.get(config.staffId) || {}), ...((manualInputsByStaff || {})[config.staffId] || {}) };
+        const workingDays = this.toNumber(body.workingDaysByStaff?.[config.staffId] ?? input.workingDays ?? config.standardWorkingDays ?? 26);
+        const attendanceCode = input.attendanceCode || (config as any).attendanceCode || null;
+        const attendanceMatchedBy = input.attendanceMatchedBy || null;
+        const attendanceRawName = input.attendanceRawName || null;
+        const attendanceSourceFile = input.attendanceSourceFile || null;
+        const attendanceImportedAt = input.attendanceImportedAt || null;
+        const lateCount = Number(input.lateCount || 0);
+        const lateMinutes = Number(input.lateMinutes || 0);
+        const earlyCount = Number(input.earlyCount || 0);
+        const earlyMinutes = Number(input.earlyMinutes || 0);
+        const attendanceWarningLevel = input.attendanceWarningLevel || null;
+        const attendanceWarningNote = input.attendanceWarningNote || null;
         const standardDays = Math.max(1, this.toNumber(config.standardWorkingDays || 26));
         const salaryType = String(config.salaryType || "MONTHLY").toUpperCase();
         const baseSalary = this.toNumber(config.baseSalary);
@@ -471,16 +611,16 @@ export class PayrollService {
         const successItemQty = validOrders.reduce((sum: number, order: any) => sum + this.orderItemQty(order), 0);
         const revenueAmount = validOrders.reduce((sum: number, order: any) => sum + this.toNumber(order.finalAmount), 0);
 
-        const normalHours = 0;
-        const overtimeHours = 0;
-        const holidayHours = 0;
+        const normalHours = this.toNumber(input.normalHours || 0);
+        const overtimeHours = this.toNumber(input.overtimeHours || 0);
+        const holidayHours = this.toNumber(input.holidayHours || 0);
         const overtimeRate = this.toNumber((config as any).overtimeRate || 1);
         const holidayRate = this.toNumber((config as any).holidayRate || 2);
         const hourlyRate = this.toNumber((config as any).hourlyRate || 0);
         const convertedWorkingHours = normalHours + overtimeHours * overtimeRate + holidayHours * holidayRate;
         const hourlyAmount = (config as any).hourlyEnabled ? convertedWorkingHours * hourlyRate : 0;
 
-        const paidLeaveDays = 0;
+        const paidLeaveDays = this.toNumber(input.paidLeaveDays || 0);
         const paidLeaveHoursPerDay = this.toNumber((config as any).paidLeaveHoursPerDay || (config as any).standardHoursPerDay || 9.5);
         const paidLeaveAmount = (config as any).paidLeaveEnabled ? paidLeaveDays * paidLeaveHoursPerDay * hourlyRate : 0;
 
@@ -490,7 +630,7 @@ export class PayrollService {
           : 0;
 
         const insuranceDeduction = this.toNumber((config as any).insuranceDeductionAmount || 0);
-        const taggedProductQty = 0;
+        const taggedProductQty = Number(input.taggedProductQty || 0);
         const taggedProductRate = this.toNumber((config as any).taggedProductRate || 0);
         const taggedProductAmount = (config as any).taggedProductEnabled ? taggedProductQty * taggedProductRate : 0;
         const ghnCodOrderCount = (config as any).ghnCodBonusEnabled ? validOrders.filter((order: any) => this.isGhnCodOrder(order)).length : 0;
@@ -538,6 +678,17 @@ export class PayrollService {
             successOrderCount,
             successItemQty,
             revenueAmount: this.money(revenueAmount),
+            attendanceCode,
+            attendanceMatchedBy,
+            attendanceRawName,
+            attendanceSourceFile,
+            attendanceImportedAt,
+            lateCount,
+            lateMinutes,
+            earlyCount,
+            earlyMinutes,
+            attendanceWarningLevel,
+            attendanceWarningNote,
             normalHours: this.decimal2(normalHours),
             overtimeHours: this.decimal2(overtimeHours),
             overtimeRate: this.decimal2(overtimeRate),
@@ -610,6 +761,9 @@ export class PayrollService {
         totalMealAllowance += mealAllowanceAmount;
         totalInsuranceDeduction += insuranceDeduction;
         totalGhnCodBonus += ghnCodBonusAmount;
+        if (["WARNING", "CRITICAL"].includes(String(attendanceWarningLevel || "").toUpperCase())) totalAttendanceWarnings += 1;
+        totalLateMinutes += lateMinutes;
+        totalEarlyMinutes += earlyMinutes;
         totalGross += totals.grossPay;
         totalNet += totals.netPay;
       }
@@ -627,6 +781,9 @@ export class PayrollService {
           totalMealAllowance: this.money(totalMealAllowance),
           totalInsuranceDeduction: this.money(totalInsuranceDeduction),
           totalGhnCodBonus: this.money(totalGhnCodBonus),
+          totalAttendanceWarnings,
+          totalLateMinutes,
+          totalEarlyMinutes,
           totalGross: this.money(totalGross),
           totalNet: this.money(totalNet),
           totalPaid: this.money(0),
@@ -635,6 +792,189 @@ export class PayrollService {
     }, { maxWait: 10000, timeout: 60000 });
 
     return this.getPeriod(id, user);
+  }
+
+
+  private normalizeMatchText(value: unknown) {
+    return String(value || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  }
+
+  private async buildAttendancePreviewRows(period: any, parsedRows: ParsedAttendanceRow[], fileName?: string) {
+    const settings = await this.getOrCreateSettings();
+    const configs = await this.activeConfigsForPeriod(period);
+    const staffIds = Array.from(new Set(configs.map((c) => c.staffId)));
+    const staffRows = await this.prisma.staffUser.findMany({
+      where: { id: { in: staffIds } },
+      select: { id: true, code: true, name: true, branchId: true, branchName: true, isActive: true },
+    });
+
+    const staffById = new Map(staffRows.map((s) => [s.id, s]));
+    const configByStaff = new Map(configs.map((c: any) => [c.staffId, c]));
+    const byAttendanceCode = new Map<string, any>();
+    const byStaffCode = new Map<string, any>();
+    const byName = new Map<string, any>();
+
+    for (const config of configs as any[]) {
+      const staff = staffById.get(config.staffId);
+      if (!staff) continue;
+      if (config.attendanceCode) byAttendanceCode.set(String(config.attendanceCode).trim(), { staff, config, matchedBy: "ATTENDANCE_CODE" });
+      if (staff.code) byStaffCode.set(String(staff.code).trim(), { staff, config, matchedBy: "STAFF_CODE" });
+      const normalizedName = this.normalizeMatchText(staff.name || config.staffName);
+      if (normalizedName) byName.set(normalizedName, { staff, config, matchedBy: "NAME" });
+    }
+
+    return parsedRows.map((row) => {
+      let match = byAttendanceCode.get(String(row.attendanceCode || "").trim()) || byStaffCode.get(String(row.attendanceCode || "").trim()) || null;
+      if (!match) {
+        const rowName = this.normalizeMatchText(row.staffName);
+        match = byName.get(rowName) || null;
+        if (!match && rowName) {
+          const candidate = Array.from(byName.entries()).find(([key]) => key && (key.includes(rowName) || rowName.includes(key)));
+          if (candidate) match = candidate[1];
+        }
+      }
+
+      const warning = this.attendanceWarning(row, settings);
+      return {
+        ...row,
+        fileName,
+        matched: Boolean(match?.staff?.id),
+        matchedBy: match?.matchedBy || null,
+        staffId: match?.staff?.id || null,
+        staffCode: match?.staff?.code || null,
+        systemStaffName: match?.staff?.name || null,
+        systemBranchId: match?.staff?.branchId || match?.config?.branchId || null,
+        systemBranchName: match?.staff?.branchName || match?.config?.branchName || null,
+        hourlyRate: match?.config ? this.toNumber(match.config.hourlyRate) : 0,
+        overtimeRate: match?.config ? this.toNumber(match.config.overtimeRate || 1) : 1,
+        holidayRate: match?.config ? this.toNumber(match.config.holidayRate || 2) : 2,
+        taggedProductRate: match?.config ? this.toNumber(match.config.taggedProductRate || 0) : 0,
+        warningLevel: warning.level,
+        warningNote: warning.note,
+      };
+    });
+  }
+
+  async previewAttendanceImport(id: string, fileBuffer: Buffer, fileName: string, user?: AnyUser) {
+    const period = await this.prisma.payrollPeriod.findUnique({ where: { id } });
+    if (!period) throw new NotFoundException("Không tìm thấy kỳ lương.");
+    this.scopedBranchId(user, period.branchId || null);
+    const parsed = parseAttendanceWorkbook(fileBuffer);
+    const rows = await this.buildAttendancePreviewRows(period, parsed, fileName);
+    const summary = rows.reduce((acc: any, row: any) => {
+      acc.totalRows += 1;
+      if (row.matched) acc.matchedRows += 1;
+      else acc.unmatchedRows += 1;
+      acc.totalHours += this.toNumber(row.normalHours) + this.toNumber(row.overtimeHours) + this.toNumber(row.holidayHours);
+      acc.totalLateMinutes += Number(row.lateMinutes || 0);
+      acc.totalEarlyMinutes += Number(row.earlyMinutes || 0);
+      if (["WARNING", "CRITICAL"].includes(String(row.warningLevel || "").toUpperCase())) acc.warningRows += 1;
+      return acc;
+    }, { totalRows: 0, matchedRows: 0, unmatchedRows: 0, totalHours: 0, totalLateMinutes: 0, totalEarlyMinutes: 0, warningRows: 0 });
+    return { fileName, summary, rows };
+  }
+
+  async applyAttendanceImport(id: string, body: { rows?: any[]; fileName?: string; autoCalculate?: boolean } = {}, user?: AnyUser) {
+    const period = await this.prisma.payrollPeriod.findUnique({ where: { id }, include: { lines: true } });
+    if (!period) throw new NotFoundException("Không tìm thấy kỳ lương.");
+    this.scopedBranchId(user, period.branchId || null);
+    const status = String(period.status || "").toUpperCase();
+    if (["LOCKED", "PAID", "PARTIALLY_PAID"].includes(status)) throw new BadRequestException("Kỳ lương đã khóa hoặc đã trả, không thể import chấm công.");
+
+    if (!period.lines?.length) {
+      await this.calculatePeriod(id, { force: true }, user);
+    }
+
+    const rows = Array.isArray(body.rows) ? body.rows : [];
+    if (!rows.length) throw new BadRequestException("Không có dữ liệu chấm công để áp dụng.");
+    const settings = await this.getOrCreateSettings();
+    const latest = await this.prisma.payrollPeriod.findUnique({ where: { id }, include: { lines: true } });
+    const lineByStaff = new Map((latest?.lines || []).map((line: any) => [String(line.staffId), line]));
+    const now = new Date();
+    let matchedRows = 0;
+    let unmatchedRows = 0;
+    let totalHours = 0;
+    let totalLateMinutes = 0;
+    let totalEarlyMinutes = 0;
+
+    for (const row of rows) {
+      const staffId = String(row.staffId || "").trim();
+      const line = staffId ? lineByStaff.get(staffId) : null;
+      if (!line) { unmatchedRows += 1; continue; }
+      const warning = this.attendanceWarning(row, settings);
+      matchedRows += 1;
+      totalHours += this.toNumber(row.normalHours) + this.toNumber(row.overtimeHours) + this.toNumber(row.holidayHours);
+      totalLateMinutes += Number(row.lateMinutes || 0);
+      totalEarlyMinutes += Number(row.earlyMinutes || 0);
+      await this.updateLine(line.id, {
+        normalHours: row.normalHours,
+        overtimeHours: row.overtimeHours,
+        overtimeRate: row.overtimeRate || line.overtimeRate || 1,
+        holidayHours: row.holidayHours,
+        holidayRate: row.holidayRate || line.holidayRate || 2,
+        hourlyRate: row.hourlyRate || line.hourlyRate || 0,
+        attendanceCode: row.attendanceCode,
+        attendanceMatchedBy: row.matchedBy || null,
+        attendanceRawName: row.staffName || row.attendanceRawName || null,
+        attendanceSourceFile: body.fileName || row.fileName || null,
+        attendanceImportedAt: now,
+        lateCount: row.lateCount || 0,
+        lateMinutes: row.lateMinutes || 0,
+        earlyCount: row.earlyCount || 0,
+        earlyMinutes: row.earlyMinutes || 0,
+        attendanceWarningLevel: warning.level,
+        attendanceWarningNote: warning.note,
+      }, user);
+    }
+
+    await (this.prisma as any).payrollAttendanceImport.create({
+      data: {
+        periodId: id,
+        fileName: body.fileName || null,
+        totalRows: rows.length,
+        matchedRows,
+        unmatchedRows,
+        totalHours: this.decimal2(totalHours),
+        totalLateMinutes,
+        totalEarlyMinutes,
+        createdById: user?.id || null,
+        createdByName: this.userName(user),
+      },
+    }).catch(() => null);
+
+    await this.prisma.payrollPeriod.update({
+      where: { id },
+      data: {
+        attendanceImportedAt: now,
+        attendanceImportFileName: body.fileName || null,
+      } as any,
+    }).catch(() => null);
+
+    if (body.autoCalculate) await this.calculatePeriod(id, { force: true }, user);
+    return this.getPeriod(id, user);
+  }
+
+  async exportPeriodCsv(id: string, user?: AnyUser) {
+    const period = await this.getPeriod(id, user) as any;
+    const header = [
+      "Nhân viên", "Chi nhánh", "Giờ thường", "CT1", "CT2", "Giờ quy đổi", "Lương giờ",
+      "Số SP", "Giá/SP", "Lương SP", "Ăn trưa", "Bảo hiểm", "Hoa hồng", "Thưởng", "Phụ cấp", "Tạm ứng", "Khấu trừ", "Đi muộn", "Về sớm", "Cảnh báo", "Thực nhận",
+    ];
+    const lines = [header.join(",")];
+    for (const line of period.lines || []) {
+      lines.push([
+        line.staffName, line.branchName, line.normalHours, line.overtimeHours, line.holidayHours, line.convertedWorkingHours, line.hourlyAmount,
+        line.taggedProductQty, line.taggedProductRate, line.taggedProductAmount, line.mealAllowanceAmount, line.insuranceDeduction,
+        line.commissionTotal, line.bonus, line.allowance, line.advance, line.deduction,
+        `${line.lateCount || 0}/${line.lateMinutes || 0}`, `${line.earlyCount || 0}/${line.earlyMinutes || 0}`, line.attendanceWarningLevel || "", line.netPay,
+      ].map((v: any) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(","));
+    }
+    return "\ufeff" + lines.join("\n");
   }
 
   async lockPeriod(id: string, user?: AnyUser) {
@@ -720,6 +1060,17 @@ export class PayrollService {
       allowance: body.allowance === undefined ? line.allowance : this.money(body.allowance),
       advance: body.advance === undefined ? line.advance : this.money(body.advance),
       deduction: body.deduction === undefined ? line.deduction : this.money(body.deduction),
+      attendanceCode: body.attendanceCode === undefined ? (line as any).attendanceCode : body.attendanceCode || null,
+      attendanceMatchedBy: body.attendanceMatchedBy === undefined ? (line as any).attendanceMatchedBy : body.attendanceMatchedBy || null,
+      attendanceRawName: body.attendanceRawName === undefined ? (line as any).attendanceRawName : body.attendanceRawName || null,
+      attendanceSourceFile: body.attendanceSourceFile === undefined ? (line as any).attendanceSourceFile : body.attendanceSourceFile || null,
+      attendanceImportedAt: body.attendanceImportedAt === undefined ? (line as any).attendanceImportedAt : body.attendanceImportedAt ? this.asDate(body.attendanceImportedAt) : null,
+      lateCount: body.lateCount === undefined ? (line as any).lateCount : Number(body.lateCount || 0),
+      lateMinutes: body.lateMinutes === undefined ? (line as any).lateMinutes : Number(body.lateMinutes || 0),
+      earlyCount: body.earlyCount === undefined ? (line as any).earlyCount : Number(body.earlyCount || 0),
+      earlyMinutes: body.earlyMinutes === undefined ? (line as any).earlyMinutes : Number(body.earlyMinutes || 0),
+      attendanceWarningLevel: body.attendanceWarningLevel === undefined ? (line as any).attendanceWarningLevel : body.attendanceWarningLevel || null,
+      attendanceWarningNote: body.attendanceWarningNote === undefined ? (line as any).attendanceWarningNote : body.attendanceWarningNote || null,
       note: body.note ?? line.note,
     };
 
@@ -781,6 +1132,9 @@ export class PayrollService {
     const totalMealAllowance = lines.reduce((s, l: any) => s + this.toNumber(l.mealAllowanceAmount), 0);
     const totalInsuranceDeduction = lines.reduce((s, l: any) => s + this.toNumber(l.insuranceDeduction), 0);
     const totalGhnCodBonus = lines.reduce((s, l: any) => s + this.toNumber(l.ghnCodBonusAmount), 0);
+    const totalAttendanceWarnings = lines.filter((l: any) => ["WARNING", "CRITICAL"].includes(String(l.attendanceWarningLevel || "").toUpperCase())).length;
+    const totalLateMinutes = lines.reduce((s, l: any) => s + Number(l.lateMinutes || 0), 0);
+    const totalEarlyMinutes = lines.reduce((s, l: any) => s + Number(l.earlyMinutes || 0), 0);
     const totalGross = lines.reduce((s, l) => s + this.toNumber(l.grossPay), 0);
     const totalNet = lines.reduce((s, l) => s + this.toNumber(l.netPay), 0);
     const totalPaid = lines.reduce((s, l) => s + this.toNumber(l.paidAmount), 0);

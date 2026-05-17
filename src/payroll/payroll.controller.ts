@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from "@nestjs/common";
-import type { Request } from "express";
+import { Body, Controller, Get, Param, Patch, Post, Query, Req, Res, UploadedFile, UseGuards, UseInterceptors } from "@nestjs/common";
+import type { Request, Response } from "express";
+import { FileInterceptor } from "@nestjs/platform-express";
 import { JwtGuard } from "../auth/jwt.guard";
 import { PermissionGuard } from "../auth/guards/permission.guard";
 import { RequirePermissions } from "../auth/decorators/require-permissions.decorator";
@@ -16,6 +17,24 @@ import { PayrollFilterDto } from "./dto/payroll-filter.dto";
 @Controller("payroll")
 export class PayrollController {
   constructor(private readonly payrollService: PayrollService) {}
+
+  @Get("dashboard")
+  @RequirePermissions("payroll.view")
+  getDashboard(@Query() query: PayrollFilterDto, @Req() req: Request & { user?: any }) {
+    return this.payrollService.getDashboard(query || {}, req.user);
+  }
+
+  @Get("settings")
+  @RequirePermissions("payroll.config")
+  getSettings(@Req() req: Request & { user?: any }) {
+    return this.payrollService.getSettings(req.user);
+  }
+
+  @Patch("settings")
+  @RequirePermissions("payroll.config")
+  updateSettings(@Body() body: any, @Req() req: Request & { user?: any }) {
+    return this.payrollService.updateSettings(body || {}, req.user);
+  }
 
   @Get("periods")
   @RequirePermissions("payroll.view")
@@ -35,10 +54,33 @@ export class PayrollController {
     return this.payrollService.getPeriod(id, req.user);
   }
 
+  @Get("periods/:id/export")
+  @RequirePermissions("payroll.export")
+  async exportPeriod(@Param("id") id: string, @Req() req: Request & { user?: any }, @Res() res: Response) {
+    const csv = await this.payrollService.exportPeriodCsv(id, req.user);
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="payroll-${id}.csv"`);
+    return res.send(csv);
+  }
+
   @Post("periods/:id/calculate")
   @RequirePermissions("payroll.calculate")
   calculate(@Param("id") id: string, @Body() body: any, @Req() req: Request & { user?: any }) {
     return this.payrollService.calculatePeriod(id, body || {}, req.user);
+  }
+
+  @Post("periods/:id/import-attendance/preview")
+  @RequirePermissions("payroll.edit")
+  @UseInterceptors(FileInterceptor("file"))
+  previewAttendance(@Param("id") id: string, @UploadedFile() file: any, @Req() req: Request & { user?: any }) {
+    if (!file?.buffer) throw new Error("Thiếu file chấm công.");
+    return this.payrollService.previewAttendanceImport(id, file.buffer, file.originalname || "attendance.xlsm", req.user);
+  }
+
+  @Post("periods/:id/import-attendance/apply")
+  @RequirePermissions("payroll.edit")
+  applyAttendance(@Param("id") id: string, @Body() body: any, @Req() req: Request & { user?: any }) {
+    return this.payrollService.applyAttendanceImport(id, body || {}, req.user);
   }
 
   @Post("periods/:id/lock")
