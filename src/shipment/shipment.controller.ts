@@ -57,6 +57,12 @@ export class ShipmentController {
     return this.shipmentService.getShipmentTimelineByOrder(orderId);
   }
 
+
+  @Get("war-room/delivery-revenue")
+  getWarRoomDeliveryRevenue(@Query() query: any) {
+    return this.shipmentService.getWarRoomDeliveryRevenue(query);
+  }
+
   @Get(":id")
   getShipmentDetail(@Param("id") id: string) {
     return this.shipmentService.getShipmentDetail(id);

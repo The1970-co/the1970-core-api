@@ -1,9 +1,9 @@
 import { Module } from "@nestjs/common";
-import { StaffController, StaffMeController } from "./staff.controller";
+import { StaffController, StaffMeController, StaffTransferController } from "./staff.controller";
 import { StaffService } from "./staff.service";
 
 @Module({
-  controllers: [StaffController, StaffMeController],
+  controllers: [StaffController, StaffMeController, StaffTransferController],
   providers: [StaffService],
   exports: [StaffService],
 })

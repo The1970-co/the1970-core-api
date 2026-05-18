@@ -9,10 +9,12 @@ export class DashboardController {
   @Get('overview')
   overview(
     @Query('branchId') branchId?: string,
-    @Query('range') range?: any,
+    @Query('range') range?: string,
     @Query('fromDate') fromDate?: string,
     @Query('toDate') toDate?: string,
   ) {
-    return this.dashboardService.getOverview(branchId, range, fromDate, toDate);
+    // range/fromDate/toDate giữ lại để tương thích với frontend dashboard.
+    // DashboardService hiện vẫn build bảng tháng, ads được map đủ 30 ngày gần nhất.
+    return this.dashboardService.getOverview(branchId);
   }
 }

@@ -176,3 +176,33 @@ export class StaffMeController {
     );
   }
 }
+
+// StaffTransferController added
+
+
+@UseGuards(JwtGuard, RolesGuard)
+@Roles("owner", "admin", "branch-manager")
+@Controller("staff-transfer")
+export class StaffTransferController {
+  constructor(private readonly staffService: StaffService) {}
+
+  @Get("options")
+  async getTransferOptions() {
+    return this.staffService.getStaffTransferOptions();
+  }
+
+  @Patch("transfer-branch")
+  async transferStaffBranch(
+    @Body()
+    body: {
+      staffId: string;
+      fromBranchId?: string;
+      toBranchId: string;
+      roleCode?: string;
+      reason?: string;
+    },
+  ) {
+    return this.staffService.transferStaffBranch(body);
+  }
+}
+

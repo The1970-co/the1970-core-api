@@ -342,12 +342,25 @@ export class GhnCodReconciliationService {
         const issueTypes: string[] = [];
         const isPartialReturn = /_PR$/i.test(code);
         const baseCode = isPartialReturn ? code.replace(/_PR$/i, "") : code;
+        const lookupCodes = this.buildManualLookupCodes(code);
+        const baseLookupCodes = this.buildManualLookupCodes(baseCode);
+        const allLookupCodes = Array.from(new Set([...lookupCodes, ...baseLookupCodes]));
 
+        // Manual input có thể là:
+        // - mã đơn nội bộ đầy đủ: ORD-1778296737260
+        // - phần số của mã đơn: 1778296737260
+        // - mã vận đơn GHN: GYW...
+        // - mã SAPO/customerOrderCode trong file GHN
+        // Vì vậy không chỉ tìm trackingCode exact, mà phải thử cả ORD-{số}, orderCode, customerOrderCode và suffix orderCode.
         const shipmentByTracking = await this.prisma.shipment.findFirst({
           where: {
-            OR: [{ trackingCode: code }, { trackingCode: baseCode }],
+            OR: allLookupCodes.flatMap((value) => [
+              { trackingCode: value },
+              { trackingCode: { contains: value, mode: "insensitive" as any } },
+            ]),
           },
           include: { order: true },
+          orderBy: { createdAt: "desc" },
         });
 
         const order =
@@ -355,8 +368,13 @@ export class GhnCodReconciliationService {
           (await (this.prisma as any).order
             .findFirst({
               where: {
-                OR: [{ orderCode: code }, { orderCode: baseCode }],
+                OR: [
+                  ...allLookupCodes.map((value) => ({ orderCode: value })),
+                  ...allLookupCodes.map((value) => ({ orderCode: { endsWith: value, mode: "insensitive" } })),
+                  ...allLookupCodes.map((value) => ({ source: { contains: value, mode: "insensitive" } })),
+                ],
               },
+              orderBy: { createdAt: "desc" },
             })
             .catch(() => null));
 
@@ -644,7 +662,7 @@ export class GhnCodReconciliationService {
           this.prisma.shipment.update({
             where: { id: row.shipmentId },
             data: {
-              codReconciliationStatus: row.reconciliationStatus || "MATCHED",
+              codReconciliationStatus: "CONFIRMED",
               codReconciledAt: now,
               codReconciliationBatchId: batchId,
               codReconciliationRowId: row.id,
@@ -652,6 +670,22 @@ export class GhnCodReconciliationService {
               codReconciliationAmount: Number(row.totalReconcileAmount || 0),
             } as any,
           }),
+        ),
+    );
+
+    // Xác nhận đối soát GHN nghĩa là COD đã được đối chiếu với phiên GHN và
+    // không còn là "Chờ đối soát COD" trên danh sách đơn. Vì vậy cập nhật
+    // trạng thái thanh toán đơn + ghi nhận payment COD_GHN ngay ở bước xác nhận.
+    await Promise.all(
+      rows
+        .filter((row: any) => row.orderId)
+        .map((row: any) =>
+          this.syncOrderCodPaymentAfterReconciliation(
+            row,
+            now,
+            body?.paymentSourceId || null,
+            body?.paymentNote || body?.note || "Xác nhận đối soát COD GHN",
+          ),
         ),
     );
 
@@ -677,7 +711,7 @@ export class GhnCodReconciliationService {
       confirmedAt: now,
       affectedRows: rows.length,
       affectedRowIds: ids,
-      message: `Đã xác nhận ${rows.length} dòng đối soát GHN và lưu vào database.`,
+      message: `Đã xác nhận ${rows.length} dòng đối soát GHN, cập nhật đơn hàng sang đã thanh toán và lưu vào database.`,
     };
   }
 
@@ -733,6 +767,14 @@ export class GhnCodReconciliationService {
               codReconciliationAmount: Number(row.totalReconcileAmount || 0),
             } as any,
           }),
+        ),
+    );
+
+    await Promise.all(
+      rows
+        .filter((row: any) => row.orderId)
+        .map((row: any) =>
+          this.syncOrderCodPaymentAfterReconciliation(row, now, body?.paymentSourceId || null, body?.paymentNote || body?.note || null),
         ),
     );
 
@@ -892,6 +934,74 @@ export class GhnCodReconciliationService {
     };
   }
 
+  private async syncOrderCodPaymentAfterReconciliation(
+    row: any,
+    paidAt: Date,
+    paymentSourceId?: string | null,
+    note?: string | null,
+  ) {
+    const orderId = String(row?.orderId || "").trim();
+
+    if (!orderId) return;
+
+    const paymentAmount = Number(row?.codAmount || row?.systemCodAmount || 0);
+    const transactionRef = `COD_GHN_RECONCILIATION:${row.id}`;
+    const legacyTransactionRef = `GHN_COD_RECONCILIATION:${row.id}`;
+
+    await (this.prisma as any).order
+      .update({
+        where: { id: orderId },
+        data: {
+          paymentStatus: "PAID",
+        },
+      })
+      .catch(() => null);
+
+    if (paymentAmount <= 0) return;
+
+    const existedPayment = await (this.prisma as any).payment
+      .findFirst({
+        where: {
+          orderId,
+          OR: [{ transactionRef }, { transactionRef: legacyTransactionRef }],
+        },
+        select: { id: true },
+      })
+      .catch(() => null);
+
+    if (existedPayment?.id) {
+      await (this.prisma as any).payment
+        .update({
+          where: { id: existedPayment.id },
+          data: {
+            amount: paymentAmount,
+            method: "COD_GHN",
+            status: "PAID",
+            paidAt,
+            paymentSourceId: paymentSourceId || undefined,
+            note: note || "Thanh toán COD GHN từ đối soát",
+          },
+        })
+        .catch(() => null);
+      return;
+    }
+
+    await (this.prisma as any).payment
+      .create({
+        data: {
+          orderId,
+          method: "COD_GHN",
+          amount: paymentAmount,
+          status: "PAID",
+          paidAt,
+          transactionRef,
+          paymentSourceId: paymentSourceId || undefined,
+          note: note || "Thanh toán COD GHN từ đối soát",
+        },
+      })
+      .catch(() => null);
+  }
+
   private async findReconciliationRows(
     batchId: string,
     rowIds: string[] = [],
@@ -982,6 +1092,32 @@ export class GhnCodReconciliationService {
     return Array.from(
       new Set(input.map((item) => String(item || "").trim()).filter(Boolean)),
     );
+  }
+
+  private buildManualLookupCodes(input: any) {
+    const raw = String(input || "").trim();
+    if (!raw) return [];
+
+    const cleaned = raw.replace(/["'`<>()[\]{}]/g, "").trim();
+    const upper = cleaned.toUpperCase();
+    const noPr = upper.replace(/_PR$/i, "");
+    const values = new Set<string>();
+
+    [cleaned, upper, noPr].forEach((value) => {
+      if (value) values.add(value);
+    });
+
+    // User thường paste mỗi phần số của mã ORD-..., ví dụ 1778296737260.
+    // Bổ sung ORD-{number} để bắt đúng đơn nội bộ và lấy được shipment/COD/phí.
+    if (/^\d{8,}$/.test(noPr)) {
+      values.add(`ORD-${noPr}`);
+    }
+
+    // Nếu paste SAPO..._819497 thì vẫn giữ raw nhưng thêm phần trước dấu phân cách để dò rộng.
+    const parts = noPr.split(/[_\-]/g).filter((x) => x.length >= 6);
+    parts.forEach((part) => values.add(part));
+
+    return Array.from(values).filter(Boolean);
   }
 
   private extractManualCodes(input: any) {

@@ -1027,7 +1027,15 @@ export class ShipmentService {
         });
       });
 
-      const orderSyncData = this.buildAhamoveOrderSyncData(shippingStatus);
+      const orderForSync = await this.prisma.order.findUnique({
+        where: { id: shipment.orderId },
+        select: { paymentStatus: true },
+      });
+      const orderSyncData = this.buildAhamoveOrderSyncData(shippingStatus, {
+        codAmount: Number(shipment.codAmount || 0),
+        paymentStatus: orderForSync?.paymentStatus,
+        codReconciliationStatus: (shipment as any).codReconciliationStatus,
+      });
       if (Object.keys(orderSyncData).length > 0) {
         await this.prisma.order.update({
           where: { id: shipment.orderId },
@@ -1159,7 +1167,15 @@ export class ShipmentService {
         source: force ? "ghn_manual_refresh" : "ghn_polling",
       });
 
-      const orderSyncData = this.buildCarrierOrderSyncData(normalized.shippingStatus);
+      const orderForSync = await tx.order.findUnique({
+        where: { id: shipment.orderId },
+        select: { paymentStatus: true },
+      });
+      const orderSyncData = this.buildCarrierOrderSyncData(normalized.shippingStatus, {
+        codAmount: normalized.codAmount ?? shipment.codAmount,
+        paymentStatus: orderForSync?.paymentStatus,
+        codReconciliationStatus: (shipment as any).codReconciliationStatus,
+      });
       if (Object.keys(orderSyncData).length > 0) {
         await tx.order.update({
           where: { id: shipment.orderId },
@@ -1510,10 +1526,16 @@ export class ShipmentService {
 
       await tx.order.update({
         where: { id: orderId },
-        data: {
-          fulfillmentStatus: "PROCESSING",
-          status: "SHIPPED",
-        },
+        data: this.withPendingCodPayment(
+          {
+            fulfillmentStatus: "PROCESSING",
+            status: "SHIPPED",
+          },
+          {
+            codAmount,
+            paymentStatus: order.paymentStatus,
+          }
+        ) as any,
       });
 
       return {
@@ -1796,18 +1818,69 @@ export class ShipmentService {
     return value;
   }
 
-  private buildAhamoveOrderSyncData(shippingStatus: string) {
-    return this.buildCarrierOrderSyncData(shippingStatus);
+  private buildAhamoveOrderSyncData(
+    shippingStatus: string,
+    context?: {
+      codAmount?: number | string | null;
+      paymentStatus?: string | null;
+      codReconciliationStatus?: string | null;
+    }
+  ) {
+    return this.buildCarrierOrderSyncData(shippingStatus, context);
   }
 
-  private buildCarrierOrderSyncData(shippingStatus: string) {
+  private shouldMarkPendingCod(context?: {
+    codAmount?: number | string | null;
+    paymentStatus?: string | null;
+    codReconciliationStatus?: string | null;
+  }) {
+    const codAmount = Number(context?.codAmount || 0);
+    const paymentStatus = String(context?.paymentStatus || "").toUpperCase();
+    const reconciliationStatus = String(context?.codReconciliationStatus || "").toUpperCase();
+
+    if (codAmount <= 0) return false;
+    if (paymentStatus === "PAID" || paymentStatus === "REFUNDED") return false;
+    if (reconciliationStatus === "MATCHED" || reconciliationStatus === "MATCHED_BY_PARTIAL_DELIVERY") {
+      return false;
+    }
+
+    return true;
+  }
+
+  private withPendingCodPayment<T extends Record<string, any>>(
+    data: T,
+    context?: {
+      codAmount?: number | string | null;
+      paymentStatus?: string | null;
+      codReconciliationStatus?: string | null;
+    }
+  ) {
+    if (!this.shouldMarkPendingCod(context)) return data;
+
+    return {
+      ...data,
+      paymentStatus: "PENDING_COD",
+    };
+  }
+
+  private buildCarrierOrderSyncData(
+    shippingStatus: string,
+    context?: {
+      codAmount?: number | string | null;
+      paymentStatus?: string | null;
+      codReconciliationStatus?: string | null;
+    }
+  ) {
     const status = String(shippingStatus || "").toUpperCase();
 
     if (status === "DELIVERED") {
-      return {
-        status: "COMPLETED",
-        fulfillmentStatus: "FULFILLED",
-      };
+      return this.withPendingCodPayment(
+        {
+          status: "COMPLETED",
+          fulfillmentStatus: "FULFILLED",
+        },
+        context
+      );
     }
 
     if (status === "CANCELLED") {
@@ -1829,13 +1902,16 @@ export class ShipmentService {
       status === "DELIVERING" ||
       status === "IN_TRANSIT"
     ) {
-      return {
-        status: "SHIPPED",
-        fulfillmentStatus: "PROCESSING",
-      };
+      return this.withPendingCodPayment(
+        {
+          status: "SHIPPED",
+          fulfillmentStatus: "PROCESSING",
+        },
+        context
+      );
     }
 
-    return {};
+    return this.withPendingCodPayment({}, context);
   }
 
   private mapTimelineEventsForTracking(events: any[]) {
@@ -3272,10 +3348,16 @@ export class ShipmentService {
 
       await tx.order.update({
         where: { id: orderId },
-        data: {
-          fulfillmentStatus: "PROCESSING",
-          status: "SHIPPED",
-        },
+        data: this.withPendingCodPayment(
+          {
+            fulfillmentStatus: "PROCESSING",
+            status: "SHIPPED",
+          },
+          {
+            codAmount,
+            paymentStatus: order.paymentStatus,
+          }
+        ) as any,
       });
 
       return {
@@ -3333,7 +3415,15 @@ export class ShipmentService {
       source: "manual_refresh",
     });
 
-    const orderSyncData = this.buildCarrierOrderSyncData(shippingStatus);
+    const orderForSync = await this.prisma.order.findUnique({
+      where: { id: shipment.orderId },
+      select: { paymentStatus: true },
+    });
+    const orderSyncData = this.buildCarrierOrderSyncData(shippingStatus, {
+      codAmount: Number(shipment.codAmount || 0),
+      paymentStatus: orderForSync?.paymentStatus,
+      codReconciliationStatus: (shipment as any).codReconciliationStatus,
+    });
     if (Object.keys(orderSyncData).length > 0) {
       await this.prisma.order.update({
         where: { id: shipment.orderId },
@@ -3784,10 +3874,16 @@ export class ShipmentService {
 
       await tx.order.update({
         where: { id: orderId },
-        data: {
-          fulfillmentStatus: "PROCESSING",
-          status: "SHIPPED",
-        },
+        data: this.withPendingCodPayment(
+          {
+            fulfillmentStatus: "PROCESSING",
+            status: "SHIPPED",
+          },
+          {
+            codAmount,
+            paymentStatus: order.paymentStatus,
+          }
+        ) as any,
       });
 
       return {
@@ -3848,7 +3944,15 @@ export class ShipmentService {
       ...driver,
     });
 
-    const orderSyncData = this.buildAhamoveOrderSyncData(shippingStatus);
+    const orderForSync = await this.prisma.order.findUnique({
+      where: { id: shipment.orderId },
+      select: { paymentStatus: true },
+    });
+    const orderSyncData = this.buildAhamoveOrderSyncData(shippingStatus, {
+      codAmount: Number(shipment.codAmount || 0),
+      paymentStatus: orderForSync?.paymentStatus,
+      codReconciliationStatus: (shipment as any).codReconciliationStatus,
+    });
     if (Object.keys(orderSyncData).length > 0) {
       await this.prisma.order.update({
         where: { id: shipment.orderId },
@@ -4003,7 +4107,15 @@ export class ShipmentService {
       ...driver,
     });
 
-    const nextOrderData: any = this.buildAhamoveOrderSyncData(shippingStatus);
+    const orderForSync = await this.prisma.order.findUnique({
+      where: { id: shipment.orderId },
+      select: { paymentStatus: true },
+    });
+    const nextOrderData: any = this.buildAhamoveOrderSyncData(shippingStatus, {
+      codAmount: Number(shipment.codAmount || 0),
+      paymentStatus: orderForSync?.paymentStatus,
+      codReconciliationStatus: (shipment as any).codReconciliationStatus,
+    });
 
     if (Object.keys(nextOrderData).length > 0) {
       await this.prisma.order.update({
@@ -4082,6 +4194,209 @@ export class ShipmentService {
       where: { orderId },
     });
   }
+
+  async getWarRoomDeliveryRevenue(query: any = {}) {
+    const range = String(query?.range || "today");
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const ymd = (date: Date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+
+    const defaultRange = (() => {
+      const today = new Date(now);
+      if (range === "yesterday") {
+        const d = new Date(now);
+        d.setDate(d.getDate() - 1);
+        return { fromDate: ymd(d), toDate: ymd(d) };
+      }
+      if (range === "7d" || range === "10d" || range === "30d") {
+        const days = range === "7d" ? 7 : range === "10d" ? 10 : 30;
+        const from = new Date(now);
+        from.setDate(from.getDate() - (days - 1));
+        return { fromDate: ymd(from), toDate: ymd(today) };
+      }
+      return { fromDate: ymd(today), toDate: ymd(today) };
+    })();
+
+    const fromDate = String(query?.fromDate || query?.dateFrom || query?.startDate || defaultRange.fromDate);
+    const toDate = String(query?.toDate || query?.dateTo || query?.endDate || defaultRange.toDate);
+    const start = new Date(`${fromDate}T00:00:00.000`);
+    const end = new Date(`${toDate}T23:59:59.999`);
+    const safeStart = Number.isNaN(start.getTime()) ? new Date(`${defaultRange.fromDate}T00:00:00.000`) : start;
+    const safeEnd = Number.isNaN(end.getTime()) ? new Date(`${defaultRange.toDate}T23:59:59.999`) : end;
+
+    const normalize = (input?: string | null) =>
+      String(input || "")
+        .trim()
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/đ/g, "d")
+        .replace(/Đ/g, "D")
+        .replace(/[\s_-]+/g, " ");
+
+    const isPosOrder = (order: any) => {
+      const raw = normalize(`${order?.salesChannel || ""} ${order?.channel || ""} ${order?.orderType || ""} ${order?.paymentMethod || ""}`);
+      return raw.includes("pos") || raw.includes("ban le") || raw.includes("retail") || raw.includes("quay");
+    };
+
+    const isFacebookOrder = (order: any) => {
+      const raw = normalize(`${order?.salesChannel || ""} ${order?.channel || ""} ${order?.orderType || ""} ${order?.paymentMethod || ""} ${order?.paymentType || ""}`);
+      return raw.includes("facebook") || raw.includes("fb") || raw.includes("meta") || raw.includes("cod");
+    };
+
+    const amountOf = (order: any) => Number(order?.finalAmount ?? order?.totalAmount ?? order?.amount ?? 0) || 0;
+    const isPaid = (order: any) => {
+      const raw = normalize(`${order?.paymentStatus || ""} ${order?.status || ""} ${order?.fulfillmentStatus || ""}`);
+      return raw.includes("paid") || raw.includes("completed") || raw.includes("fulfilled") || raw.includes("da thanh toan");
+    };
+
+    const shippingSignal = (order: any) =>
+      normalize([
+        order?.status,
+        order?.fulfillmentStatus,
+        order?.deliveryStatus,
+        order?.shippingStatus,
+        order?.shipmentStatus,
+        order?.trackingStatus,
+        order?.carrierStatus,
+        order?.carrierStatusName,
+        order?.ghnStatus,
+        order?.codStatus,
+        order?.shipment?.shippingStatus,
+        order?.shipment?.partnerStatus,
+        order?.shipment?.ahamoveStatus,
+        order?.shipment?.ahamoveSubStatus,
+      ].filter(Boolean).join(" "));
+
+    const isDelivered = (order: any) => {
+      const raw = shippingSignal(order);
+      if (
+        raw.includes("khong thanh cong") ||
+        raw.includes("that bai") ||
+        raw.includes("failed") ||
+        raw.includes("fail") ||
+        raw.includes("return") ||
+        raw.includes("hoan")
+      ) {
+        return false;
+      }
+      return (
+        raw.includes("delivered") ||
+        raw.includes("delivery success") ||
+        raw.includes("completed") ||
+        raw.includes("complete") ||
+        raw.includes("success") ||
+        raw.includes("giao hang thanh cong") ||
+        raw.includes("giao thanh cong") ||
+        raw.includes("da giao") ||
+        raw.includes("fulfilled")
+      );
+    };
+
+    const inRange = (value?: Date | string | null) => {
+      if (!value) return false;
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return false;
+      return d >= safeStart && d <= safeEnd;
+    };
+
+    const orderSelectInclude: any = {
+      shipment: true,
+      items: true,
+    };
+
+    const orderClient = (this.prisma as any).order;
+    const timelineClient = (this.prisma as any).shipmentTimelineEvent;
+
+    const createdOrders = await orderClient.findMany({
+      where: { createdAt: { gte: safeStart, lte: safeEnd } },
+      include: orderSelectInclude,
+      orderBy: { createdAt: "desc" },
+      take: 5000,
+    });
+
+    const deliveredEvents = timelineClient?.findMany
+      ? await timelineClient.findMany({
+          where: { status: "DELIVERED", eventTime: { gte: safeStart, lte: safeEnd } },
+          select: { orderId: true, shipmentId: true, eventTime: true },
+          orderBy: { eventTime: "desc" },
+          take: 5000,
+        })
+      : [];
+
+    const deliveredOrderIds = Array.from(
+      new Set(
+        (deliveredEvents || [])
+          .map((event: any) => event?.orderId)
+          .filter((id: any) => typeof id === "string" && id.length > 0)
+      )
+    );
+
+    const recentStart = new Date(safeStart);
+    recentStart.setDate(recentStart.getDate() - 90);
+
+    const recentOrders = await orderClient.findMany({
+      where: { createdAt: { gte: recentStart, lte: safeEnd } },
+      include: orderSelectInclude,
+      orderBy: { createdAt: "desc" },
+      take: 8000,
+    });
+
+    const successOrders = recentOrders.filter((order: any) => {
+      const id = String(order?.id || "");
+      if (deliveredOrderIds.includes(id)) return true;
+      if (!isDelivered(order)) return false;
+      return inRange(order?.shipment?.updatedAt) || inRange(order?.updatedAt) || inRange(order?.createdAt);
+    });
+
+    const posCreated = createdOrders.filter(isPosOrder);
+    const facebookCreated = createdOrders.filter((order: any) => !isPosOrder(order) && isFacebookOrder(order));
+    const otherCreated = createdOrders.filter((order: any) => !isPosOrder(order) && !isFacebookOrder(order));
+
+    const posSuccess = createdOrders.filter((order: any) => isPosOrder(order) && (isPaid(order) || isDelivered(order)));
+    const facebookDelivered = successOrders.filter((order: any) => !isPosOrder(order) && isFacebookOrder(order) && isDelivered(order));
+    const otherDelivered = successOrders.filter((order: any) => !isPosOrder(order) && !isFacebookOrder(order) && isDelivered(order));
+
+    const sumAmount = (orders: any[]) => orders.reduce((sum, order) => sum + amountOf(order), 0);
+
+    const normalizeOrder = (order: any) => ({
+      ...order,
+      shippingStatus: order?.shipment?.shippingStatus || order?.shippingStatus || null,
+      shipmentStatus: order?.shipment?.shippingStatus || order?.shipmentStatus || null,
+      carrierStatus: order?.shipment?.partnerStatus || order?.carrierStatus || null,
+      carrierStatusName: order?.shipment?.partnerStatus || order?.carrierStatusName || null,
+      ahamoveStatus: order?.shipment?.ahamoveStatus || null,
+      ahamoveSubStatus: order?.shipment?.ahamoveSubStatus || null,
+    });
+
+    return {
+      range,
+      fromDate: ymd(safeStart),
+      toDate: ymd(safeEnd),
+      generatedAt: new Date().toISOString(),
+      orderCreated: {
+        total: createdOrders.length,
+        amount: sumAmount(createdOrders),
+        pos: { orders: posCreated.length, amount: sumAmount(posCreated) },
+        facebook: { orders: facebookCreated.length, amount: sumAmount(facebookCreated) },
+        other: { orders: otherCreated.length, amount: sumAmount(otherCreated) },
+      },
+      revenueSuccess: {
+        totalOrders: posSuccess.length + facebookDelivered.length + otherDelivered.length,
+        totalAmount: sumAmount(posSuccess) + sumAmount(facebookDelivered) + sumAmount(otherDelivered),
+        pos: { orders: posSuccess.length, amount: sumAmount(posSuccess) },
+        facebookDelivered: { orders: facebookDelivered.length, amount: sumAmount(facebookDelivered) },
+        otherDelivered: { orders: otherDelivered.length, amount: sumAmount(otherDelivered) },
+      },
+      createdOrders: createdOrders.map(normalizeOrder),
+      successOrders: [...posSuccess, ...facebookDelivered, ...otherDelivered].map(normalizeOrder),
+      deliverySource: {
+        deliveredTimelineEvents: deliveredEvents?.length || 0,
+        note: "POS thành công lấy từ đơn POS đã paid/completed. Facebook giao thành công lấy từ shipment DELIVERED/timeline DELIVERED; không lấy SHIPPED làm thành công.",
+      },
+    };
+  }
+
 
   async track(dto: TrackShipmentDto) {
     return this.ghnClient.getOrderDetail(dto.orderCode, dto.clientOrderCode);

@@ -12,6 +12,20 @@ type MetaAdsInsightRow = {
   clicks?: string;
 };
 
+type MetaGraphListResponse<T> = {
+  data?: T[];
+  paging?: {
+    next?: string;
+  };
+  error?: {
+    message?: string;
+    type?: string;
+    code?: number;
+    error_subcode?: number;
+    fbtrace_id?: string;
+  };
+};
+
 @Injectable()
 export class MetaAdsService {
   private readonly logger = new Logger(MetaAdsService.name);
@@ -25,7 +39,11 @@ export class MetaAdsService {
   }
 
   private get adAccountId() {
-    return process.env.META_AD_ACCOUNT_ID || '';
+    return process.env.META_AD_ACCOUNT_ID || 'act_474042859768081';
+  }
+
+  private get accountName() {
+    return process.env.META_AD_ACCOUNT_NAME || 'Nam Nguyen';
   }
 
   private toDateInput(date: Date) {
@@ -93,8 +111,8 @@ export class MetaAdsService {
     fromDate?: string;
     toDate?: string;
   }) {
-    if (!this.adAccountId) {
-      throw new Error('META_AD_ACCOUNT_ID is missing');
+    if (!this.accessToken) {
+      throw new Error('META_ACCESS_TOKEN is missing');
     }
 
     const { since, until } = this.getDateRange(
@@ -103,17 +121,42 @@ export class MetaAdsService {
       params.toDate,
     );
 
-    const payload = await this.graphGet<{ data: MetaAdsInsightRow[] }>(
-      `/${this.adAccountId}/insights`,
-      {
-        fields: 'date_start,date_stop,campaign_id,campaign_name,spend,impressions,clicks',
-        level: 'campaign',
-        time_increment: '1',
-        time_range: JSON.stringify({ since, until }),
-      },
+    const firstUrl = new URL(
+      `https://graph.facebook.com/${this.version}/${this.adAccountId}/insights`,
     );
+    firstUrl.searchParams.set(
+      'fields',
+      'date_start,date_stop,campaign_id,campaign_name,spend,impressions,clicks',
+    );
+    firstUrl.searchParams.set('level', 'campaign');
+    firstUrl.searchParams.set('time_increment', '1');
+    firstUrl.searchParams.set('time_range', JSON.stringify({ since, until }));
+    firstUrl.searchParams.set('limit', '500');
+    firstUrl.searchParams.set('access_token', this.accessToken);
 
-    return payload.data || [];
+    const rows: MetaAdsInsightRow[] = [];
+    let nextUrl: string | undefined = firstUrl.toString();
+    let page = 0;
+
+    while (nextUrl && page < 20) {
+      page += 1;
+
+      const res = await fetch(nextUrl, { method: 'GET' });
+      const json = (await res.json()) as MetaGraphListResponse<MetaAdsInsightRow>;
+
+      if (!res.ok || json.error) {
+        this.logger.error(`Meta Ads API error: ${JSON.stringify(json.error || json)}`);
+        throw new Error(json.error?.message || 'Meta Ads API error');
+      }
+
+      if (Array.isArray(json.data)) {
+        rows.push(...json.data);
+      }
+
+      nextUrl = json.paging?.next;
+    }
+
+    return rows;
   }
 
   async getSummary(params: {
@@ -129,7 +172,7 @@ export class MetaAdsService {
     return {
       connected: true,
       adAccountId: this.adAccountId,
-      accountName: 'Nam Nguyen',
+      accountName: this.accountName,
       totalAdsCost,
       impressions,
       clicks,

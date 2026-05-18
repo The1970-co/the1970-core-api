@@ -1688,4 +1688,89 @@ export class StaffService {
     return { success: true, message: "Đã đổi PIN bảo mật." };
   }
 
+
+
+  async getStaffTransferOptions() {
+    const branches = await this.prisma.branch.findMany({
+      orderBy: [{ name: "asc" }],
+      select: {
+        id: true,
+        name: true,
+        isActive: true,
+      },
+    });
+
+    const staff = await this.prisma.staffUser.findMany({
+      orderBy: [{ branchName: "asc" }, { name: "asc" }],
+      include: {
+        roles: true,
+        branchRoles: {
+          include: {
+            branch: true,
+          },
+        },
+        branchPermissions: {
+          include: {
+            branch: true,
+          },
+        },
+      },
+    });
+
+    return {
+      branches,
+      staff,
+    };
+  }
+
+  async transferStaffBranch(dto: {
+    staffId: string;
+    fromBranchId?: string;
+    toBranchId: string;
+    roleCode?: string;
+    reason?: string;
+  }) {
+    const staff = await this.prisma.staffUser.findUnique({
+      where: { id: dto.staffId },
+    });
+
+    if (!staff) {
+      throw new BadRequestException("Không tìm thấy nhân viên.");
+    }
+
+    const targetBranch = await this.prisma.branch.findUnique({
+      where: { id: dto.toBranchId },
+    });
+
+    if (!targetBranch) {
+      throw new BadRequestException("Không tìm thấy chi nhánh.");
+    }
+
+    await this.prisma.staffUser.update({
+      where: { id: staff.id },
+      data: {
+        branchId: targetBranch.id,
+        branchName: targetBranch.name,
+        role: dto.roleCode || staff.role,
+        sessionVersion: {
+          increment: 1,
+        },
+      },
+    });
+
+    await this.prisma.staffSession.updateMany({
+      where: {
+        staffId: staff.id,
+        revokedAt: null,
+      },
+      data: {
+        revokedAt: new Date(),
+      },
+    });
+
+    return {
+      success: true,
+    };
+  }
+
 }
