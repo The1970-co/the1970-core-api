@@ -97,4 +97,8 @@ export const PERMISSIONS = {
   FINANCE_GHN_VIEW: "finance.ghn.view",
   FINANCE_GHN_IMPORT: "finance.ghn.import",
   FINANCE_PAYMENT_SOURCE_MANAGE: "finance.payment_source.manage",
+
+  MENU_STAFF_TRANSFER: "menu.staff_transfer",
+  STAFF_TRANSFER_BRANCH_VIEW: "staff.transfer_branch.view",
+  STAFF_TRANSFER_BRANCH: "staff.transfer_branch",
 } as const;

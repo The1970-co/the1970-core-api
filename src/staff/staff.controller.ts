@@ -16,6 +16,9 @@ import { UpdateStaffPasswordDto } from "./dto/update-staff-password.dto";
 import { JwtGuard } from "../auth/jwt.guard";
 import { RolesGuard } from "../auth/roles.guard";
 import { Roles } from "../auth/roles.decorator";
+import { PermissionGuard } from "../auth/guards/permission.guard";
+import { RequireAnyPermissions, RequirePermissions } from "../auth/decorators/require-permissions.decorator";
+import { PERMISSIONS } from "../auth/constants/permissions";
 
 // ─── Admin-only controller ─────────────────────────────────────────────────────
 
@@ -177,21 +180,24 @@ export class StaffMeController {
   }
 }
 
-// StaffTransferController added
+// ─── Staff transfer controller: RBAC permission-based, not role-name-based ─
 
-
-@UseGuards(JwtGuard, RolesGuard)
-@Roles("owner", "admin", "branch-manager")
+@UseGuards(JwtGuard, PermissionGuard)
 @Controller("staff-transfer")
 export class StaffTransferController {
   constructor(private readonly staffService: StaffService) {}
 
   @Get("options")
+  @RequireAnyPermissions(
+    PERMISSIONS.STAFF_TRANSFER_BRANCH_VIEW,
+    PERMISSIONS.STAFF_TRANSFER_BRANCH,
+  )
   async getTransferOptions() {
     return this.staffService.getStaffTransferOptions();
   }
 
   @Patch("transfer-branch")
+  @RequirePermissions(PERMISSIONS.STAFF_TRANSFER_BRANCH)
   async transferStaffBranch(
     @Body()
     body: {

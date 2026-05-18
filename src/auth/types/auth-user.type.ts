@@ -9,6 +9,13 @@ export type AuthUser = {
   roles: string[];
   branchId?: string | null;
   branchName?: string | null;
+  activeBranchId?: string | null;
+  branchIds?: string[];
+  branchOptions?: Array<{
+    branchId: string;
+    branchName: string;
+    role?: string;
+  }>;
   branchRoles: any[];
   branchPermissions: any[];
   permissions: string[];

@@ -36,6 +36,69 @@ export class AuthService {
     return roles.includes("owner") || roles.includes("admin");
   }
 
+
+  private getBranchIds(user: any) {
+    const ids = new Set<string>();
+
+    const add = (value: any) => {
+      const id = String(value || "").trim();
+      if (id) ids.add(id);
+    };
+
+    add(user?.branchId);
+
+    if (Array.isArray(user?.branchRoles)) {
+      user.branchRoles.forEach((row: any) => add(row?.branchId || row?.branch?.id));
+    }
+
+    if (Array.isArray(user?.branchPermissions)) {
+      user.branchPermissions.forEach((row: any) => add(row?.branchId || row?.branch?.id));
+    }
+
+    return Array.from(ids);
+  }
+
+  private getBranchLabel(user: any, branchId: string) {
+    const target = String(branchId || "").trim();
+    if (!target) return "";
+
+    const roleRow = Array.isArray(user?.branchRoles)
+      ? user.branchRoles.find((row: any) => String(row?.branchId || row?.branch?.id || "").trim() === target)
+      : null;
+
+    const permissionRow = Array.isArray(user?.branchPermissions)
+      ? user.branchPermissions.find((row: any) => String(row?.branchId || row?.branch?.id || "").trim() === target)
+      : null;
+
+    return (
+      roleRow?.branch?.name ||
+      roleRow?.branchName ||
+      permissionRow?.branch?.name ||
+      permissionRow?.branchName ||
+      (String(user?.branchId || "").trim() === target ? user?.branchName : "") ||
+      target
+    );
+  }
+
+  private getRoleForBranch(user: any, branchId: string) {
+    const target = String(branchId || "").trim();
+    if (!target) return this.normalizeRole(user?.role);
+
+    const row = Array.isArray(user?.branchRoles)
+      ? user.branchRoles.find((item: any) => String(item?.branchId || item?.branch?.id || "").trim() === target)
+      : null;
+
+    return this.normalizeRole(row?.roleCode || row?.role || user?.role);
+  }
+
+  private buildBranchOptions(user: any) {
+    return this.getBranchIds(user).map((branchId) => ({
+      branchId,
+      branchName: this.getBranchLabel(user, branchId),
+      role: this.getRoleForBranch(user, branchId),
+    }));
+  }
+
   private hashToken(token: string) {
     return createHash("sha256").update(token).digest("hex");
   }
@@ -180,6 +243,9 @@ export class AuthService {
         ? user
         : await this.getActiveStaff(user.id || user.sub);
 
+    const branchIds = this.getBranchIds(authUser);
+    const activeBranchId = authUser.branchId || branchIds[0] || null;
+
     return {
       id: authUser.id,
       code: authUser.code,
@@ -188,6 +254,9 @@ export class AuthService {
       roles: this.getRoleCodes(authUser),
       branchId: authUser.branchId,
       branchName: authUser.branchName,
+      activeBranchId,
+      branchIds,
+      branchOptions: this.buildBranchOptions(authUser),
       branchRoles: authUser.branchRoles || [],
       branchPermissions: authUser.branchPermissions || [],
       permissions: this.buildPermissionKeys(authUser),

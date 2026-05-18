@@ -14,7 +14,7 @@ export class ReturnsService {
     private readonly prisma: PrismaService,
     private readonly orderService: OrderService,
     private readonly shipmentService: ShipmentService,
-  ) {}
+  ) { }
 
   private n(v: any) {
     return Number(v || 0);
@@ -255,7 +255,7 @@ export class ReturnsService {
 
       if (requestedQty > remainQty) {
         throw new BadRequestException(
-          `Sản phẩm ${orderItem?.sku || orderItem?.productName || ""} chỉ còn được trả ${remainQty}.`,
+          "Đơn này đã được đổi/trả 1 lần. Vui lòng tạo đơn mới.",
         );
       }
     }
@@ -328,10 +328,10 @@ export class ReturnsService {
 
     const rawShippingFee = this.n(
       body.shippingFee ??
-        body.shipFee ??
-        body.deliveryFee ??
-        body.customerShippingFee ??
-        0,
+      body.shipFee ??
+      body.deliveryFee ??
+      body.customerShippingFee ??
+      0,
     );
     const shippingFee = exchangeItems.length ? Math.max(0, rawShippingFee) : 0;
 
@@ -636,20 +636,20 @@ export class ReturnsService {
   private quoteFee(input: any) {
     return this.n(
       input?._fee ||
-        input?.fee?.total ||
-        input?.fee?.total_fee ||
-        input?.fee?.service_fee ||
-        input?.data?.user_price_details?.total_fee ||
-        input?.data?.user_price_details?.total_price ||
-        input?.data?.total_price ||
-        input?.data?.total_fee ||
-        input?.data?.service_fee ||
-        input?.totalFee ||
-        input?.total_fee ||
-        input?.totalPrice ||
-        input?.total_price ||
-        input?.fee ||
-        0,
+      input?.fee?.total ||
+      input?.fee?.total_fee ||
+      input?.fee?.service_fee ||
+      input?.data?.user_price_details?.total_fee ||
+      input?.data?.user_price_details?.total_price ||
+      input?.data?.total_price ||
+      input?.data?.total_fee ||
+      input?.data?.service_fee ||
+      input?.totalFee ||
+      input?.total_fee ||
+      input?.totalPrice ||
+      input?.total_price ||
+      input?.fee ||
+      0,
     );
   }
 
@@ -784,16 +784,16 @@ export class ReturnsService {
   private calculateOrderRemainingCod(order: any) {
     const paidAmount = Array.isArray(order?.payments)
       ? order.payments.reduce((sum: number, payment: any) => {
-          const sourceType = String(
-            payment?.paymentSource?.type || payment?.sourceType || "",
-          ).toUpperCase();
-          if (
-            sourceType === "COD" ||
-            payment?.status === PaymentStatus.PENDING_COD
-          )
-            return sum;
-          return sum + this.n(payment?.amount);
-        }, 0)
+        const sourceType = String(
+          payment?.paymentSource?.type || payment?.sourceType || "",
+        ).toUpperCase();
+        if (
+          sourceType === "COD" ||
+          payment?.status === PaymentStatus.PENDING_COD
+        )
+          return sum;
+        return sum + this.n(payment?.amount);
+      }, 0)
       : 0;
 
     if (String(order?.paymentStatus || "").toUpperCase() === "PAID") return 0;
@@ -834,42 +834,42 @@ export class ReturnsService {
         ) || undefined,
       serviceCode: String(
         body?.serviceCode ||
-          body?.viettelServiceCode ||
-          selectedQuote?._viettelServiceCode ||
-          selectedQuote?.serviceCode ||
-          selectedQuote?.orderService ||
-          "",
+        body?.viettelServiceCode ||
+        selectedQuote?._viettelServiceCode ||
+        selectedQuote?.serviceCode ||
+        selectedQuote?.orderService ||
+        "",
       ).trim(),
       ahamoveServiceId: String(
         body?.ahamoveServiceId ||
-          selectedQuote?._ahamoveServiceId ||
-          selectedQuote?.service_id ||
-          selectedQuote?.serviceId ||
-          "",
+        selectedQuote?._ahamoveServiceId ||
+        selectedQuote?.service_id ||
+        selectedQuote?.serviceId ||
+        "",
       ).trim(),
       viettelReceiverProvinceId:
         Number(
           selectedQuote?._viettelReceiverProvinceId ||
-            body?.viettelReceiverProvinceId ||
-            0,
+          body?.viettelReceiverProvinceId ||
+          0,
         ) || undefined,
       viettelReceiverDistrictId:
         Number(
           selectedQuote?._viettelReceiverDistrictId ||
-            body?.viettelReceiverDistrictId ||
-            0,
+          body?.viettelReceiverDistrictId ||
+          0,
         ) || undefined,
       viettelReceiverWardId:
         Number(
           selectedQuote?._viettelReceiverWardId ||
-            body?.viettelReceiverWardId ||
-            0,
+          body?.viettelReceiverWardId ||
+          0,
         ) || undefined,
       viettelSenderGroupAddressId:
         Number(
           selectedQuote?._viettelSenderGroupAddressId ||
-            body?.viettelSenderGroupAddressId ||
-            0,
+          body?.viettelSenderGroupAddressId ||
+          0,
         ) || undefined,
     };
   }
@@ -887,9 +887,9 @@ export class ReturnsService {
     const selectedQuote = input.selectedQuote || {};
     const partner = this.normalizeShippingPartner(
       input.shippingPartner ||
-        selectedQuote?._carrier ||
-        selectedQuote?.carrier ||
-        "GHN",
+      selectedQuote?._carrier ||
+      selectedQuote?.carrier ||
+      "GHN",
     );
     const dims = this.getExchangeShipmentDims(input.body, selectedQuote);
     const items = this.buildShipmentItemsFromOrder(order, dims);
@@ -964,15 +964,15 @@ export class ReturnsService {
 
     const toDistrictId = Number(
       order.shippingGhnDistrictId ||
-        input.body?.ghnDistrictId ||
-        input.body?.shippingGhnDistrictId ||
-        0,
+      input.body?.ghnDistrictId ||
+      input.body?.shippingGhnDistrictId ||
+      0,
     );
     const toWardCode = String(
       order.shippingGhnWardCode ||
-        input.body?.ghnWardCode ||
-        input.body?.shippingGhnWardCode ||
-        "",
+      input.body?.ghnWardCode ||
+      input.body?.shippingGhnWardCode ||
+      "",
     );
     if (!toDistrictId || !toWardCode) {
       throw new BadRequestException(
@@ -1037,19 +1037,19 @@ export class ReturnsService {
       body?.selectedShippingQuote || body?.shippingQuote || {};
     const shippingPartner = this.normalizeShippingPartner(
       body?.shippingPartner ||
-        body?.carrier ||
-        selectedQuote?._carrier ||
-        selectedQuote?.carrier ||
-        "GHN",
+      body?.carrier ||
+      selectedQuote?._carrier ||
+      selectedQuote?.carrier ||
+      "GHN",
     );
 
     const shippingFee = Math.max(
       0,
       this.n(
         body?.shippingFee ??
-          body?.shipFee ??
-          this.quoteFee(selectedQuote) ??
-          30000,
+        body?.shipFee ??
+        this.quoteFee(selectedQuote) ??
+        30000,
       ),
     );
 
@@ -1322,13 +1322,13 @@ export class ReturnsService {
         ...(this.isOwner(user) || !userBranchId
           ? {}
           : {
-              OR: [
-                { originalBranchId: userBranchId },
-                { handledAtBranchId: userBranchId },
-                { returnReceiveBranchId: userBranchId },
-                { exchangeIssueBranchId: userBranchId },
-              ],
-            }),
+            OR: [
+              { originalBranchId: userBranchId },
+              { handledAtBranchId: userBranchId },
+              { returnReceiveBranchId: userBranchId },
+              { exchangeIssueBranchId: userBranchId },
+            ],
+          }),
       },
       orderBy: { createdAt: "desc" },
       take: 50,
@@ -1441,20 +1441,20 @@ export class ReturnsService {
       ...mapped,
       originalOrder: order
         ? {
-            ...order,
-            finalAmount: this.n(order.finalAmount),
-            soldAt: order.soldAt
-              ? new Date(order.soldAt).toLocaleString("vi-VN")
-              : null,
-            createdAt: order.createdAt
-              ? new Date(order.createdAt).toLocaleString("vi-VN")
-              : null,
-            payments: (order.payments || []).map((payment: any) => ({
-              ...payment,
-              amount: this.n(payment.amount),
-              sourceName: payment.paymentSource?.name || payment.method || null,
-            })),
-          }
+          ...order,
+          finalAmount: this.n(order.finalAmount),
+          soldAt: order.soldAt
+            ? new Date(order.soldAt).toLocaleString("vi-VN")
+            : null,
+          createdAt: order.createdAt
+            ? new Date(order.createdAt).toLocaleString("vi-VN")
+            : null,
+          payments: (order.payments || []).map((payment: any) => ({
+            ...payment,
+            amount: this.n(payment.amount),
+            sourceName: payment.paymentSource?.name || payment.method || null,
+          })),
+        }
         : null,
     };
   }
@@ -1517,11 +1517,11 @@ export class ReturnsService {
         paymentSourceId: payment.paymentSourceId,
         paymentSource: payment.paymentSource
           ? {
-              id: payment.paymentSource.id,
-              name: payment.paymentSource.name,
-              code: payment.paymentSource.code,
-              type: payment.paymentSource.type,
-            }
+            id: payment.paymentSource.id,
+            name: payment.paymentSource.name,
+            code: payment.paymentSource.code,
+            type: payment.paymentSource.type,
+          }
           : null,
       })),
     };

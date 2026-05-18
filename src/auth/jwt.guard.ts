@@ -70,11 +70,38 @@ export class JwtGuard implements CanActivate {
       ),
     );
 
+    const normalizeBranchId = (value: any) => String(value || "").trim();
+
+    const branchIds = Array.from(
+      new Set(
+        [
+          session.staff.branchId,
+          ...(session.staff.branchRoles || []).map((row: any) => row?.branchId || row?.branch?.id),
+          ...(session.staff.branchPermissions || []).map((row: any) => row?.branchId || row?.branch?.id),
+        ]
+          .map(normalizeBranchId)
+          .filter(Boolean),
+      ),
+    );
+
+    const requestedBranchId = normalizeBranchId(
+      req.headers["x-active-branch-id"] ||
+        req.headers["x-branch-id"] ||
+        req.headers["active-branch-id"],
+    );
+
+    const activeBranchId =
+      requestedBranchId && branchIds.includes(requestedBranchId)
+        ? requestedBranchId
+        : normalizeBranchId(session.staff.branchId) || branchIds[0] || "";
+
     const isOwnerOrAdmin = roles.includes("owner") || roles.includes("admin");
     const permissionKeys = isOwnerOrAdmin
       ? ["*"]
       : (() => {
           const keys = new Set<string>();
+          const denied = new Set<string>();
+
           const addKeys = (values: any[]) => {
             if (!Array.isArray(values)) return;
             values
@@ -82,22 +109,52 @@ export class JwtGuard implements CanActivate {
               .filter(Boolean)
               .forEach((key: string) => keys.add(key));
           };
+
           const removeKeys = (values: any[]) => {
             if (!Array.isArray(values)) return;
             values
               .map((key: any) => String(key || "").trim())
               .filter(Boolean)
-              .forEach((key: string) => keys.delete(key));
+              .forEach((key: string) => denied.add(key));
           };
 
-          (session.staff.branchPermissions || []).forEach((row: any) => {
+          const rows = activeBranchId
+            ? (session.staff.branchPermissions || []).filter(
+                (row: any) => normalizeBranchId(row?.branchId || row?.branch?.id) === activeBranchId,
+              )
+            : session.staff.branchPermissions || [];
+
+          const rowsToUse = rows.length ? rows : session.staff.branchPermissions || [];
+
+          rowsToUse.forEach((row: any) => {
             addKeys(row?.permissionKeys);
             addKeys(row?.extraPermissionKeys);
             removeKeys(row?.deniedPermissionKeys);
           });
 
+          denied.forEach((key) => keys.delete(key));
+
           return Array.from(keys);
         })();
+
+    const branchOptions = branchIds.map((branchId) => {
+      const roleRow = (session.staff.branchRoles || []).find(
+        (row: any) => normalizeBranchId(row?.branchId || row?.branch?.id) === branchId,
+      );
+      const permissionRow = (session.staff.branchPermissions || []).find(
+        (row: any) => normalizeBranchId(row?.branchId || row?.branch?.id) === branchId,
+      );
+
+      return {
+        branchId,
+        branchName:
+          roleRow?.branch?.name ||
+          permissionRow?.branch?.name ||
+          (normalizeBranchId(session.staff.branchId) === branchId ? session.staff.branchName : "") ||
+          branchId,
+        role: String(roleRow?.roleCode || session.staff.role || "").toLowerCase(),
+      };
+    });
 
     req.user = {
       id: session.staff.id,
@@ -110,6 +167,9 @@ export class JwtGuard implements CanActivate {
       roles,
       branchId: session.staff.branchId,
       branchName: session.staff.branchName,
+      activeBranchId,
+      branchIds,
+      branchOptions,
       branchRoles: session.staff.branchRoles || [],
       branchPermissions: session.staff.branchPermissions || [],
       permissions: permissionKeys,

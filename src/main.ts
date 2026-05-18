@@ -13,7 +13,12 @@ async function bootstrap() {
       "https://operations.the1970.co",
     ],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "x-active-branch-id",
+      "x-branch-id",
+    ],
     credentials: true,
   });
 

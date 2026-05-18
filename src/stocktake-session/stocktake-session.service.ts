@@ -569,12 +569,12 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
       );
     }
 
-    await this.createSnapshotForSession(dto.sessionId, session.branchId);
+    const sessionBranchId = session.branchId;
+
+    await this.createSnapshotForSession(dto.sessionId, sessionBranchId);
 
     const variant = await this.prisma.productVariant.findFirst({
-      where: {
-        sku: code,
-      },
+      where: { sku: code },
     });
 
     const targetRack = await this.markAreaAndRackInProgress(dto);
@@ -585,7 +585,7 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
       data: {
         sessionId: dto.sessionId,
         workerId: dto.workerId,
-        branchId: dto.branchId,
+        branchId: sessionBranchId,
         variantId: variant?.id,
         sku: variant?.sku || code,
         barcode: code,
@@ -600,7 +600,7 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
     await this.updateRealtimeCount({
       sessionId: dto.sessionId,
       workerId: dto.workerId || null,
-      branchId: dto.branchId,
+      branchId: sessionBranchId,
       variantId: variant?.id || null,
       sku: variant?.sku || code,
       qtyDelta: dto.qtyDelta ?? 1,
@@ -1425,7 +1425,7 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
 
   async getWorkerSummary(sessionId: string, workerId: string, user?: any) {
     await this.ensureSessionAccess(sessionId, user);
-    const rows = await this.getSessionSummary(sessionId);
+    const rows = await this.getSessionSummary(sessionId, user);
     return rows.filter((row: any) => row.workerId === workerId);
   }
 

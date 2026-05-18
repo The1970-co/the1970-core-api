@@ -1730,8 +1730,15 @@ export class StaffService {
     roleCode?: string;
     reason?: string;
   }) {
+    const staffId = String(dto.staffId || "").trim();
+    const toBranchId = String(dto.toBranchId || "").trim();
+
+    if (!staffId) throw new BadRequestException("Thiếu nhân viên cần chuyển.");
+    if (!toBranchId) throw new BadRequestException("Thiếu chi nhánh chuyển đến.");
+
     const staff = await this.prisma.staffUser.findUnique({
-      where: { id: dto.staffId },
+      where: { id: staffId },
+      include: { branchRoles: true, branchPermissions: true },
     });
 
     if (!staff) {
@@ -1739,38 +1746,77 @@ export class StaffService {
     }
 
     const targetBranch = await this.prisma.branch.findUnique({
-      where: { id: dto.toBranchId },
+      where: { id: toBranchId },
     });
 
     if (!targetBranch) {
       throw new BadRequestException("Không tìm thấy chi nhánh.");
     }
 
-    await this.prisma.staffUser.update({
-      where: { id: staff.id },
-      data: {
-        branchId: targetBranch.id,
-        branchName: targetBranch.name,
-        role: dto.roleCode || staff.role,
-        sessionVersion: {
-          increment: 1,
+    const fromBranchId = String(dto.fromBranchId || staff.branchId || "").trim();
+    const roleCode = this.validateRole(dto.roleCode || staff.role || "retail-staff");
+
+    if (fromBranchId && fromBranchId === targetBranch.id) {
+      throw new BadRequestException("Chi nhánh chuyển đến đang trùng chi nhánh hiện tại.");
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      const permissionRow = await this.permissionsForRole(roleCode, tx);
+
+      if (fromBranchId) {
+        await tx.staffBranchRole.deleteMany({
+          where: { staffId: staff.id, branchId: fromBranchId },
+        });
+
+        await tx.staffBranchPermission.deleteMany({
+          where: { staffId: staff.id, branchId: fromBranchId },
+        });
+      }
+
+      await tx.staffBranchRole.deleteMany({
+        where: { staffId: staff.id, branchId: targetBranch.id },
+      });
+
+      await tx.staffBranchPermission.deleteMany({
+        where: { staffId: staff.id, branchId: targetBranch.id },
+      });
+
+      await tx.staffBranchRole.create({
+        data: {
+          staffId: staff.id,
+          branchId: targetBranch.id,
+          roleCode,
         },
-      },
+      });
+
+      await tx.staffBranchPermission.create({
+        data: {
+          staffId: staff.id,
+          branchId: targetBranch.id,
+          ...permissionRow,
+          note: dto.reason
+            ? `Staff transfer: ${dto.reason}`
+            : `Staff transfer to ${targetBranch.name}`,
+        },
+      });
+
+      await tx.staffUser.update({
+        where: { id: staff.id },
+        data: {
+          branchId: targetBranch.id,
+          branchName: targetBranch.name,
+          role: roleCode,
+          sessionVersion: { increment: 1 },
+        },
+      });
+
+      await tx.staffSession.updateMany({
+        where: { staffId: staff.id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
     });
 
-    await this.prisma.staffSession.updateMany({
-      where: {
-        staffId: staff.id,
-        revokedAt: null,
-      },
-      data: {
-        revokedAt: new Date(),
-      },
-    });
-
-    return {
-      success: true,
-    };
+    return this.findOne(staff.id);
   }
 
 }
