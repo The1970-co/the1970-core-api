@@ -4331,6 +4331,40 @@ export class ShipmentService {
           .filter((id: any) => typeof id === "string" && id.length > 0)
       )
     );
+    const deliveredOrderIdSet = new Set(deliveredOrderIds);
+
+    const deliveredShipmentIds = Array.from(
+      new Set(
+        (deliveredEvents || [])
+          .map((event: any) => event?.shipmentId)
+          .filter((id: any) => typeof id === "string" && id.length > 0)
+      )
+    );
+    const deliveredShipmentIdSet = new Set(deliveredShipmentIds);
+
+    const getExplicitDeliveryDate = (order: any) => {
+      const shipment = order?.shipment || {};
+      const candidates = [
+        order?.deliveredAt,
+        order?.deliveryCompletedAt,
+        order?.deliverySuccessAt,
+        order?.shippingCompletedAt,
+        order?.shippedSuccessAt,
+        shipment?.deliveredAt,
+        shipment?.deliveryCompletedAt,
+        shipment?.deliverySuccessAt,
+        shipment?.shippingCompletedAt,
+        shipment?.completedAt,
+        shipment?.deliveredTime,
+        shipment?.completedTime,
+      ];
+
+      for (const value of candidates) {
+        if (value && inRange(value)) return value;
+      }
+
+      return null;
+    };
 
     const recentStart = new Date(safeStart);
     recentStart.setDate(recentStart.getDate() - 90);
@@ -4343,10 +4377,17 @@ export class ShipmentService {
     });
 
     const successOrders = recentOrders.filter((order: any) => {
-      const id = String(order?.id || "");
-      if (deliveredOrderIds.includes(id)) return true;
+      const orderId = String(order?.id || "");
+      const shipmentId = String(order?.shipment?.id || "");
+
+      if (orderId && deliveredOrderIdSet.has(orderId)) return true;
+      if (shipmentId && deliveredShipmentIdSet.has(shipmentId)) return true;
+
       if (!isDelivered(order)) return false;
-      return inRange(order?.shipment?.updatedAt) || inRange(order?.updatedAt) || inRange(order?.createdAt);
+
+      // Không fallback sang createdAt/updatedAt cho đơn giao hàng.
+      // updatedAt hôm nay có thể chỉ là đồng bộ/đối soát lại, khiến toàn bộ đơn đã giao cũ bị tính vào hôm nay.
+      return Boolean(getExplicitDeliveryDate(order));
     });
 
     const posCreated = createdOrders.filter(isPosOrder);
