@@ -55,6 +55,11 @@ export class ShipmentService {
       value.includes("giao that bai") ||
       value.includes("delivery fail") ||
       value.includes("delivery failed") ||
+      value.includes("khong lien lac duoc") ||
+      value.includes("khong nghe may") ||
+      value.includes("chan so") ||
+      value.includes("tu choi nhan") ||
+      value.includes("doi y khong mua") ||
       value.includes("fail") ||
       value.includes("exception") ||
       value.includes("lost") ||
@@ -89,8 +94,14 @@ export class ShipmentService {
     }
 
     if (
+      value.includes("chuyen hoan") ||
+      value.includes("cho hoan") ||
+      value.includes("dang hoan") ||
       value.includes("hoan hang") ||
+      value.includes("hang hoan") ||
       value.includes("tra hang") ||
+      value.includes("waiting to return") ||
+      value.includes("waiting return") ||
       value.includes("return")
     ) {
       return "RETURNING";
@@ -340,6 +351,14 @@ export class ShipmentService {
       sorting: "Đang phân loại hàng",
       transporting: "Đang trung chuyển hàng",
       transport: "Đang trung chuyển hàng",
+      transporting_return: "Đang trung chuyển hàng hoàn",
+      transport_return: "Đang trung chuyển hàng hoàn",
+      return_transporting: "Đang trung chuyển hàng hoàn",
+      return_transport: "Đang trung chuyển hàng hoàn",
+      chuyen_hoan: "Chuyển hoàn",
+      cho_hoan: "Chờ hoàn hàng",
+      dang_hoan_hang: "Đang hoàn hàng",
+      dang_trung_chuyen_hang_hoan: "Đang trung chuyển hàng hoàn",
       ready_to_deliver: "Sẵn sàng giao hàng",
       waiting_to_deliver: "Sẵn sàng giao hàng",
       delivering: "Đang giao hàng",
@@ -362,14 +381,29 @@ export class ShipmentService {
     if (labels[key]) return labels[key];
 
     const text = this.normalizeCarrierStatusText(input);
+    if (
+      text.includes("that bai") ||
+      text.includes("fail") ||
+      text.includes("khong lien lac duoc") ||
+      text.includes("khong nghe may") ||
+      text.includes("chan so") ||
+      text.includes("tu choi nhan") ||
+      text.includes("doi y khong mua")
+    ) return "Giao thất bại";
+    if (
+      text.includes("chuyen hoan") ||
+      text.includes("cho hoan") ||
+      text.includes("dang hoan") ||
+      text.includes("hoan hang") ||
+      text.includes("hang hoan") ||
+      text.includes("return")
+    ) return text.includes("trung chuyen") ? "Đang trung chuyển hàng hoàn" : "Đang hoàn hàng";
     if (text.includes("giao hang thanh cong") || text.includes("delivered") || text.includes("success")) return "Giao hàng thành công";
     if (text.includes("dang giao") || text.includes("delivering")) return "Đang giao hàng";
     if (text.includes("trung chuyen") || text.includes("transport")) return "Đang trung chuyển hàng";
     if (text.includes("phan loai") || text.includes("sort")) return "Đang phân loại hàng";
     if (text.includes("nhap") || text.includes("luu") || text.includes("storing")) return "Nhập hàng vào kho/bưu cục";
     if (text.includes("lay hang") || text.includes("pick")) return "Đang lấy hàng";
-    if (text.includes("hoan") || text.includes("return")) return "Đang hoàn hàng";
-    if (text.includes("that bai") || text.includes("fail")) return "Giao thất bại";
     if (text.includes("huy") || text.includes("cancel")) return "Đã huỷ vận đơn";
 
     return String(input || "Cập nhật vận đơn").trim();
@@ -533,8 +567,13 @@ export class ShipmentService {
       detail = `Đơn hàng lưu tại ${location || "bưu cục/kho"}.`;
     } else if (key === "sorting") {
       detail = `Đơn hàng đang phân loại${location ? ` tại ${location}` : ""}.`;
+    } else if (["transporting_return", "transport_return", "return_transporting", "return_transport", "chuyen_hoan", "dang_trung_chuyen_hang_hoan"].includes(key)) {
+      detail = `Đơn hàng đang trung chuyển hàng hoàn${location ? ` tại ${location}` : ""}.`;
     } else if (["transporting", "transport"].includes(key)) {
-      detail = `Đơn hàng đang trung chuyển${location ? ` đến ${location}` : ""}.`;
+      const text = this.normalizeCarrierStatusText([input.rawStatus, input.title, explicit, location].filter(Boolean).join(" | "));
+      detail = text.includes("hoan") || text.includes("return")
+        ? `Đơn hàng đang trung chuyển hàng hoàn${location ? ` tại ${location}` : ""}.`
+        : `Đơn hàng đang trung chuyển${location ? ` đến ${location}` : ""}.`;
     } else if (key === "picked") {
       detail = `Đơn hàng lấy thành công${location ? ` tại ${location}` : ""}.`;
     } else if (["picking", "money_collect_picking"].includes(key)) {
@@ -543,7 +582,7 @@ export class ShipmentService {
       detail = `Đơn hàng chờ lấy${location ? ` tại ${location}` : ""}.`;
     } else if (["delivery_fail", "deliver_fail"].includes(key)) {
       detail = `Đơn hàng giao thất bại${location ? ` tại ${location}` : ""}.`;
-    } else if (["return", "returning", "waiting_to_return"].includes(key)) {
+    } else if (["return", "returning", "waiting_to_return", "cho_hoan", "dang_hoan_hang"].includes(key)) {
       detail = `Đơn hàng đang hoàn${location ? ` tại ${location}` : ""}.`;
     } else if (key === "returned") {
       detail = `Đơn hàng đã hoàn${location ? ` về ${location}` : ""}.`;
@@ -697,29 +736,41 @@ export class ShipmentService {
       timeline.find((item: any) => this.mapShippingStatus(item?.status) === "DELIVERED")?.status ||
       "";
 
-    const latestTimelineStatus =
-      deliveredTimelineStatus ||
-      timeline[0]?.title ||
-      timeline[0]?.status ||
-      "";
+    const latestTimelineStatus = [
+      timeline[0]?.title,
+      timeline[0]?.description,
+      timeline[0]?.status,
+      timeline[0]?.rawStatus,
+    ]
+      .filter(Boolean)
+      .join(" | ");
 
     const rawShippingStatus = this.mapShippingStatus(rawStatusText);
     const timelineShippingStatus = this.mapShippingStatus(latestTimelineStatus);
+    const storedShippingStatus = this.mapShippingStatus(shipment?.shippingStatus || "UNKNOWN");
+    const interruptingStatuses = ["RETURNING", "FAILED", "CANCELLED"];
     const shippingStatus =
-      timelineShippingStatus === "DELIVERED" || rawShippingStatus === "DELIVERED"
-        ? "DELIVERED"
-        : rawShippingStatus !== "NOT_CREATED"
-          ? rawShippingStatus
-          : timelineShippingStatus !== "NOT_CREATED"
-            ? timelineShippingStatus
-            : this.mapShippingStatus(shipment?.shippingStatus || "UNKNOWN");
+      interruptingStatuses.includes(rawShippingStatus)
+        ? rawShippingStatus
+        : interruptingStatuses.includes(timelineShippingStatus)
+          ? timelineShippingStatus
+          : rawShippingStatus !== "NOT_CREATED"
+            ? rawShippingStatus
+            : timelineShippingStatus !== "NOT_CREATED"
+              ? timelineShippingStatus
+              : deliveredTimelineStatus
+                ? "DELIVERED"
+                : storedShippingStatus;
 
     const partnerStatus =
-      deliveredTimelineStatus ||
       raw?.status_name ||
       raw?.current_status ||
       raw?.status ||
-      latestTimelineStatus ||
+      timeline[0]?.title ||
+      timeline[0]?.rawStatus ||
+      timeline[0]?.status ||
+      deliveredTimelineStatus ||
+      shipment?.partnerStatus ||
       shipment?.shippingStatus ||
       "UNKNOWN";
 
