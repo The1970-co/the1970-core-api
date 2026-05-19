@@ -52,15 +52,23 @@ export class ShipmentController {
     return this.shipmentService.getShipmentTrackingByOrder(orderId, true);
   }
 
+
+  @Post("ghn/tracking/refresh-all")
+  refreshAllGhnTracking(
+    @Query("days") days?: string,
+    @Query("limit") limit?: string,
+    @Query("includeFinal") includeFinal?: string,
+  ) {
+    return this.shipmentService.refreshGhnTrackingBackfill({
+      days: Number(days || 90),
+      limit: Number(limit || 5000),
+      includeFinal: includeFinal === "0" ? false : true,
+    });
+  }
+
   @Get("order/:orderId/timeline")
   getShipmentTimelineByOrder(@Param("orderId") orderId: string) {
     return this.shipmentService.getShipmentTimelineByOrder(orderId);
-  }
-
-
-  @Get("war-room/delivery-revenue")
-  getWarRoomDeliveryRevenue(@Query() query: any) {
-    return this.shipmentService.getWarRoomDeliveryRevenue(query);
   }
 
   @Get(":id")

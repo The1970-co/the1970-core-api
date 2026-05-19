@@ -1305,6 +1305,115 @@ export class ShipmentService {
     };
   }
 
+
+  async refreshGhnTrackingBackfill(options?: {
+    days?: number;
+    limit?: number;
+    includeFinal?: boolean;
+  }) {
+    const days = Math.min(Math.max(Number(options?.days || 90), 1), 3650);
+    const limit = Math.min(Math.max(Number(options?.limit || 5000), 1), 10000);
+    const includeFinal = options?.includeFinal !== false;
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const shipments = await this.prisma.shipment.findMany({
+      where: {
+        carrier: { contains: "GHN", mode: "insensitive" },
+        trackingCode: { not: null },
+        order: {
+          createdAt: { gte: since },
+          NOT: { status: "CANCELLED" },
+        },
+        ...(includeFinal
+          ? {}
+          : {
+              NOT: [
+                { shippingStatus: "DELIVERED" },
+                { shippingStatus: "CANCELLED" },
+              ],
+            }),
+      } as any,
+      select: {
+        id: true,
+        orderId: true,
+        trackingCode: true,
+        shippingStatus: true,
+        partnerStatus: true,
+        order: {
+          select: {
+            id: true,
+            orderCode: true,
+            status: true,
+            createdAt: true,
+          },
+        },
+      },
+      orderBy: { updatedAt: "desc" },
+      take: limit,
+    });
+
+    const targets = shipments.filter((shipment) =>
+      String(shipment.trackingCode || "").trim(),
+    );
+
+    let refreshed = 0;
+    const failed: Array<{
+      orderId: string | null;
+      orderCode: string | null;
+      trackingCode: string | null;
+      reason: string;
+    }> = [];
+    const changed: Array<{
+      orderId: string | null;
+      orderCode: string | null;
+      trackingCode: string | null;
+      before: string | null;
+      after: string | null;
+      partnerStatus?: string | null;
+    }> = [];
+
+    for (const shipment of targets) {
+      const before = String(shipment.shippingStatus || "");
+      try {
+        const result: any = await this.getShipmentTracking(shipment.id, true);
+        refreshed += 1;
+        const after = String(result?.shipment?.shippingStatus || "");
+        const partnerStatus = String(result?.shipment?.partnerStatus || "");
+
+        if (before !== after || partnerStatus !== String(shipment.partnerStatus || "")) {
+          changed.push({
+            orderId: shipment.orderId,
+            orderCode: shipment.order?.orderCode || null,
+            trackingCode: shipment.trackingCode || null,
+            before: before || null,
+            after: after || null,
+            partnerStatus: partnerStatus || null,
+          });
+        }
+      } catch (error) {
+        failed.push({
+          orderId: shipment.orderId,
+          orderCode: shipment.order?.orderCode || null,
+          trackingCode: shipment.trackingCode || null,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return {
+      ok: failed.length === 0,
+      rangeDays: days,
+      scanned: shipments.length,
+      targets: targets.length,
+      refreshed,
+      changedCount: changed.length,
+      failedCount: failed.length,
+      changed: changed.slice(0, 200),
+      failed: failed.slice(0, 200),
+      message: `Đã refresh ${refreshed}/${targets.length} vận đơn GHN trong ${days} ngày gần nhất. Đổi trạng thái: ${changed.length}. Lỗi: ${failed.length}.`,
+    };
+  }
+
   async getShipmentTrackingByOrder(orderId: string, force = false) {
     const shipment = await this.prisma.shipment.findUnique({
       where: { orderId },
