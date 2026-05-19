@@ -779,7 +779,7 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
     );
 
     return counts
-      .filter((row) => Number(row.countedQty || 0) > 0)
+      .filter((row) => Number(row.eventCount || 0) > 0 || Number(row.countedQty || 0) !== 0)
       .map((row) => {
         const snapshotQty = row.variantId
           ? Number(snapshotMap.get(row.variantId) || 0)
