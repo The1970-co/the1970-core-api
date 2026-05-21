@@ -110,6 +110,8 @@ export class ShipmentService {
     if (
       value.includes("dang giao") ||
       value.includes("dang phat") ||
+      value.includes("ready to deliver") ||
+      value.includes("waiting to deliver") ||
       value.includes("delivering") ||
       value.includes("delivery") ||
       value.includes("in process")
@@ -129,6 +131,9 @@ export class ShipmentService {
     if (
       value.includes("trung chuyen") ||
       value.includes("phan loai") ||
+      value.includes("transporting") ||
+      value === "transport" ||
+      value.includes(" transport ") ||
       value.includes("transit") ||
       value.includes("sorting") ||
       value.includes("storing")
@@ -730,12 +735,10 @@ export class ShipmentService {
       .filter(Boolean)
       .join(" | ");
 
-    const deliveredTimelineStatus =
-      timeline.find((item: any) => this.mapShippingStatus(item?.title) === "DELIVERED")?.title ||
-      timeline.find((item: any) => this.mapShippingStatus(item?.description) === "DELIVERED")?.description ||
-      timeline.find((item: any) => this.mapShippingStatus(item?.status) === "DELIVERED")?.status ||
-      "";
-
+    // Chỉ tin timeline mới nhất. Không scan toàn bộ timeline để tìm DELIVERED,
+    // vì log cũ/metadata public GHN có thể chứa chữ "giao thành công" hoặc "huỷ"
+    // trong khi trạng thái hiện tại đang là picking/transporting/delivering.
+    // Giữ nguyên flow cũ, chỉ chặn nhận nhầm trạng thái final từ log cũ.
     const latestTimelineStatus = [
       timeline[0]?.title,
       timeline[0]?.description,
@@ -751,24 +754,22 @@ export class ShipmentService {
     const activeStatuses = ["CREATED", "PICKING", "DELIVERING", "IN_TRANSIT"];
     const finalStatuses = ["DELIVERED", "RETURNING", "FAILED", "CANCELLED"];
 
-    // Cực quan trọng: GHN public đôi khi có text/metadata cũ chứa chữ huỷ,
-    // trong khi timeline mới nhất lại đang trung chuyển/đang giao.
-    // Khi có tín hiệu active mới nhất thì KHÔNG được biến đơn thành CANCELLED.
+    // Cực quan trọng: GHN public đôi khi có text/metadata cũ chứa chữ huỷ/hoàn thành,
+    // trong khi timeline mới nhất lại đang lấy hàng/trung chuyển/đang giao.
+    // Ưu tiên trạng thái active mới nhất để đơn chỉ là ĐÃ XUẤT KHO, không tự nhảy HOÀN THÀNH.
     const shippingStatus = activeStatuses.includes(rawShippingStatus)
       ? rawShippingStatus
       : activeStatuses.includes(timelineShippingStatus)
         ? timelineShippingStatus
-        : rawShippingStatus === "DELIVERED" || timelineShippingStatus === "DELIVERED" || deliveredTimelineStatus
-          ? "DELIVERED"
-          : finalStatuses.includes(rawShippingStatus)
-            ? rawShippingStatus
-            : finalStatuses.includes(timelineShippingStatus)
-              ? timelineShippingStatus
-              : rawShippingStatus !== "NOT_CREATED"
-                ? rawShippingStatus
-                : timelineShippingStatus !== "NOT_CREATED"
-                  ? timelineShippingStatus
-                  : storedShippingStatus;
+        : finalStatuses.includes(rawShippingStatus)
+          ? rawShippingStatus
+          : finalStatuses.includes(timelineShippingStatus)
+            ? timelineShippingStatus
+            : rawShippingStatus !== "NOT_CREATED"
+              ? rawShippingStatus
+              : timelineShippingStatus !== "NOT_CREATED"
+                ? timelineShippingStatus
+                : storedShippingStatus;
 
     const partnerStatus =
       raw?.status_name ||
@@ -777,7 +778,6 @@ export class ShipmentService {
       timeline[0]?.title ||
       timeline[0]?.rawStatus ||
       timeline[0]?.status ||
-      deliveredTimelineStatus ||
       shipment?.partnerStatus ||
       shipment?.shippingStatus ||
       "UNKNOWN";
