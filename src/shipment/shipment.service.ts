@@ -748,19 +748,27 @@ export class ShipmentService {
     const rawShippingStatus = this.mapShippingStatus(rawStatusText);
     const timelineShippingStatus = this.mapShippingStatus(latestTimelineStatus);
     const storedShippingStatus = this.mapShippingStatus(shipment?.shippingStatus || "UNKNOWN");
-    const interruptingStatuses = ["RETURNING", "FAILED", "CANCELLED"];
-    const shippingStatus =
-      interruptingStatuses.includes(rawShippingStatus)
-        ? rawShippingStatus
-        : interruptingStatuses.includes(timelineShippingStatus)
-          ? timelineShippingStatus
-          : rawShippingStatus !== "NOT_CREATED"
+    const activeStatuses = ["CREATED", "PICKING", "DELIVERING", "IN_TRANSIT"];
+    const finalStatuses = ["DELIVERED", "RETURNING", "FAILED", "CANCELLED"];
+
+    // Cực quan trọng: GHN public đôi khi có text/metadata cũ chứa chữ huỷ,
+    // trong khi timeline mới nhất lại đang trung chuyển/đang giao.
+    // Khi có tín hiệu active mới nhất thì KHÔNG được biến đơn thành CANCELLED.
+    const shippingStatus = activeStatuses.includes(rawShippingStatus)
+      ? rawShippingStatus
+      : activeStatuses.includes(timelineShippingStatus)
+        ? timelineShippingStatus
+        : rawShippingStatus === "DELIVERED" || timelineShippingStatus === "DELIVERED" || deliveredTimelineStatus
+          ? "DELIVERED"
+          : finalStatuses.includes(rawShippingStatus)
             ? rawShippingStatus
-            : timelineShippingStatus !== "NOT_CREATED"
+            : finalStatuses.includes(timelineShippingStatus)
               ? timelineShippingStatus
-              : deliveredTimelineStatus
-                ? "DELIVERED"
-                : storedShippingStatus;
+              : rawShippingStatus !== "NOT_CREATED"
+                ? rawShippingStatus
+                : timelineShippingStatus !== "NOT_CREATED"
+                  ? timelineShippingStatus
+                  : storedShippingStatus;
 
     const partnerStatus =
       raw?.status_name ||
@@ -1317,100 +1325,131 @@ export class ShipmentService {
     const includeFinal = options?.includeFinal !== false;
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-    const baseWhere = {
-      carrier: { contains: "GHN", mode: "insensitive" },
-      trackingCode: { not: null },
-      order: {
-        createdAt: { gte: since },
-        NOT: { status: "CANCELLED" },
-      },
-      ...(includeFinal
-        ? {}
-        : {
-            NOT: [
-              { shippingStatus: "DELIVERED" },
-              { shippingStatus: "CANCELLED" },
-            ],
-          }),
-    } as any;
-
-    const [totalEligibleShipments, shipments] = await Promise.all([
-      this.prisma.shipment.count({ where: baseWhere }),
-      this.prisma.shipment.findMany({
-        where: baseWhere,
-        select: {
-          id: true,
-          orderId: true,
-          trackingCode: true,
-          shippingStatus: true,
-          partnerStatus: true,
-          order: {
-            select: {
-              id: true,
-              orderCode: true,
-              status: true,
-              createdAt: true,
-            },
+    const shipments = await this.prisma.shipment.findMany({
+      where: {
+        carrier: { contains: "GHN", mode: "insensitive" },
+        trackingCode: { not: null },
+        order: {
+          createdAt: { gte: since },
+        },
+        ...(includeFinal
+          ? {}
+          : {
+              NOT: [
+                { shippingStatus: "DELIVERED" },
+                { shippingStatus: "CANCELLED" },
+              ],
+            }),
+      } as any,
+      select: {
+        id: true,
+        orderId: true,
+        trackingCode: true,
+        shippingStatus: true,
+        partnerStatus: true,
+        order: {
+          select: {
+            id: true,
+            orderCode: true,
+            status: true,
+            fulfillmentStatus: true,
+            createdAt: true,
           },
         },
-        orderBy: { updatedAt: "desc" },
-        take: limit,
-      }),
-    ]);
+      },
+      orderBy: { updatedAt: "desc" },
+      take: limit,
+    });
 
     const targets = shipments.filter((shipment) =>
       String(shipment.trackingCode || "").trim(),
     );
 
     let refreshed = 0;
+    let unchanged = 0;
+    let shipmentStatusChangedCount = 0;
+    let orderStatusChangedCount = 0;
+    let paymentStatusChangedCount = 0;
+
     const failed: Array<{
       orderId: string | null;
       orderCode: string | null;
       trackingCode: string | null;
       reason: string;
     }> = [];
+
     const changed: Array<{
       orderId: string | null;
       orderCode: string | null;
       trackingCode: string | null;
-      before: string | null;
-      after: string | null;
-      partnerStatus?: string | null;
-    }> = [];
-    const unchanged: Array<{
-      orderId: string | null;
-      orderCode: string | null;
-      trackingCode: string | null;
-      status: string | null;
+      beforeShipmentStatus: string | null;
+      afterShipmentStatus: string | null;
+      beforeOrderStatus: string | null;
+      afterOrderStatus: string | null;
+      beforeFulfillmentStatus?: string | null;
+      afterFulfillmentStatus?: string | null;
       partnerStatus?: string | null;
     }> = [];
 
     for (const shipment of targets) {
-      const before = String(shipment.shippingStatus || "");
+      const beforeShipmentStatus = String(shipment.shippingStatus || "");
       const beforePartnerStatus = String(shipment.partnerStatus || "");
+      const beforeOrderStatus = String(shipment.order?.status || "");
+      const beforeFulfillmentStatus = String(shipment.order?.fulfillmentStatus || "");
+
       try {
         const result: any = await this.getShipmentTracking(shipment.id, true);
         refreshed += 1;
-        const after = String(result?.shipment?.shippingStatus || "");
-        const partnerStatus = String(result?.shipment?.partnerStatus || "");
 
-        if (before !== after || partnerStatus !== beforePartnerStatus) {
+        const afterRow = await this.prisma.shipment.findUnique({
+          where: { id: shipment.id },
+          select: {
+            shippingStatus: true,
+            partnerStatus: true,
+            order: {
+              select: {
+                status: true,
+                fulfillmentStatus: true,
+                paymentStatus: true,
+              },
+            },
+          },
+        });
+
+        const afterShipmentStatus = String(
+          afterRow?.shippingStatus || result?.shipment?.shippingStatus || "",
+        );
+        const afterPartnerStatus = String(
+          afterRow?.partnerStatus || result?.shipment?.partnerStatus || "",
+        );
+        const afterOrderStatus = String(afterRow?.order?.status || "");
+        const afterFulfillmentStatus = String(afterRow?.order?.fulfillmentStatus || "");
+
+        const shipmentChanged =
+          beforeShipmentStatus !== afterShipmentStatus ||
+          beforePartnerStatus !== afterPartnerStatus;
+        const orderChanged =
+          beforeOrderStatus !== afterOrderStatus ||
+          beforeFulfillmentStatus !== afterFulfillmentStatus;
+
+        if (shipmentChanged) shipmentStatusChangedCount += 1;
+        if (orderChanged) orderStatusChangedCount += 1;
+
+        if (shipmentChanged || orderChanged) {
           changed.push({
             orderId: shipment.orderId,
             orderCode: shipment.order?.orderCode || null,
             trackingCode: shipment.trackingCode || null,
-            before: before || null,
-            after: after || null,
-            partnerStatus: partnerStatus || null,
+            beforeShipmentStatus: beforeShipmentStatus || null,
+            afterShipmentStatus: afterShipmentStatus || null,
+            beforeOrderStatus: beforeOrderStatus || null,
+            afterOrderStatus: afterOrderStatus || null,
+            beforeFulfillmentStatus: beforeFulfillmentStatus || null,
+            afterFulfillmentStatus: afterFulfillmentStatus || null,
+            partnerStatus: afterPartnerStatus || null,
           });
         } else {
-          unchanged.push({
-            orderId: shipment.orderId,
-            orderCode: shipment.order?.orderCode || null,
-            trackingCode: shipment.trackingCode || null,
-            status: after || before || null,
-            partnerStatus: partnerStatus || beforePartnerStatus || null,
-          });
+          unchanged += 1;
         }
       } catch (error) {
         failed.push({
@@ -1422,54 +1461,32 @@ export class ShipmentService {
       }
     }
 
-    const elapsedMs = Date.now() - startedAt;
-    const processed = refreshed + failed.length;
-    const success = refreshed;
-    const progressPercentOfSelected = targets.length
-      ? Number(((processed / targets.length) * 100).toFixed(2))
+    const elapsedSeconds = Number(((Date.now() - startedAt) / 1000).toFixed(1));
+    const progressPercent = targets.length
+      ? Number(((refreshed + failed.length) / targets.length * 100).toFixed(1))
       : 100;
-    const progressPercentOfTotal = totalEligibleShipments
-      ? Number(((processed / totalEligibleShipments) * 100).toFixed(2))
-      : 100;
-    const unchangedCount = unchanged.length;
-    const changedCount = changed.length;
-    const failedCount = failed.length;
 
     return {
-      ok: failedCount === 0,
+      ok: failed.length === 0,
       rangeDays: days,
-      limit,
-      includeFinal,
-      totalEligibleShipments,
-      totalOrdersInRange: totalEligibleShipments,
       scanned: shipments.length,
-      selected: targets.length,
-      targets: targets.length,
       total: targets.length,
-      processed,
+      targets: targets.length,
+      success: refreshed,
       refreshed,
-      success,
-      successCount: success,
-      changedCount,
-      unchangedCount,
-      correctStatusCount: unchangedCount,
-      failed: failedCount,
-      failedCount,
-      elapsedMs,
-      elapsedSeconds: Number((elapsedMs / 1000).toFixed(2)),
-      progressPercentOfSelected,
-      progressPercentOfTotal,
-      percentOfTotal: progressPercentOfTotal,
+      unchanged,
+      corrected: orderStatusChangedCount,
+      correctedOrderStatus: orderStatusChangedCount,
+      shipmentStatusChanged: shipmentStatusChangedCount,
+      paymentStatusChanged: paymentStatusChangedCount,
+      changedCount: changed.length,
+      failed: failed.length,
+      failedCount: failed.length,
+      progressPercent,
+      elapsedSeconds,
       changed: changed.slice(0, 200),
-      unchanged: unchanged.slice(0, 100),
       failedItems: failed.slice(0, 200),
-      failedRows: failed.slice(0, 200),
-      message:
-        `Đã chuẩn hoá GHN ${processed}/${targets.length} vận đơn được chọn ` +
-        `(${progressPercentOfSelected}%). Thành công ${success}, đúng trạng thái ${unchangedCount}, ` +
-        `đổi trạng thái ${changedCount}, lỗi ${failedCount}. ` +
-        `Đã chạy ${progressPercentOfTotal}% trên tổng ${totalEligibleShipments} vận đơn GHN trong ${days} ngày. ` +
-        `Thời gian ${Number((elapsedMs / 1000).toFixed(2))}s.`,
+      message: `GHN chạy xong: ${refreshed}/${targets.length} vận đơn (${progressPercent}%). Đúng trạng thái ${unchanged}, sửa trạng thái đơn ${orderStatusChangedCount}, đổi trạng thái vận đơn ${shipmentStatusChangedCount}, lỗi ${failed.length}. Thời gian chuẩn hoá ${elapsedSeconds}s.`,
     };
   }
 
@@ -2103,16 +2120,29 @@ export class ShipmentService {
     }
 
     if (status === "CANCELLED") {
-      return {
-        status: "CANCELLED",
-        fulfillmentStatus: "UNFULFILLED",
-      };
+      // Tracking refresh chỉ đồng bộ vận đơn, không được tự huỷ đơn nội bộ.
+      // Huỷ đơn hệ thống phải đi qua nút Huỷ nội bộ / Huỷ GHN riêng.
+      return {};
     }
 
-    if (status === "FAILED" || status === "RETURNING") {
-      return {
-        fulfillmentStatus: "RETURNED",
-      };
+    if (status === "RETURNING") {
+      return this.withPendingCodPayment(
+        {
+          status: "SHIPPED",
+          fulfillmentStatus: "RETURNED",
+        },
+        context
+      );
+    }
+
+    if (status === "FAILED") {
+      return this.withPendingCodPayment(
+        {
+          status: "SHIPPED",
+          fulfillmentStatus: "PROCESSING",
+        },
+        context
+      );
     }
 
     if (
