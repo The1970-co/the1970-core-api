@@ -1311,46 +1311,52 @@ export class ShipmentService {
     limit?: number;
     includeFinal?: boolean;
   }) {
+    const startedAt = Date.now();
     const days = Math.min(Math.max(Number(options?.days || 90), 1), 3650);
     const limit = Math.min(Math.max(Number(options?.limit || 5000), 1), 10000);
     const includeFinal = options?.includeFinal !== false;
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-    const shipments = await this.prisma.shipment.findMany({
-      where: {
-        carrier: { contains: "GHN", mode: "insensitive" },
-        trackingCode: { not: null },
-        order: {
-          createdAt: { gte: since },
-          NOT: { status: "CANCELLED" },
-        },
-        ...(includeFinal
-          ? {}
-          : {
-              NOT: [
-                { shippingStatus: "DELIVERED" },
-                { shippingStatus: "CANCELLED" },
-              ],
-            }),
-      } as any,
-      select: {
-        id: true,
-        orderId: true,
-        trackingCode: true,
-        shippingStatus: true,
-        partnerStatus: true,
-        order: {
-          select: {
-            id: true,
-            orderCode: true,
-            status: true,
-            createdAt: true,
+    const baseWhere = {
+      carrier: { contains: "GHN", mode: "insensitive" },
+      trackingCode: { not: null },
+      order: {
+        createdAt: { gte: since },
+        NOT: { status: "CANCELLED" },
+      },
+      ...(includeFinal
+        ? {}
+        : {
+            NOT: [
+              { shippingStatus: "DELIVERED" },
+              { shippingStatus: "CANCELLED" },
+            ],
+          }),
+    } as any;
+
+    const [totalEligibleShipments, shipments] = await Promise.all([
+      this.prisma.shipment.count({ where: baseWhere }),
+      this.prisma.shipment.findMany({
+        where: baseWhere,
+        select: {
+          id: true,
+          orderId: true,
+          trackingCode: true,
+          shippingStatus: true,
+          partnerStatus: true,
+          order: {
+            select: {
+              id: true,
+              orderCode: true,
+              status: true,
+              createdAt: true,
+            },
           },
         },
-      },
-      orderBy: { updatedAt: "desc" },
-      take: limit,
-    });
+        orderBy: { updatedAt: "desc" },
+        take: limit,
+      }),
+    ]);
 
     const targets = shipments.filter((shipment) =>
       String(shipment.trackingCode || "").trim(),
@@ -1371,16 +1377,24 @@ export class ShipmentService {
       after: string | null;
       partnerStatus?: string | null;
     }> = [];
+    const unchanged: Array<{
+      orderId: string | null;
+      orderCode: string | null;
+      trackingCode: string | null;
+      status: string | null;
+      partnerStatus?: string | null;
+    }> = [];
 
     for (const shipment of targets) {
       const before = String(shipment.shippingStatus || "");
+      const beforePartnerStatus = String(shipment.partnerStatus || "");
       try {
         const result: any = await this.getShipmentTracking(shipment.id, true);
         refreshed += 1;
         const after = String(result?.shipment?.shippingStatus || "");
         const partnerStatus = String(result?.shipment?.partnerStatus || "");
 
-        if (before !== after || partnerStatus !== String(shipment.partnerStatus || "")) {
+        if (before !== after || partnerStatus !== beforePartnerStatus) {
           changed.push({
             orderId: shipment.orderId,
             orderCode: shipment.order?.orderCode || null,
@@ -1388,6 +1402,14 @@ export class ShipmentService {
             before: before || null,
             after: after || null,
             partnerStatus: partnerStatus || null,
+          });
+        } else {
+          unchanged.push({
+            orderId: shipment.orderId,
+            orderCode: shipment.order?.orderCode || null,
+            trackingCode: shipment.trackingCode || null,
+            status: after || before || null,
+            partnerStatus: partnerStatus || beforePartnerStatus || null,
           });
         }
       } catch (error) {
@@ -1400,17 +1422,54 @@ export class ShipmentService {
       }
     }
 
+    const elapsedMs = Date.now() - startedAt;
+    const processed = refreshed + failed.length;
+    const success = refreshed;
+    const progressPercentOfSelected = targets.length
+      ? Number(((processed / targets.length) * 100).toFixed(2))
+      : 100;
+    const progressPercentOfTotal = totalEligibleShipments
+      ? Number(((processed / totalEligibleShipments) * 100).toFixed(2))
+      : 100;
+    const unchangedCount = unchanged.length;
+    const changedCount = changed.length;
+    const failedCount = failed.length;
+
     return {
-      ok: failed.length === 0,
+      ok: failedCount === 0,
       rangeDays: days,
+      limit,
+      includeFinal,
+      totalEligibleShipments,
+      totalOrdersInRange: totalEligibleShipments,
       scanned: shipments.length,
+      selected: targets.length,
       targets: targets.length,
+      total: targets.length,
+      processed,
       refreshed,
-      changedCount: changed.length,
-      failedCount: failed.length,
+      success,
+      successCount: success,
+      changedCount,
+      unchangedCount,
+      correctStatusCount: unchangedCount,
+      failed: failedCount,
+      failedCount,
+      elapsedMs,
+      elapsedSeconds: Number((elapsedMs / 1000).toFixed(2)),
+      progressPercentOfSelected,
+      progressPercentOfTotal,
+      percentOfTotal: progressPercentOfTotal,
       changed: changed.slice(0, 200),
-      failed: failed.slice(0, 200),
-      message: `Đã refresh ${refreshed}/${targets.length} vận đơn GHN trong ${days} ngày gần nhất. Đổi trạng thái: ${changed.length}. Lỗi: ${failed.length}.`,
+      unchanged: unchanged.slice(0, 100),
+      failedItems: failed.slice(0, 200),
+      failedRows: failed.slice(0, 200),
+      message:
+        `Đã chuẩn hoá GHN ${processed}/${targets.length} vận đơn được chọn ` +
+        `(${progressPercentOfSelected}%). Thành công ${success}, đúng trạng thái ${unchangedCount}, ` +
+        `đổi trạng thái ${changedCount}, lỗi ${failedCount}. ` +
+        `Đã chạy ${progressPercentOfTotal}% trên tổng ${totalEligibleShipments} vận đơn GHN trong ${days} ngày. ` +
+        `Thời gian ${Number((elapsedMs / 1000).toFixed(2))}s.`,
     };
   }
 
