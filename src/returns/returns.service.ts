@@ -117,6 +117,16 @@ export class ReturnsService {
     );
   }
 
+  private shouldAllowNegativeExchangeStock(body: any) {
+    return (
+      body?.allowNegativeStock === true ||
+      body?.allowNegativeInventory === true ||
+      body?.allowOutOfStockExchange === true ||
+      body?.skipExchangeStockCheck === true ||
+      String(body?.stockPolicy || "").toUpperCase() === "ALLOW_NEGATIVE"
+    );
+  }
+
   private map(row: any) {
     if (!row) return null;
 
@@ -460,6 +470,9 @@ export class ReturnsService {
           });
         }
 
+        const allowNegativeExchangeStock =
+          this.shouldAllowNegativeExchangeStock(body);
+
         for (const item of exchangeItems) {
           if (
             !item.variantId ||
@@ -478,23 +491,31 @@ export class ReturnsService {
             },
           });
 
-          if (!inv || Number(inv.availableQty || 0) < this.n(item.qty)) {
+          if (
+            !allowNegativeExchangeStock &&
+            (!inv || Number(inv.availableQty || 0) < this.n(item.qty))
+          ) {
             throw new BadRequestException(
               `Không đủ tồn kho sản phẩm đổi ${item.sku || item.productName || ""}.`,
             );
           }
 
-          await tx.inventoryItem.update({
+          await tx.inventoryItem.upsert({
             where: {
               variantId_branchId: {
                 variantId: item.variantId,
                 branchId: exchangeIssueBranchId,
               },
             },
-            data: {
+            update: {
               availableQty: {
                 decrement: this.n(item.qty),
               },
+            },
+            create: {
+              variantId: item.variantId,
+              branchId: exchangeIssueBranchId,
+              availableQty: -this.n(item.qty),
             },
           });
 
@@ -1120,6 +1141,11 @@ export class ReturnsService {
           body.exchangeIssueBranchId ||
           body.handledAtBranchId ||
           originalOrder.branchId,
+        allowNegativeStock: true,
+        allowNegativeInventory: true,
+        allowOutOfStockExchange: true,
+        skipStockCheck: true,
+        stockPolicy: "ALLOW_NEGATIVE",
         discountAmount: returnAmount,
         shippingFee,
         note: exchangeOrderNote,
