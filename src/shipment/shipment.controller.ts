@@ -58,12 +58,32 @@ export class ShipmentController {
     @Query("days") days?: string,
     @Query("limit") limit?: string,
     @Query("includeFinal") includeFinal?: string,
+    @Query("dryRun") dryRun?: string,
+    @Query("onlyDelivered") onlyDelivered?: string,
+    @Query("preferOldest") preferOldest?: string,
   ) {
     return this.shipmentService.refreshGhnTrackingBackfill({
       days: Number(days || 90),
       limit: Number(limit || 5000),
-      includeFinal: includeFinal === "0" ? false : true,
+      // Mặc định an toàn: không quét lại đơn đã final, tránh đảo trạng thái cũ.
+      includeFinal: includeFinal === "1",
+      // Dry-run chỉ gọi GHN + tính trạng thái dự kiến, không ghi DB.
+      dryRun: dryRun === "1",
+      // API bấm tay mặc định vẫn chỉ apply DELIVERED; muốn đồng bộ mọi trạng thái thì truyền onlyDelivered=0.
+      onlyDelivered: onlyDelivered === "0" ? false : true,
+      source: "manual_refresh_all",
+      preferOldest: preferOldest === "1",
     });
+  }
+
+  @Get("ghn/tracking/cron/status")
+  getGhnTrackingCronStatus() {
+    return this.shipmentService.getGhnTrackingSyncCronStatus();
+  }
+
+  @Post("ghn/tracking/cron/run-now")
+  runGhnTrackingCronNow() {
+    return this.shipmentService.runGhnTrackingSyncCronNow();
   }
 
   @Get("order/:orderId/timeline")
@@ -158,6 +178,15 @@ export class ShipmentController {
     @Req() req: any
   ) {
     return this.shipmentService.createShipmentFromOrder(orderId, req.user);
+  }
+
+
+  @Post(":orderId/return/confirm-received")
+  confirmGhnReturnReceived(
+    @Param("orderId") orderId: string,
+    @Req() req: any,
+  ) {
+    return this.shipmentService.confirmGhnReturnReceivedByOrderId(orderId, req.user);
   }
 
   @Post(":orderId/cancel")

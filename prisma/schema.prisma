@@ -2054,3 +2054,199 @@ model PayrollBranchConfigTemplate {
   @@index([branchId])
   @@index([isActive])
 }
+
+// =========================
+// Meta Ads Brain Center V1
+// Read-only sync storage. Dashboard live flow still uses MetaAdsService.getSummary().
+// =========================
+
+model MetaAdAccount {
+  id            String   @id @default(cuid())
+  metaAccountId String   @unique
+  accountId     String?
+  name          String?
+  currency      String?
+  timezoneName  String?
+  accountStatus String?
+  businessId    String?
+  businessName  String?
+  rawJson       Json?
+  lastSyncedAt  DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  campaigns MetaCampaign[]
+  adSets    MetaAdSet[]
+  ads       MetaAd[]
+  insights  MetaAdInsightDaily[]
+
+  @@index([accountStatus])
+  @@index([lastSyncedAt])
+}
+
+model MetaCampaign {
+  id            String   @id @default(cuid())
+  metaAccountId String
+  metaCampaignId String  @unique
+  name          String?
+  status        String?
+  effectiveStatus String?
+  objective     String?
+  buyingType    String?
+  dailyBudget   Decimal? @db.Decimal(18, 2)
+  lifetimeBudget Decimal? @db.Decimal(18, 2)
+  startTime     DateTime?
+  stopTime      DateTime?
+  rawJson       Json?
+  lastSyncedAt  DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  account  MetaAdAccount @relation(fields: [metaAccountId], references: [metaAccountId], onDelete: Cascade)
+  adSets   MetaAdSet[]
+  ads      MetaAd[]
+  insights MetaAdInsightDaily[]
+
+  @@index([metaAccountId])
+  @@index([status])
+  @@index([effectiveStatus])
+  @@index([lastSyncedAt])
+}
+
+model MetaAdSet {
+  id            String   @id @default(cuid())
+  metaAccountId String
+  metaCampaignId String?
+  metaAdSetId   String   @unique
+  name          String?
+  status        String?
+  effectiveStatus String?
+  optimizationGoal String?
+  billingEvent  String?
+  bidStrategy   String?
+  dailyBudget   Decimal? @db.Decimal(18, 2)
+  lifetimeBudget Decimal? @db.Decimal(18, 2)
+  startTime     DateTime?
+  endTime       DateTime?
+  targetingJson Json?
+  rawJson       Json?
+  lastSyncedAt  DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  account  MetaAdAccount @relation(fields: [metaAccountId], references: [metaAccountId], onDelete: Cascade)
+  campaign MetaCampaign? @relation(fields: [metaCampaignId], references: [metaCampaignId], onDelete: SetNull)
+  ads      MetaAd[]
+  insights MetaAdInsightDaily[]
+
+  @@index([metaAccountId])
+  @@index([metaCampaignId])
+  @@index([status])
+  @@index([effectiveStatus])
+  @@index([lastSyncedAt])
+}
+
+model MetaAd {
+  id              String   @id @default(cuid())
+  metaAccountId   String
+  metaCampaignId  String?
+  metaAdSetId     String?
+  metaAdId        String   @unique
+  metaCreativeId  String?
+  name            String?
+  status          String?
+  effectiveStatus String?
+  previewShareableLink String?
+  thumbnailUrl    String?
+  imageUrl        String?
+  videoId         String?
+  postId          String?
+  pageId          String?
+  callToActionType String?
+  creativeJson    Json?
+  rawJson         Json?
+  lastSyncedAt    DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  account  MetaAdAccount @relation(fields: [metaAccountId], references: [metaAccountId], onDelete: Cascade)
+  campaign MetaCampaign? @relation(fields: [metaCampaignId], references: [metaCampaignId], onDelete: SetNull)
+  adSet    MetaAdSet?    @relation(fields: [metaAdSetId], references: [metaAdSetId], onDelete: SetNull)
+  insights MetaAdInsightDaily[]
+
+  @@index([metaAccountId])
+  @@index([metaCampaignId])
+  @@index([metaAdSetId])
+  @@index([metaCreativeId])
+  @@index([status])
+  @@index([effectiveStatus])
+  @@index([lastSyncedAt])
+}
+
+model MetaAdInsightDaily {
+  id             String   @id @default(cuid())
+  metaAccountId  String
+  level          String
+  dateStart      DateTime
+  dateStop       DateTime
+  metaCampaignId String?
+  metaAdSetId    String?
+  metaAdId       String?
+  campaignName   String?
+  adSetName      String?
+  adName         String?
+  spend          Decimal  @default(0) @db.Decimal(18, 2)
+  impressions    Int      @default(0)
+  reach          Int      @default(0)
+  clicks         Int      @default(0)
+  inlineLinkClicks Int    @default(0)
+  cpc            Decimal  @default(0) @db.Decimal(18, 4)
+  cpm            Decimal  @default(0) @db.Decimal(18, 4)
+  ctr            Decimal  @default(0) @db.Decimal(18, 4)
+  purchases      Int      @default(0)
+  purchaseValue  Decimal  @default(0) @db.Decimal(18, 2)
+  costPerPurchase Decimal @default(0) @db.Decimal(18, 4)
+  roas           Decimal  @default(0) @db.Decimal(18, 4)
+  actionsJson    Json?
+  actionValuesJson Json?
+  rawJson        Json?
+  syncedAt       DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  account  MetaAdAccount @relation(fields: [metaAccountId], references: [metaAccountId], onDelete: Cascade)
+  campaign MetaCampaign? @relation(fields: [metaCampaignId], references: [metaCampaignId], onDelete: SetNull)
+  adSet    MetaAdSet?    @relation(fields: [metaAdSetId], references: [metaAdSetId], onDelete: SetNull)
+  ad       MetaAd?       @relation(fields: [metaAdId], references: [metaAdId], onDelete: SetNull)
+
+  @@unique([metaAccountId, level, dateStart, metaCampaignId, metaAdSetId, metaAdId])
+  @@index([metaAccountId, level, dateStart])
+  @@index([metaCampaignId])
+  @@index([metaAdSetId])
+  @@index([metaAdId])
+}
+
+model MetaSyncLog {
+  id            String   @id @default(cuid())
+  metaAccountId String?
+  syncType      String
+  status        String
+  range         String?
+  fromDate      DateTime?
+  toDate        DateTime?
+  startedAt     DateTime @default(now())
+  finishedAt    DateTime?
+  durationMs    Int?
+  scanned       Int      @default(0)
+  upserted      Int      @default(0)
+  failed        Int      @default(0)
+  message       String?
+  errorJson     Json?
+  createdById   String?
+  createdByName String?
+
+  @@index([metaAccountId])
+  @@index([syncType])
+  @@index([status])
+  @@index([startedAt])
+}
