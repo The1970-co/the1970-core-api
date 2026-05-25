@@ -4,10 +4,11 @@ import { BadRequestException, Injectable, Logger } from "@nestjs/common";
 export class AhamoveClient {
   private readonly logger = new Logger(AhamoveClient.name);
 
-  private readonly apiKey = (process.env.AHAMOVE_API_KEY || process.env.AHAMOVE_TOKEN) || "";
+  private readonly apiKey = String(process.env.AHAMOVE_API_KEY || process.env.AHAMOVE_TOKEN || "").trim();
 
-  private readonly accountPhone =
-    (process.env.AHAMOVE_ACCOUNT_PHONE || process.env.AHAMOVE_PHONE) || "";
+  private readonly accountPhone = String(
+    process.env.AHAMOVE_ACCOUNT_PHONE || process.env.AHAMOVE_PHONE || ""
+  ).trim();
 
   private readonly baseUrl = this.resolveBaseUrl();
 
@@ -63,7 +64,16 @@ export class AhamoveClient {
       }),
     });
 
-    const json = await res.json().catch(() => null);
+    const rawText = await res.text().catch(() => "");
+    const json = rawText
+      ? (() => {
+          try {
+            return JSON.parse(rawText);
+          } catch {
+            return { raw: rawText };
+          }
+        })()
+      : null;
 
     if (!res.ok) {
       this.logger.error(
@@ -106,7 +116,7 @@ export class AhamoveClient {
   }
 
   private async request(
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "DELETE",
     path: string,
     body?: Record<string, unknown>
   ) {
@@ -124,7 +134,16 @@ export class AhamoveClient {
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
 
-    const json = await res.json().catch(() => null);
+    const rawText = await res.text().catch(() => "");
+    const json = rawText
+      ? (() => {
+          try {
+            return JSON.parse(rawText);
+          } catch {
+            return { raw: rawText };
+          }
+        })()
+      : null;
 
     if (!res.ok) {
       this.logger.error(
@@ -167,6 +186,6 @@ export class AhamoveClient {
       throw new BadRequestException("Thiếu ahamoveOrderId");
     }
 
-    return this.request("POST", `/v3/orders/${orderId}/cancel`);
+    return this.request("DELETE", `/v3/orders/${orderId}`);
   }
 }

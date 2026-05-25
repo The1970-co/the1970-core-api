@@ -220,7 +220,7 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
     });
   }
 
-  async listSessions(
+  private buildSessionListWhere(
     branchId?: string,
     filters?: { status?: string; from?: string; to?: string },
     user?: any,
@@ -229,39 +229,317 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
 
     const scopedBranchId = this.scopedBranchId(user, branchId);
     if (scopedBranchId) where.branchId = scopedBranchId;
-    if (filters?.status)
-      where.status = String(filters.status).trim().toUpperCase();
+
+    const normalizedStatus = String(filters?.status || "").trim().toUpperCase();
+    if (normalizedStatus && normalizedStatus !== "ALL") {
+      where.status = normalizedStatus;
+    }
 
     if (filters?.from || filters?.to) {
       where.createdAt = {};
       if (filters.from) where.createdAt.gte = new Date(filters.from);
-      if (filters.to) where.createdAt.lte = new Date(filters.to);
+      if (filters.to) {
+        const toDate = new Date(filters.to);
+        if (!Number.isNaN(toDate.getTime())) {
+          toDate.setHours(23, 59, 59, 999);
+          where.createdAt.lte = toDate;
+        }
+      }
     }
+
+    return where;
+  }
+
+  private normalizePagination(input?: { page?: number; limit?: number }) {
+    const page = Math.max(1, Number(input?.page || 1));
+    const rawLimit = Number(input?.limit || 50);
+    const limit = Math.min(100, Math.max(10, rawLimit));
+    const skip = (page - 1) * limit;
+
+    return { page, limit, skip };
+  }
+
+  private async enrichSessionListRows(sessions: any[]) {
+    const sessionIds = sessions.map((session) => session.id);
+    if (!sessionIds.length) return [];
+
+    const db = this.prisma as any;
+
+    const [snapshotGroups, countRows] = await Promise.all([
+      db.stocktakeSnapshot?.groupBy
+        ? db.stocktakeSnapshot.groupBy({
+            by: ["sessionId"],
+            where: { sessionId: { in: sessionIds } },
+            _count: { _all: true },
+            _sum: { snapshotQty: true },
+          })
+        : Promise.resolve([]),
+      db.stocktakeCount?.findMany
+        ? db.stocktakeCount.findMany({
+            where: { sessionId: { in: sessionIds } },
+            select: {
+              sessionId: true,
+              variantId: true,
+              sku: true,
+              countedQty: true,
+              eventCount: true,
+              status: true,
+            },
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const snapshotStatMap = new Map<
+      string,
+      { totalSku: number; totalSnapshotQty: number }
+    >();
+
+    for (const row of snapshotGroups || []) {
+      snapshotStatMap.set(String(row.sessionId), {
+        totalSku: Number(row?._count?._all || 0),
+        totalSnapshotQty: Number(row?._sum?.snapshotQty || 0),
+      });
+    }
+
+    type CountAgg = {
+      sessionId: string;
+      variantId: string | null;
+      sku: string;
+      countedQty: number;
+      eventCount: number;
+      status: string;
+    };
+
+    const countAggMap = new Map<string, CountAgg>();
+    const countedVariantIds = new Set<string>();
+
+    for (const row of countRows || []) {
+      const sessionId = String(row.sessionId || "");
+      const variantId = row.variantId ? String(row.variantId) : null;
+      const sku = String(row.sku || "");
+      const key = `${sessionId}::${variantId || `SKU:${sku}`}`;
+
+      const current =
+        countAggMap.get(key) ||
+        ({
+          sessionId,
+          variantId,
+          sku,
+          countedQty: 0,
+          eventCount: 0,
+          status: String(row.status || ""),
+        } satisfies CountAgg);
+
+      current.countedQty += Number(row.countedQty || 0);
+      current.eventCount += Number(row.eventCount || 0);
+      current.status = String(row.status || current.status || "");
+      countAggMap.set(key, current);
+
+      if (variantId) countedVariantIds.add(variantId);
+    }
+
+    const countedVariantList = Array.from(countedVariantIds);
+
+    const countedSnapshots =
+      countedVariantList.length && db.stocktakeSnapshot?.findMany
+        ? await db.stocktakeSnapshot.findMany({
+            where: {
+              sessionId: { in: sessionIds },
+              variantId: { in: countedVariantList },
+            },
+            select: {
+              sessionId: true,
+              variantId: true,
+              snapshotQty: true,
+            },
+          })
+        : [];
+
+    const countedSnapshotMap = new Map<string, number>();
+    for (const snapshot of countedSnapshots || []) {
+      countedSnapshotMap.set(
+        `${String(snapshot.sessionId)}::${String(snapshot.variantId)}`,
+        Number(snapshot.snapshotQty || 0),
+      );
+    }
+
+    const kpiMap = new Map<
+      string,
+      {
+        countedSku: number;
+        notFoundSku: number;
+        mismatchSku: number;
+        discrepancySku: number;
+        matchedSku: number;
+        totalCountedQty: number;
+        totalDiffQty: number;
+      }
+    >();
+
+    for (const count of countAggMap.values()) {
+      const current =
+        kpiMap.get(count.sessionId) ||
+        {
+          countedSku: 0,
+          notFoundSku: 0,
+          mismatchSku: 0,
+          discrepancySku: 0,
+          matchedSku: 0,
+          totalCountedQty: 0,
+          totalDiffQty: 0,
+        };
+
+      current.countedSku += 1;
+      current.totalCountedQty += count.countedQty;
+
+      const status = this.normalizeStatus(count.status);
+      if (!count.variantId || status === "NOT_FOUND") {
+        current.notFoundSku += 1;
+      } else {
+        const snapshotQty = Number(
+          countedSnapshotMap.get(`${count.sessionId}::${count.variantId}`) || 0,
+        );
+        const diff = count.countedQty - snapshotQty;
+
+        if (diff === 0) {
+          current.matchedSku += 1;
+        } else {
+          current.mismatchSku += 1;
+          current.discrepancySku += 1;
+          current.totalDiffQty += diff;
+        }
+      }
+
+      kpiMap.set(count.sessionId, current);
+    }
+
+    return sessions.map((session) => {
+      const snapshotStat = snapshotStatMap.get(session.id) || {
+        totalSku: 0,
+        totalSnapshotQty: 0,
+      };
+      const kpi = kpiMap.get(session.id) || {
+        countedSku: 0,
+        notFoundSku: 0,
+        mismatchSku: 0,
+        discrepancySku: 0,
+        matchedSku: 0,
+        totalCountedQty: 0,
+        totalDiffQty: 0,
+      };
+
+      const totalSku = snapshotStat.totalSku || kpi.countedSku;
+      const uncountedSku = Math.max(totalSku - kpi.countedSku, 0);
+
+      return {
+        ...session,
+        kpi: {
+          totalSnapshotSku: snapshotStat.totalSku,
+          totalSku,
+          totalRows: totalSku,
+          countedSku: kpi.countedSku,
+          uncountedSku,
+          matchedSku: kpi.matchedSku,
+          mismatchSku: kpi.mismatchSku,
+          discrepancySku: kpi.discrepancySku,
+          notFoundSku: kpi.notFoundSku,
+          totalSnapshotQty: snapshotStat.totalSnapshotQty,
+          totalCountedQty: kpi.totalCountedQty,
+          totalDiffQty: kpi.totalDiffQty,
+          totalDiffValue: 0,
+          scanEvents: session._count?.scanEvents || 0,
+          workerCount: session.workers?.length || 0,
+        },
+      };
+    });
+  }
+
+  async listSessions(
+    branchId?: string,
+    filters?: { status?: string; from?: string; to?: string; page?: number; limit?: number },
+    user?: any,
+  ) {
+    const where = this.buildSessionListWhere(branchId, filters, user);
+    const { page, limit, skip } = this.normalizePagination(filters);
+
+    const [total, sessions] = await Promise.all([
+      this.prisma.stocktakeSession.count({ where }),
+      this.prisma.stocktakeSession.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        skip,
+        take: limit,
+        include: {
+          workers: {
+            orderBy: { createdAt: "asc" },
+          },
+          _count: {
+            select: {
+              scanEvents: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    const items = await this.enrichSessionListRows(sessions);
+
+    return {
+      items,
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    };
+  }
+
+  async getSessionsOverview(
+    branchId?: string,
+    filters?: { status?: string; from?: string; to?: string },
+    user?: any,
+  ) {
+    const where = this.buildSessionListWhere(branchId, filters, user);
 
     const sessions = await this.prisma.stocktakeSession.findMany({
       where,
-      orderBy: { createdAt: "desc" },
-      include: {
-        workers: true,
+      select: {
+        id: true,
+        status: true,
+        workers: {
+          select: { id: true },
+        },
         _count: {
-          select: {
-            scanEvents: true,
-          },
+          select: { scanEvents: true },
         },
       },
     });
 
-    const enriched = await Promise.all(
-      sessions.map(async (session) => {
-        const summary = await this.buildSessionDetail(session.id, false);
-        return {
-          ...session,
-          kpi: summary.kpi,
-        };
-      }),
-    );
+    const overview = {
+      total: sessions.length,
+      running: 0,
+      finished: 0,
+      applied: 0,
+      cancelled: 0,
+      totalWorkers: 0,
+      totalScanEvents: 0,
+    };
 
-    return enriched;
+    for (const session of sessions) {
+      const status = this.normalizeStatus(session.status);
+
+      if (["DRAFT", "IN_PROGRESS", "PAUSED"].includes(status)) {
+        overview.running += 1;
+      }
+
+      if (status === "FINISHED") overview.finished += 1;
+      if (status === "APPLIED") overview.applied += 1;
+      if (status === "CANCELLED") overview.cancelled += 1;
+
+      overview.totalWorkers += session.workers?.length || 0;
+      overview.totalScanEvents += session._count?.scanEvents || 0;
+    }
+
+    return overview;
   }
 
   async getSession(id: string, user?: any) {

@@ -38,9 +38,33 @@ export class StocktakeSessionController {
     @Query("status") status?: string,
     @Query("from") from?: string,
     @Query("to") to?: string,
+    @Query("page") page?: string,
+    @Query("limit") limit?: string,
     @Req() req?: any,
   ) {
-    return this.service.listSessions(branchId, { status, from, to }, req?.user);
+    return this.service.listSessions(
+      branchId,
+      {
+        status,
+        from,
+        to,
+        page: page ? Number(page) : undefined,
+        limit: limit ? Number(limit) : undefined,
+      },
+      req?.user,
+    );
+  }
+
+  @Get("summary/overview")
+  @RequirePermissions("stocktake.view")
+  getSessionsOverview(
+    @Query("branchId") branchId?: string,
+    @Query("status") status?: string,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+    @Req() req?: any,
+  ) {
+    return this.service.getSessionsOverview(branchId, { status, from, to }, req?.user);
   }
 
   @Get("active/current")

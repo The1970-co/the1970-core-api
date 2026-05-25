@@ -174,6 +174,8 @@ export class JwtGuard implements CanActivate {
       branchPermissions: session.staff.branchPermissions || [],
       permissions: permissionKeys,
       type: "staff",
+      lastLoginAt: session.staff.lastLoginAt,
+      status: session.staff.isActive ? "active" : "inactive",
     };
 
     return true;

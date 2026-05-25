@@ -128,7 +128,13 @@ export class AuthController {
   @UseGuards(JwtGuard)
   @Get("me")
   async me(@Req() req: any) {
-    return this.authService.me(req.user.sub || req.user.id);
+    // JwtGuard đã verify access token, session, revokedAt, sessionVersion,
+    // trạng thái active và đã build đủ role/permission/branch vào req.user.
+    // Trả thẳng req.user để tránh query DB lần 2 ở AuthService.me().
+    return {
+      ...req.user,
+      status: "active",
+    };
   }
 
   @UseGuards(JwtGuard)
