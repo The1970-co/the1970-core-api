@@ -126,7 +126,7 @@ export class MetaAdsService {
     );
     firstUrl.searchParams.set(
       'fields',
-      'date_start,date_stop,campaign_id,campaign_name,spend,impressions,clicks',
+      'date_start,date_stop,campaign_id,campaign_name,spend,impressions,clicks,actions,action_values,cost_per_action_type',
     );
     firstUrl.searchParams.set('level', 'campaign');
     firstUrl.searchParams.set('time_increment', '1');

@@ -148,6 +148,142 @@ export class MetaAdsSyncService {
     return this.pickActionCount(actions, names);
   }
 
+  private pickActionCountLoose(actions: any[] | undefined, aliases: string[]) {
+    if (!Array.isArray(actions)) return 0;
+    const wanted = aliases.map((name) => String(name || '').toLowerCase());
+    return actions.reduce((sum, action) => {
+      const type = String(action?.action_type || action?.actionType || '').toLowerCase();
+      if (!type) return sum;
+      const matched = wanted.some((alias) => type === alias || type.includes(alias));
+      return matched ? sum + this.n(action?.value) : sum;
+    }, 0);
+  }
+
+  private pickCostPerAction(actions: any[] | undefined, aliases: string[]) {
+    if (!Array.isArray(actions)) return 0;
+    const wanted = aliases.map((name) => String(name || '').toLowerCase());
+    for (const action of actions) {
+      const type = String(action?.action_type || action?.actionType || '').toLowerCase();
+      if (!type) continue;
+      const matched = wanted.some((alias) => type === alias || type.includes(alias));
+      if (matched) return this.n(action?.value);
+    }
+    return 0;
+  }
+
+  private metaMessagingAliases() {
+    return [
+      'onsite_conversion.messaging_conversation_started_7d',
+      'messaging_conversation_started_7d',
+      'messaging_conversation_started',
+      'onsite_conversion.messaging_first_reply',
+      'messaging_first_reply',
+      'onsite_conversion.total_messaging_connection',
+      'total_messaging_connection',
+      'onsite_conversion.new_messaging_connection',
+      'new_messaging_connection',
+    ];
+  }
+
+  private metaConversationStartAliases() {
+    return [
+      'onsite_conversion.messaging_conversation_started_7d',
+      'messaging_conversation_started_7d',
+      'messaging_conversation_started',
+    ];
+  }
+
+  private metaCommentAliases() {
+    return ['comment', 'post_comment'];
+  }
+
+  private actionPayloadFromInsight(row: any) {
+    const raw = row?.rawJson || row?.raw_json || row || {};
+    return {
+      actions: Array.isArray(row?.actionsJson)
+        ? row.actionsJson
+        : Array.isArray(row?.actions)
+          ? row.actions
+          : Array.isArray(raw?.actions)
+            ? raw.actions
+            : [],
+      actionValues: Array.isArray(row?.actionValuesJson)
+        ? row.actionValuesJson
+        : Array.isArray(row?.action_values)
+          ? row.action_values
+          : Array.isArray(raw?.action_values)
+            ? raw.action_values
+            : [],
+      costPerActionType: Array.isArray(raw?.cost_per_action_type)
+        ? raw.cost_per_action_type
+        : Array.isArray(row?.costPerActionTypeJson)
+          ? row.costPerActionTypeJson
+          : Array.isArray(row?.cost_per_action_type)
+            ? row.cost_per_action_type
+            : [],
+    };
+  }
+
+  private metaActionMetrics(row: any, spendInput?: number, purchasesInput?: number, purchaseValueInput?: number) {
+    const payload = this.actionPayloadFromInsight(row);
+    const spend = this.n(spendInput ?? row?.spend);
+    const purchases = this.n(purchasesInput ?? row?.purchases);
+    const purchaseValue = this.n(purchaseValueInput ?? row?.purchaseValue);
+
+    const messages = Math.round(this.pickActionCountLoose(payload.actions, this.metaMessagingAliases()));
+    const conversationStarts = Math.round(this.pickActionCountLoose(payload.actions, this.metaConversationStartAliases()));
+    const comments = Math.round(this.pickActionCountLoose(payload.actions, this.metaCommentAliases()));
+
+    const costPerMessageFromMeta = this.pickCostPerAction(payload.costPerActionType, this.metaMessagingAliases());
+    const costPerConversationFromMeta = this.pickCostPerAction(payload.costPerActionType, this.metaConversationStartAliases());
+    const costPerPurchaseFromMeta = this.pickCostPerAction(payload.costPerActionType, ['purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase']);
+
+    return {
+      messages,
+      conversationStarts,
+      comments,
+      costPerMessage: costPerMessageFromMeta || (messages > 0 ? spend / messages : 0),
+      costPerConversation: costPerConversationFromMeta || (conversationStarts > 0 ? spend / conversationStarts : 0),
+      costPerPurchase: costPerPurchaseFromMeta || (purchases > 0 ? spend / purchases : 0),
+      costPerResult:
+        purchases > 0
+          ? (costPerPurchaseFromMeta || spend / purchases)
+          : conversationStarts > 0
+            ? (costPerConversationFromMeta || spend / conversationStarts)
+            : messages > 0
+              ? (costPerMessageFromMeta || spend / messages)
+              : 0,
+      averagePurchaseValue: purchases > 0 ? purchaseValue / purchases : 0,
+    };
+  }
+
+  private mergeActionMetrics(rows: any[], sum: any = {}) {
+    const spend = this.n(sum?.spend ?? rows.reduce((acc, row) => acc + this.n(row?.spend), 0));
+    const purchases = this.n(sum?.purchases ?? rows.reduce((acc, row) => acc + this.n(row?.purchases), 0));
+    const purchaseValue = this.n(sum?.purchaseValue ?? rows.reduce((acc, row) => acc + this.n(row?.purchaseValue), 0));
+
+    const messages = rows.reduce((acc, row) => acc + this.metaActionMetrics(row).messages, 0);
+    const conversationStarts = rows.reduce((acc, row) => acc + this.metaActionMetrics(row).conversationStarts, 0);
+    const comments = rows.reduce((acc, row) => acc + this.metaActionMetrics(row).comments, 0);
+
+    return {
+      messages,
+      conversationStarts,
+      comments,
+      costPerMessage: messages > 0 ? spend / messages : 0,
+      costPerConversation: conversationStarts > 0 ? spend / conversationStarts : 0,
+      costPerResult:
+        purchases > 0
+          ? spend / purchases
+          : conversationStarts > 0
+            ? spend / conversationStarts
+            : messages > 0
+              ? spend / messages
+              : 0,
+      averagePurchaseValue: purchases > 0 ? purchaseValue / purchases : 0,
+    };
+  }
+
   private calcRoas(spend: number, purchaseValue: number) {
     return spend > 0 ? purchaseValue / spend : 0;
   }
@@ -355,9 +491,9 @@ export class MetaAdsSyncService {
     let totalRows = 0;
 
     const fieldsByLevel: Record<MetaInsightLevel, string> = {
-      campaign: 'date_start,date_stop,campaign_id,campaign_name,spend,impressions,reach,clicks,inline_link_clicks,cpc,cpm,ctr,actions,action_values,purchase_roas',
-      adset: 'date_start,date_stop,campaign_id,campaign_name,adset_id,adset_name,spend,impressions,reach,clicks,inline_link_clicks,cpc,cpm,ctr,actions,action_values,purchase_roas',
-      ad: 'date_start,date_stop,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,reach,clicks,inline_link_clicks,cpc,cpm,ctr,actions,action_values,purchase_roas',
+      campaign: 'date_start,date_stop,campaign_id,campaign_name,spend,impressions,reach,clicks,inline_link_clicks,cpc,cpm,ctr,actions,action_values,purchase_roas,cost_per_action_type',
+      adset: 'date_start,date_stop,campaign_id,campaign_name,adset_id,adset_name,spend,impressions,reach,clicks,inline_link_clicks,cpc,cpm,ctr,actions,action_values,purchase_roas,cost_per_action_type',
+      ad: 'date_start,date_stop,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,reach,clicks,inline_link_clicks,cpc,cpm,ctr,actions,action_values,purchase_roas,cost_per_action_type',
     };
 
     for (const level of levels) {
@@ -400,7 +536,8 @@ export class MetaAdsSyncService {
         const purchases = this.pickActionCount(actions, ['purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase']);
         const purchaseValue = this.pickActionValue(actionValues, ['purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase']);
         const purchaseRoas = Array.isArray(row.purchase_roas) ? this.n(row.purchase_roas?.[0]?.value) : 0;
-        const costPerPurchase = purchases > 0 ? spend / purchases : 0;
+        const actionMetrics = this.metaActionMetrics(row, spend, purchases, purchaseValue);
+        const costPerPurchase = actionMetrics.costPerPurchase || (purchases > 0 ? spend / purchases : 0);
         const roas = purchaseRoas || this.calcRoas(spend, purchaseValue);
 
         const existing = await this.prisma.metaAdInsightDaily.findFirst({
@@ -440,7 +577,10 @@ export class MetaAdsSyncService {
           roas,
           actionsJson: row.actions || undefined,
           actionValuesJson: row.action_values || undefined,
-          rawJson: row,
+          rawJson: {
+            ...row,
+            metaActionMetrics: actionMetrics,
+          },
           syncedAt: now,
         };
 
@@ -650,6 +790,20 @@ export class MetaAdsSyncService {
       cpm: impressions > 0 ? (spend / impressions) * 1000 : 0,
       costPerPurchase: purchases > 0 ? spend / purchases : 0,
       roas: spend > 0 ? purchaseValue / spend : 0,
+      messages: this.n(sum?.messages),
+      conversationStarts: this.n(sum?.conversationStarts),
+      comments: this.n(sum?.comments),
+      costPerMessage: this.n(sum?.messages) > 0 ? spend / this.n(sum?.messages) : 0,
+      costPerConversation: this.n(sum?.conversationStarts) > 0 ? spend / this.n(sum?.conversationStarts) : 0,
+      costPerResult:
+        purchases > 0
+          ? spend / purchases
+          : this.n(sum?.conversationStarts) > 0
+            ? spend / this.n(sum?.conversationStarts)
+            : this.n(sum?.messages) > 0
+              ? spend / this.n(sum?.messages)
+              : 0,
+      averagePurchaseValue: purchases > 0 ? purchaseValue / purchases : 0,
     };
   }
 
@@ -695,6 +849,38 @@ export class MetaAdsSyncService {
       structureRows.map((row: any) => [level === 'campaign' ? row.metaCampaignId : level === 'adset' ? row.metaAdSetId : row.metaAdId, row]),
     );
 
+    const actionWhere: any = { ...where };
+    if (level === 'campaign') actionWhere.metaCampaignId = { in: ids };
+    if (level === 'adset') actionWhere.metaAdSetId = { in: ids };
+    if (level === 'ad') actionWhere.metaAdId = { in: ids };
+
+    const actionRows = ids.length
+      ? await (this.prisma as any).metaAdInsightDaily.findMany({
+          where: actionWhere,
+          select: {
+            metaCampaignId: true,
+            metaAdSetId: true,
+            metaAdId: true,
+            spend: true,
+            purchases: true,
+            purchaseValue: true,
+            actionsJson: true,
+            actionValuesJson: true,
+            rawJson: true,
+          },
+          take: 5000,
+        })
+      : [];
+
+    const actionMap = new Map<string, any[]>();
+    for (const item of actionRows) {
+      const key = level === 'campaign' ? item.metaCampaignId : level === 'adset' ? item.metaAdSetId : item.metaAdId;
+      if (!key) continue;
+      const list = actionMap.get(key) || [];
+      list.push(item);
+      actionMap.set(key, list);
+    }
+
     return rows.map((row: any) => {
       const id = level === 'campaign' ? row.metaCampaignId : level === 'adset' ? row.metaAdSetId : row.metaAdId;
       const structure: any = structureMap.get(id) || {};
@@ -713,7 +899,10 @@ export class MetaAdsSyncService {
         effectiveStatus: structure?.effectiveStatus || null,
         thumbnailUrl: structure?.thumbnailUrl || structure?.imageUrl || null,
         previewShareableLink: structure?.previewShareableLink || null,
-        metrics: this.metricsFromSum(row._sum),
+        metrics: {
+          ...this.metricsFromSum(row._sum),
+          ...this.mergeActionMetrics(actionMap.get(id) || [], row._sum),
+        },
       };
     });
   }
@@ -730,6 +919,7 @@ export class MetaAdsSyncService {
     const purchases = Math.round(this.pickActionCount(actions, ['purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase']));
     const purchaseValue = this.pickActionValue(actionValues, ['purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase']);
     const purchaseRoas = Array.isArray(row?.purchase_roas) ? this.n(row.purchase_roas?.[0]?.value) : 0;
+    const actionMetrics = this.metaActionMetrics(row, spend, purchases, purchaseValue);
 
     return {
       spend,
@@ -742,8 +932,15 @@ export class MetaAdsSyncService {
       ctr: impressions > 0 ? (clicks / impressions) * 100 : this.n(row?.ctr),
       cpc: clicks > 0 ? spend / clicks : this.n(row?.cpc),
       cpm: impressions > 0 ? (spend / impressions) * 1000 : this.n(row?.cpm),
-      costPerPurchase: purchases > 0 ? spend / purchases : 0,
+      costPerPurchase: actionMetrics.costPerPurchase || (purchases > 0 ? spend / purchases : 0),
       roas: purchaseRoas || (spend > 0 ? purchaseValue / spend : 0),
+      messages: actionMetrics.messages,
+      conversationStarts: actionMetrics.conversationStarts,
+      comments: actionMetrics.comments,
+      costPerMessage: actionMetrics.costPerMessage,
+      costPerConversation: actionMetrics.costPerConversation,
+      costPerResult: actionMetrics.costPerResult,
+      averagePurchaseValue: actionMetrics.averagePurchaseValue,
     };
   }
 
@@ -756,6 +953,9 @@ export class MetaAdsSyncService {
       inlineLinkClicks: rows.reduce((sum, row) => sum + this.n(row?.inlineLinkClicks), 0),
       purchases: rows.reduce((sum, row) => sum + this.n(row?.purchases), 0),
       purchaseValue: rows.reduce((sum, row) => sum + this.n(row?.purchaseValue), 0),
+      messages: rows.reduce((sum, row) => sum + this.n(row?.messages), 0),
+      conversationStarts: rows.reduce((sum, row) => sum + this.n(row?.conversationStarts), 0),
+      comments: rows.reduce((sum, row) => sum + this.n(row?.comments), 0),
     });
   }
 
@@ -765,7 +965,7 @@ export class MetaAdsSyncService {
     // DB rows remain used for drilldown/creative table, but KPI total should reconcile with Meta official.
     const accountId = this.normalizeAccountId(query.metaAccountId || this.defaultAdAccountId);
     const rows = await this.graphList<any>(`/${accountId}/insights`, {
-      fields: 'date_start,date_stop,spend,impressions,reach,clicks,inline_link_clicks,cpc,cpm,ctr,actions,action_values,purchase_roas',
+      fields: 'date_start,date_stop,spend,impressions,reach,clicks,inline_link_clicks,cpc,cpm,ctr,actions,action_values,purchase_roas,cost_per_action_type',
       time_increment: '1',
       time_range: JSON.stringify(range),
       limit: '1000',

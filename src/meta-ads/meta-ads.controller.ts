@@ -4,38 +4,51 @@ import { MetaAdsSyncService } from './meta-ads-sync.service';
 import { MetaAdsOrderAttributionService } from './meta-ads-order-attribution.service';
 import { SyncMetaAdsDto } from './dto/sync-meta-ads.dto';
 
+function hcmYmd(date: Date) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Ho_Chi_Minh',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+}
+
+function hcmBoundary(ymd: string, end = false) {
+  return new Date(`${ymd}${end ? 'T23:59:59.999+07:00' : 'T00:00:00.000+07:00'}`);
+}
+
+function addDays(ymd: string, days: number) {
+  const d = hcmBoundary(ymd, false);
+  d.setUTCDate(d.getUTCDate() + days);
+  return hcmYmd(d);
+}
+
 function parseDateRange(query: any) {
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-
+  const today = hcmYmd(new Date());
   const range = String(query?.range || '7d');
-  let since = new Date(today);
-  let until = new Date(today);
 
-  if (range === 'today') {
-    since = new Date(today);
-    until = new Date(today);
-  } else if (range === 'yesterday') {
-    since = new Date(today);
-    since.setDate(since.getDate() - 1);
-    until = new Date(since);
+  let sinceYmd = today;
+  let untilYmd = today;
+
+  if (range === 'yesterday') {
+    sinceYmd = addDays(today, -1);
+    untilYmd = sinceYmd;
   } else if (range === '10d') {
-    since = new Date(today);
-    since.setDate(since.getDate() - 9);
+    sinceYmd = addDays(today, -9);
   } else if (range === '30d') {
-    since = new Date(today);
-    since.setDate(since.getDate() - 29);
-  } else {
-    since = new Date(today);
-    since.setDate(since.getDate() - 6);
+    sinceYmd = addDays(today, -29);
+  } else if (range !== 'today') {
+    sinceYmd = addDays(today, -6);
   }
 
-  if (query?.fromDate) since = new Date(`${query.fromDate}T00:00:00.000Z`);
-  if (query?.toDate) until = new Date(`${query.toDate}T00:00:00.000Z`);
+  if (query?.fromDate) sinceYmd = String(query.fromDate).slice(0, 10);
+  if (query?.toDate) untilYmd = String(query.toDate).slice(0, 10);
 
   return {
-    since: new Date(`${since.toISOString().slice(0, 10)}T00:00:00.000Z`),
-    until: new Date(`${until.toISOString().slice(0, 10)}T23:59:59.999Z`),
+    since: hcmBoundary(sinceYmd, false),
+    until: hcmBoundary(untilYmd, true),
+    sinceYmd,
+    untilYmd,
   };
 }
 
@@ -47,36 +60,21 @@ export class MetaAdsController {
     private readonly metaAdsOrderAttributionService: MetaAdsOrderAttributionService,
   ) {}
 
-  /**
-   * LEGACY LIVE ENDPOINTS
-   * Không đổi output để Dashboard/Tổng quan cũ không bị ảnh hưởng.
-   */
   @Get('test')
   test() {
     return this.metaAdsService.testConnection();
   }
 
   @Get('summary')
-  summary(
-    @Query('range') range?: any,
-    @Query('fromDate') fromDate?: string,
-    @Query('toDate') toDate?: string,
-  ) {
+  summary(@Query('range') range?: any, @Query('fromDate') fromDate?: string, @Query('toDate') toDate?: string) {
     return this.metaAdsService.getSummary({ range, fromDate, toDate });
   }
 
   @Get('insights')
-  insights(
-    @Query('range') range?: any,
-    @Query('fromDate') fromDate?: string,
-    @Query('toDate') toDate?: string,
-  ) {
+  insights(@Query('range') range?: any, @Query('fromDate') fromDate?: string, @Query('toDate') toDate?: string) {
     return this.metaAdsService.getCampaignInsights({ range, fromDate, toDate });
   }
 
-  /**
-   * BRAIN CENTER DB ENDPOINTS
-   */
   @Get('accounts')
   getAccounts() {
     return this.metaAdsSyncService.getAccounts();
@@ -85,7 +83,6 @@ export class MetaAdsController {
   @Post('sync')
   async sync(@Body() body: SyncMetaAdsDto = {}, @Req() req?: any) {
     const result: any = await this.metaAdsSyncService.syncAll(body, req?.user);
-
     const structure = result?.structure || {};
     const insights = result?.insights || {};
 
@@ -139,16 +136,34 @@ export class MetaAdsController {
     if (!includeProductOrders) return result;
 
     const range = parseDateRange(query);
+    const sourceMode = String(query?.sourceMode || 'facebook').toLowerCase();
+    const orderMode = String(query?.orderMode || 'valid').toLowerCase();
 
-    result.topAds = await this.metaAdsOrderAttributionService.attachProductOrdersToAds(result.topAds || [], range);
+    const attachParams = {
+      since: range.since,
+      until: range.until,
+      sourceMode,
+      orderMode,
+    };
+
+    result.topAds = await this.metaAdsOrderAttributionService.attachProductOrdersToAds(result.topAds || [], attachParams);
+    result.topAdSets = await this.metaAdsOrderAttributionService.attachProductOrdersToAds(result.topAdSets || [], attachParams);
+    result.topCampaigns = await this.metaAdsOrderAttributionService.attachProductOrdersToAds(result.topCampaigns || [], attachParams);
 
     return {
       ...result,
+      productOrderRange: {
+        since: range.sinceYmd,
+        until: range.untilYmd,
+        timezone: 'Asia/Ho_Chi_Minh',
+        sourceMode,
+        orderMode,
+      },
       attribution: {
         enabled: true,
-        mode: 'product_order_exact_then_ad_name_match',
+        mode: 'sku_family_v2',
         note:
-          'Đơn hệ thống là đơn thật theo sản phẩm/SKU. Việc gắn vào ads vẫn dựa tên/SKU, chưa phải attribution chuẩn fbclid/pixel/CAPI.',
+          'V16: gom SKU family, bỏ đơn huỷ mặc định, tách DT sản phẩm và DT đơn, không nhân đôi ROAS.',
       },
     };
   }
@@ -161,11 +176,27 @@ export class MetaAdsController {
   @Get('product-performance')
   async getProductPerformance(@Query() query: any) {
     const range = parseDateRange(query);
-    return this.metaAdsOrderAttributionService.getProductPerformance({
+    const sourceMode = String(query?.sourceMode || 'facebook').toLowerCase();
+    const orderMode = String(query?.orderMode || 'valid').toLowerCase();
+
+    const result = await this.metaAdsOrderAttributionService.getProductPerformance({
       since: range.since,
       until: range.until,
       search: query?.search,
       limit: Number(query?.limit || 100),
+      sourceMode,
+      orderMode,
     });
+
+    return {
+      ...result,
+      range: {
+        since: range.sinceYmd,
+        until: range.untilYmd,
+        timezone: 'Asia/Ho_Chi_Minh',
+        sourceMode,
+        orderMode,
+      },
+    };
   }
 }
