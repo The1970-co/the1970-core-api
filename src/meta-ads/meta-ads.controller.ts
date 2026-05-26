@@ -70,4 +70,15 @@ export class MetaAdsController {
   syncLogs(@Query() query: MetaAdsQueryDto) {
     return this.metaAdsSyncService.getSyncLogs(query);
   }
+
+  @Get('brain-overview')
+  brainOverview(@Query() query: MetaAdsQueryDto) {
+    return this.metaAdsSyncService.getBrainOverview(query);
+  }
+
+  @Get('entity-detail')
+  entityDetail(@Query() query: MetaAdsQueryDto & { type?: string; id?: string; metaId?: string }) {
+    return this.metaAdsSyncService.getEntityDetail(query);
+  }
+
 }

@@ -603,4 +603,368 @@ export class MetaAdsSyncService {
     ]);
     return { items, total, page, limit };
   }
+
+  private buildInsightWhere(query: any = {}, level?: 'campaign' | 'adset' | 'ad') {
+    const range = this.getDateRange(query);
+    const where: any = {
+      dateStart: {
+        gte: new Date(`${range.since}T00:00:00.000Z`),
+        lte: new Date(`${range.until}T23:59:59.999Z`),
+      },
+    };
+
+    if (level || query.level) where.level = level || query.level;
+    if (query.metaAccountId) where.metaAccountId = this.normalizeAccountId(query.metaAccountId);
+    if (query.metaCampaignId) where.metaCampaignId = String(query.metaCampaignId);
+    if (query.metaAdSetId) where.metaAdSetId = String(query.metaAdSetId);
+    if (query.metaAdId) where.metaAdId = String(query.metaAdId);
+    if (query.search) {
+      where.OR = [
+        { campaignName: { contains: String(query.search), mode: 'insensitive' } },
+        { adSetName: { contains: String(query.search), mode: 'insensitive' } },
+        { adName: { contains: String(query.search), mode: 'insensitive' } },
+      ];
+    }
+
+    return { where, range };
+  }
+
+  private metricsFromSum(sum: any) {
+    const spend = this.n(sum?.spend);
+    const impressions = this.n(sum?.impressions);
+    const reach = this.n(sum?.reach);
+    const clicks = this.n(sum?.clicks);
+    const inlineLinkClicks = this.n(sum?.inlineLinkClicks);
+    const purchases = this.n(sum?.purchases);
+    const purchaseValue = this.n(sum?.purchaseValue);
+    return {
+      spend,
+      impressions,
+      reach,
+      clicks,
+      inlineLinkClicks,
+      purchases,
+      purchaseValue,
+      ctr: impressions > 0 ? (clicks / impressions) * 100 : 0,
+      cpc: clicks > 0 ? spend / clicks : 0,
+      cpm: impressions > 0 ? (spend / impressions) * 1000 : 0,
+      costPerPurchase: purchases > 0 ? spend / purchases : 0,
+      roas: spend > 0 ? purchaseValue / spend : 0,
+    };
+  }
+
+  private async getTopInsightGroups(level: 'campaign' | 'adset' | 'ad', query: any = {}, take = 20) {
+    const { where } = this.buildInsightWhere(query, level);
+    const by = level === 'campaign'
+      ? ['metaCampaignId', 'campaignName']
+      : level === 'adset'
+        ? ['metaAdSetId', 'adSetName', 'metaCampaignId', 'campaignName']
+        : ['metaAdId', 'adName', 'metaAdSetId', 'adSetName', 'metaCampaignId', 'campaignName'];
+
+    if (level === 'campaign') where.metaCampaignId = { not: null };
+    if (level === 'adset') where.metaAdSetId = { not: null };
+    if (level === 'ad') where.metaAdId = { not: null };
+
+    const rows = await (this.prisma as any).metaAdInsightDaily.groupBy({
+      by,
+      where,
+      _sum: {
+        spend: true,
+        impressions: true,
+        reach: true,
+        clicks: true,
+        inlineLinkClicks: true,
+        purchases: true,
+        purchaseValue: true,
+      },
+      orderBy: { _sum: { spend: 'desc' } },
+      take,
+    });
+
+    const ids = rows
+      .map((row: any) => level === 'campaign' ? row.metaCampaignId : level === 'adset' ? row.metaAdSetId : row.metaAdId)
+      .filter(Boolean);
+
+    const structureRows = level === 'campaign'
+      ? await (this.prisma as any).metaCampaign.findMany({ where: { metaCampaignId: { in: ids } } })
+      : level === 'adset'
+        ? await (this.prisma as any).metaAdSet.findMany({ where: { metaAdSetId: { in: ids } }, include: { campaign: true } })
+        : await (this.prisma as any).metaAd.findMany({ where: { metaAdId: { in: ids } }, include: { campaign: true, adSet: true } });
+
+    const structureMap = new Map(
+      structureRows.map((row: any) => [level === 'campaign' ? row.metaCampaignId : level === 'adset' ? row.metaAdSetId : row.metaAdId, row]),
+    );
+
+    return rows.map((row: any) => {
+      const id = level === 'campaign' ? row.metaCampaignId : level === 'adset' ? row.metaAdSetId : row.metaAdId;
+      const structure: any = structureMap.get(id) || {};
+      return {
+        id,
+        level,
+        name:
+          level === 'campaign'
+            ? row.campaignName || structure?.name || id
+            : level === 'adset'
+              ? row.adSetName || structure?.name || id
+              : row.adName || structure?.name || id,
+        campaignName: row.campaignName || structure?.campaign?.name || structure?.campaignName || null,
+        adSetName: row.adSetName || structure?.adSet?.name || structure?.adSetName || null,
+        status: structure?.status || null,
+        effectiveStatus: structure?.effectiveStatus || null,
+        thumbnailUrl: structure?.thumbnailUrl || structure?.imageUrl || null,
+        previewShareableLink: structure?.previewShareableLink || null,
+        metrics: this.metricsFromSum(row._sum),
+      };
+    });
+  }
+
+
+  private metricsFromMetaInsightRow(row: any) {
+    const actions = Array.isArray(row?.actions) ? row.actions : [];
+    const actionValues = Array.isArray(row?.action_values) ? row.action_values : [];
+    const spend = this.n(row?.spend);
+    const impressions = Math.round(this.n(row?.impressions));
+    const reach = Math.round(this.n(row?.reach));
+    const clicks = Math.round(this.n(row?.clicks));
+    const inlineLinkClicks = Math.round(this.n(row?.inline_link_clicks));
+    const purchases = Math.round(this.pickActionCount(actions, ['purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase']));
+    const purchaseValue = this.pickActionValue(actionValues, ['purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase']);
+    const purchaseRoas = Array.isArray(row?.purchase_roas) ? this.n(row.purchase_roas?.[0]?.value) : 0;
+
+    return {
+      spend,
+      impressions,
+      reach,
+      clicks,
+      inlineLinkClicks,
+      purchases,
+      purchaseValue,
+      ctr: impressions > 0 ? (clicks / impressions) * 100 : this.n(row?.ctr),
+      cpc: clicks > 0 ? spend / clicks : this.n(row?.cpc),
+      cpm: impressions > 0 ? (spend / impressions) * 1000 : this.n(row?.cpm),
+      costPerPurchase: purchases > 0 ? spend / purchases : 0,
+      roas: purchaseRoas || (spend > 0 ? purchaseValue / spend : 0),
+    };
+  }
+
+  private mergeMetricRows(rows: any[]) {
+    return this.metricsFromSum({
+      spend: rows.reduce((sum, row) => sum + this.n(row?.spend), 0),
+      impressions: rows.reduce((sum, row) => sum + this.n(row?.impressions), 0),
+      reach: rows.reduce((sum, row) => sum + this.n(row?.reach), 0),
+      clicks: rows.reduce((sum, row) => sum + this.n(row?.clicks), 0),
+      inlineLinkClicks: rows.reduce((sum, row) => sum + this.n(row?.inlineLinkClicks), 0),
+      purchases: rows.reduce((sum, row) => sum + this.n(row?.purchases), 0),
+      purchaseValue: rows.reduce((sum, row) => sum + this.n(row?.purchaseValue), 0),
+    });
+  }
+
+  private async fetchOfficialAccountDailyRows(range: MetaDateRange, query: any = {}) {
+    // V4 Accuracy Layer:
+    // Meta Ads Manager total spend is safest at account-level insights.
+    // DB rows remain used for drilldown/creative table, but KPI total should reconcile with Meta official.
+    const accountId = this.normalizeAccountId(query.metaAccountId || this.defaultAdAccountId);
+    const rows = await this.graphList<any>(`/${accountId}/insights`, {
+      fields: 'date_start,date_stop,spend,impressions,reach,clicks,inline_link_clicks,cpc,cpm,ctr,actions,action_values,purchase_roas',
+      time_increment: '1',
+      time_range: JSON.stringify(range),
+      limit: '1000',
+    }, 10);
+
+    const dailyRows = rows.map((row: any) => ({
+      date: String(row.date_start || row.date_stop || '').slice(0, 10),
+      metrics: this.metricsFromMetaInsightRow(row),
+    })).filter((row: any) => row.date);
+
+    return {
+      source: 'meta_account_live',
+      dailyRows,
+      summary: this.mergeMetricRows(dailyRows.map((row: any) => row.metrics)),
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+
+
+  async getBrainOverview(query: any = {}) {
+    // Big Data V2: tuyệt đối không cộng lẫn campaign + adset + ad.
+    // Spend là cùng một dòng tiền ở 3 layer, cộng tất cả sẽ bị double/triple count.
+    // Summary/daily dùng ad-level làm nguồn chuẩn cho Creative/Attribution; nếu cần có thể truyền summaryLevel=campaign/adset/ad.
+    const summaryLevel = ['campaign', 'adset', 'ad'].includes(String(query.summaryLevel || '').toLowerCase())
+      ? String(query.summaryLevel).toLowerCase() as 'campaign' | 'adset' | 'ad'
+      : 'ad';
+    const { where, range } = this.buildInsightWhere({ ...query, level: summaryLevel }, summaryLevel);
+    const accountWhere = query.metaAccountId ? { metaAccountId: this.normalizeAccountId(query.metaAccountId) } : {};
+
+    const [
+      accounts,
+      campaignCount,
+      adSetCount,
+      adCount,
+      activeCampaignCount,
+      activeAdSetCount,
+      activeAdCount,
+      summaryAgg,
+      dailyRowsRaw,
+      latestLogs,
+    ] = await Promise.all([
+      (this.prisma as any).metaAdAccount.findMany({ where: accountWhere, orderBy: { updatedAt: 'desc' } }),
+      (this.prisma as any).metaCampaign.count({ where: accountWhere }),
+      (this.prisma as any).metaAdSet.count({ where: accountWhere }),
+      (this.prisma as any).metaAd.count({ where: accountWhere }),
+      (this.prisma as any).metaCampaign.count({ where: { ...accountWhere, effectiveStatus: 'ACTIVE' } }),
+      (this.prisma as any).metaAdSet.count({ where: { ...accountWhere, effectiveStatus: 'ACTIVE' } }),
+      (this.prisma as any).metaAd.count({ where: { ...accountWhere, effectiveStatus: 'ACTIVE' } }),
+      (this.prisma as any).metaAdInsightDaily.aggregate({
+        where,
+        _sum: { spend: true, impressions: true, reach: true, clicks: true, inlineLinkClicks: true, purchases: true, purchaseValue: true },
+      }),
+      (this.prisma as any).metaAdInsightDaily.groupBy({
+        by: ['dateStart'],
+        where,
+        _sum: { spend: true, impressions: true, reach: true, clicks: true, inlineLinkClicks: true, purchases: true, purchaseValue: true },
+        orderBy: { dateStart: 'asc' },
+      }),
+      (this.prisma as any).metaSyncLog.findMany({ orderBy: { startedAt: 'desc' }, take: 8 }),
+    ]);
+
+    const dbSummary = this.metricsFromSum(summaryAgg._sum);
+    const dbDailyRows = dailyRowsRaw.map((row: any) => ({
+      date: this.toDateInput(new Date(row.dateStart)),
+      metrics: this.metricsFromSum(row._sum),
+    }));
+
+    let officialMeta: any = null;
+    if (String(query.skipOfficialMeta || query.skipOfficial || '') !== '1') {
+      try {
+        officialMeta = await this.fetchOfficialAccountDailyRows(range, query);
+      } catch (error: any) {
+        this.logger.warn(`[MetaAdsBrain] Official account-level reconcile failed: ${error?.message || error}`);
+      }
+    }
+
+    // KPI tổng ưu tiên số official account-level để khớp Meta Ads Manager.
+    // DB ad-level vẫn giữ cho bảng creative/drilldown, tránh query nặng và vẫn phục vụ attribution.
+    const summary = officialMeta?.summary || dbSummary;
+    const dailyRows = officialMeta?.dailyRows?.length ? officialMeta.dailyRows : dbDailyRows;
+
+    const [topCampaigns, topAdSets, topAds] = await Promise.all([
+      this.getTopInsightGroups('campaign', query, 12),
+      this.getTopInsightGroups('adset', query, 12),
+      this.getTopInsightGroups('ad', query, 20),
+    ]);
+
+    const statusBreakdown = {
+      campaigns: { total: campaignCount, active: activeCampaignCount, inactive: Math.max(campaignCount - activeCampaignCount, 0) },
+      adSets: { total: adSetCount, active: activeAdSetCount, inactive: Math.max(adSetCount - activeAdSetCount, 0) },
+      ads: { total: adCount, active: activeAdCount, inactive: Math.max(adCount - activeAdCount, 0) },
+    };
+
+    const warnings = [] as Array<{ id: string; title: string; desc: string; tone: 'safe' | 'warning' | 'critical' }>;
+    const highSpendNoPurchase = topAds
+      .filter((row: any) => row.metrics.spend >= 100000 && row.metrics.purchases <= 0)
+      .slice(0, 5);
+    for (const row of highSpendNoPurchase) {
+      warnings.push({
+        id: `waste-${row.id}`,
+        title: `Ads đốt tiền chưa ra đơn: ${row.name}`,
+        desc: `Spend ${Math.round(row.metrics.spend).toLocaleString('vi-VN')}₫ nhưng chưa có purchase trong khoảng đang xem.`,
+        tone: 'warning',
+      });
+    }
+    const highCpa = topAds
+      .filter((row: any) => row.metrics.purchases > 0 && row.metrics.costPerPurchase >= 50000)
+      .slice(0, 5);
+    for (const row of highCpa) {
+      warnings.push({
+        id: `cpa-${row.id}`,
+        title: `CPA cao: ${row.name}`,
+        desc: `CPA ${Math.round(row.metrics.costPerPurchase).toLocaleString('vi-VN')}₫/purchase. Cần so với biên lợi nhuận thật trước khi scale.`,
+        tone: 'warning',
+      });
+    }
+
+    return {
+      ok: true,
+      range,
+      summaryLevel,
+      generatedAt: new Date().toISOString(),
+      accounts,
+      summary,
+      dbSummary,
+      metaOfficialSummary: officialMeta?.summary || null,
+      reconciliation: {
+        source: officialMeta?.source || 'db_ad_level',
+        officialFetchedAt: officialMeta?.fetchedAt || null,
+        dbSpend: dbSummary.spend,
+        officialSpend: officialMeta?.summary?.spend || null,
+        diffSpend: officialMeta?.summary ? officialMeta.summary.spend - dbSummary.spend : 0,
+        diffPercent: officialMeta?.summary?.spend ? ((officialMeta.summary.spend - dbSummary.spend) / officialMeta.summary.spend) * 100 : 0,
+        note: officialMeta?.summary
+          ? 'KPI dùng Meta account-level live để khớp Ads Manager; bảng chi tiết vẫn dùng DB ad-level đã sync.'
+          : 'KPI đang dùng DB ad-level vì không lấy được official account-level.',
+      },
+      statusBreakdown,
+      dailyRows,
+      topCampaigns,
+      topAdSets,
+      topAds,
+      warnings: warnings.slice(0, 8),
+      latestLogs,
+    };
+  }
+
+  async getEntityDetail(query: any = {}) {
+    const type = String(query.type || query.level || 'ad');
+    const id = String(query.id || query.metaId || '').trim();
+    if (!id) return { item: null, insights: [], children: [] };
+
+    const { where } = this.buildInsightWhere(query, type as any);
+    let item: any = null;
+    const childPayload: any = {};
+
+    if (type === 'campaign') {
+      item = await (this.prisma as any).metaCampaign.findFirst({
+        where: { OR: [{ id }, { metaCampaignId: id }] },
+      });
+      if (item?.metaCampaignId) {
+        where.metaCampaignId = item.metaCampaignId;
+        childPayload.adSets = await (this.prisma as any).metaAdSet.findMany({ where: { metaCampaignId: item.metaCampaignId }, take: 100, orderBy: { updatedAt: 'desc' } });
+        childPayload.ads = await (this.prisma as any).metaAd.findMany({ where: { metaCampaignId: item.metaCampaignId }, take: 100, orderBy: { updatedAt: 'desc' } });
+      }
+    } else if (type === 'adset') {
+      item = await (this.prisma as any).metaAdSet.findFirst({
+        where: { OR: [{ id }, { metaAdSetId: id }] },
+        include: { campaign: true },
+      });
+      if (item?.metaAdSetId) {
+        where.metaAdSetId = item.metaAdSetId;
+        childPayload.ads = await (this.prisma as any).metaAd.findMany({ where: { metaAdSetId: item.metaAdSetId }, take: 100, orderBy: { updatedAt: 'desc' } });
+      }
+    } else {
+      item = await (this.prisma as any).metaAd.findFirst({
+        where: { OR: [{ id }, { metaAdId: id }] },
+        include: { campaign: true, adSet: true },
+      });
+      if (item?.metaAdId) where.metaAdId = item.metaAdId;
+    }
+
+    const insights = await (this.prisma as any).metaAdInsightDaily.findMany({
+      where,
+      orderBy: { dateStart: 'asc' },
+      take: 120,
+    });
+
+    const aggregate = await (this.prisma as any).metaAdInsightDaily.aggregate({
+      where,
+      _sum: { spend: true, impressions: true, reach: true, clicks: true, inlineLinkClicks: true, purchases: true, purchaseValue: true },
+    });
+
+    return {
+      item,
+      insights,
+      summary: this.metricsFromSum(aggregate._sum),
+      ...childPayload,
+    };
+  }
+
 }
