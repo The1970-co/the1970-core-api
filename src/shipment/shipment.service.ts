@@ -4866,6 +4866,29 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       return raw.includes("paid") || raw.includes("completed") || raw.includes("fulfilled") || raw.includes("da thanh toan");
     };
 
+    const isCancelled = (order: any) => {
+      const raw = normalize([
+        order?.status,
+        order?.fulfillmentStatus,
+        order?.deliveryStatus,
+        order?.shippingStatus,
+        order?.shipmentStatus,
+        order?.trackingStatus,
+        order?.carrierStatus,
+        order?.carrierStatusName,
+        order?.ghnStatus,
+        order?.shipment?.shippingStatus,
+        order?.shipment?.partnerStatus,
+      ].filter(Boolean).join(" "));
+      return (
+        raw.includes("cancel") ||
+        raw.includes("cancelled") ||
+        raw.includes("canceled") ||
+        raw.includes("huy") ||
+        raw.includes("da huy")
+      );
+    };
+
     const shippingSignal = (order: any) =>
       normalize([
         order?.status,
@@ -4918,7 +4941,11 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
 
     const orderSelectInclude: any = {
       shipment: true,
-      items: true,
+      items: {
+        include: {
+          variant: { select: { id: true, sku: true, costPrice: true, price: true } },
+        },
+      },
     };
 
     const orderClient = (this.prisma as any).order;
@@ -4931,14 +4958,28 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       take: 5000,
     });
 
-    const deliveredEvents = timelineClient?.findMany
+    const rawDeliveredEvents = timelineClient?.findMany
       ? await timelineClient.findMany({
           where: { status: "DELIVERED", eventTime: { gte: safeStart, lte: safeEnd } },
-          select: { orderId: true, shipmentId: true, eventTime: true },
+          select: { orderId: true, shipmentId: true, eventTime: true, source: true },
           orderBy: { eventTime: "desc" },
-          take: 5000,
+          take: 10000,
         })
       : [];
+
+    const deliveredEvents = (rawDeliveredEvents || []).filter((event: any) => {
+      const source = String(event?.source || "").toLowerCase();
+      const isSynthetic =
+        source.includes("manual_refresh") ||
+        source.includes("refresh_all") ||
+        source.includes("backfill") ||
+        source.includes("cron") ||
+        source === "system";
+
+      // Loại event tổng hợp do refresh/backfill/cron tạo tại thời điểm đồng bộ.
+      // Timeline chỉ dùng làm fallback khi đơn không có finish_date từ GHN.
+      return !isSynthetic && (source.includes("carrier") || source.includes("ghn_") || source.includes("webhook"));
+    });
 
     const deliveredOrderIds = Array.from(
       new Set(
@@ -4958,28 +4999,120 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     );
     const deliveredShipmentIdSet = new Set(deliveredShipmentIds);
 
-    const getExplicitDeliveryDate = (order: any) => {
-      const shipment = order?.shipment || {};
-      const candidates = [
-        order?.deliveredAt,
-        order?.deliveryCompletedAt,
-        order?.deliverySuccessAt,
-        order?.shippingCompletedAt,
-        order?.shippedSuccessAt,
-        shipment?.deliveredAt,
-        shipment?.deliveryCompletedAt,
-        shipment?.deliverySuccessAt,
-        shipment?.shippingCompletedAt,
-        shipment?.completedAt,
-        shipment?.deliveredTime,
-        shipment?.completedTime,
-      ];
+    const deliveredEventByOrderId = new Map<string, any>();
+    const deliveredEventByShipmentId = new Map<string, any>();
+    for (const event of deliveredEvents || []) {
+      const orderId = String(event?.orderId || "");
+      const shipmentId = String(event?.shipmentId || "");
+      if (orderId && !deliveredEventByOrderId.has(orderId)) deliveredEventByOrderId.set(orderId, event);
+      if (shipmentId && !deliveredEventByShipmentId.has(shipmentId)) deliveredEventByShipmentId.set(shipmentId, event);
+    }
 
-      for (const value of candidates) {
-        if (value && inRange(value)) return value;
+    const pickFromObject = (source: any, keys: string[]) => {
+      if (!source || typeof source !== "object") return null;
+      for (const key of keys) {
+        const value = source?.[key];
+        if (value) return value;
+      }
+      return null;
+    };
+
+    const explicitDeliveryDateCandidates = (order: any) => {
+      const shipment = order?.shipment || {};
+      const metadata = shipment?.metadata && typeof shipment.metadata === "object" ? shipment.metadata : {};
+      const publicTracking = metadata?.publicTracking || metadata?.public_tracking || {};
+      const publicRaw = publicTracking?.raw || {};
+
+      return [
+        { value: order?.deliveredAt, source: "order.deliveredAt" },
+        { value: order?.deliveryCompletedAt, source: "order.deliveryCompletedAt" },
+        { value: order?.deliverySuccessAt, source: "order.deliverySuccessAt" },
+        { value: order?.shippingCompletedAt, source: "order.shippingCompletedAt" },
+        { value: order?.shippedSuccessAt, source: "order.shippedSuccessAt" },
+        { value: shipment?.deliveredAt, source: "shipment.deliveredAt" },
+        { value: shipment?.deliveryCompletedAt, source: "shipment.deliveryCompletedAt" },
+        { value: shipment?.deliverySuccessAt, source: "shipment.deliverySuccessAt" },
+        { value: shipment?.shippingCompletedAt, source: "shipment.shippingCompletedAt" },
+        { value: shipment?.completedAt, source: "shipment.completedAt" },
+        { value: shipment?.deliveredTime, source: "shipment.deliveredTime" },
+        { value: shipment?.completedTime, source: "shipment.completedTime" },
+        {
+          value: pickFromObject(metadata, [
+            "finish_date",
+            "finishDate",
+            "delivered_at",
+            "deliveredAt",
+            "delivery_completed_at",
+            "deliveryCompletedAt",
+            "delivery_success_at",
+            "deliverySuccessAt",
+            "completed_at",
+            "completedAt",
+          ]),
+          source: "shipment.metadata.finish_date",
+        },
+        {
+          value: pickFromObject(publicRaw, [
+            "finish_date",
+            "finishDate",
+            "delivered_at",
+            "deliveredAt",
+            "delivery_completed_at",
+            "deliveryCompletedAt",
+            "completed_at",
+            "completedAt",
+          ]),
+          source: "shipment.metadata.publicTracking.raw.finish_date",
+        },
+      ];
+    };
+
+    const normalizeDeliverySource = (source: string) =>
+      source === "shipment.metadata.finish_date" ? "ghn.finish_date" : source;
+
+    const getExplicitDeliveryInfo = (order: any) => {
+      // Ưu tiên tuyệt đối mốc giao thành công thật của GHN/carrier.
+      // Nếu finish_date nằm ngoài khoảng đang xem thì đơn đó KHÔNG được fallback về timeline manual_refresh trong ngày khác.
+      for (const candidate of explicitDeliveryDateCandidates(order)) {
+        if (!candidate.value) continue;
+        const date = new Date(candidate.value);
+        if (Number.isNaN(date.getTime())) continue;
+        return {
+          deliveryDate: candidate.value,
+          deliveryDateSource: normalizeDeliverySource(candidate.source),
+        };
+      }
+      return null;
+    };
+
+    const getTimelineDeliveryInfo = (order: any) => {
+      const orderId = String(order?.id || "");
+      const shipmentId = String(order?.shipment?.id || "");
+      const event =
+        (orderId && deliveredEventByOrderId.get(orderId)) ||
+        (shipmentId && deliveredEventByShipmentId.get(shipmentId));
+
+      if (event?.eventTime) {
+        return {
+          deliveryDate: event.eventTime,
+          deliveryDateSource: `timeline:${event.source || "carrier"}`,
+        };
       }
 
       return null;
+    };
+
+    const getDeliveryDebugInfo = (order: any) => {
+      return (
+        getExplicitDeliveryInfo(order) ||
+        getTimelineDeliveryInfo(order) ||
+        { deliveryDate: null, deliveryDateSource: null }
+      );
+    };
+
+    const hasDeliveryDateInSelectedRange = (order: any) => {
+      const info = getDeliveryDebugInfo(order);
+      return Boolean(info.deliveryDate && inRange(info.deliveryDate));
     };
 
     const recentStart = new Date(safeStart);
@@ -4993,28 +5126,47 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     });
 
     const successOrders = recentOrders.filter((order: any) => {
-      const orderId = String(order?.id || "");
-      const shipmentId = String(order?.shipment?.id || "");
-
-      if (orderId && deliveredOrderIdSet.has(orderId)) return true;
-      if (shipmentId && deliveredShipmentIdSet.has(shipmentId)) return true;
-
+      if (isCancelled(order)) return false;
       if (!isDelivered(order)) return false;
 
-      // Không fallback sang createdAt/updatedAt cho đơn giao hàng.
-      // updatedAt hôm nay có thể chỉ là đồng bộ/đối soát lại, khiến toàn bộ đơn đã giao cũ bị tính vào hôm nay.
-      return Boolean(getExplicitDeliveryDate(order));
+      // Chỉ tính doanh thu giao thành công vào đúng ngày giao thật.
+      // Ưu tiên finish_date của GHN; timeline carrier chỉ là fallback.
+      // Không dùng updatedAt/lastSyncedAt và không cho timeline manual_refresh kéo đơn sang sai ngày.
+      return hasDeliveryDateInSelectedRange(order);
     });
 
     const posCreated = createdOrders.filter(isPosOrder);
     const facebookCreated = createdOrders.filter((order: any) => !isPosOrder(order) && isFacebookOrder(order));
     const otherCreated = createdOrders.filter((order: any) => !isPosOrder(order) && !isFacebookOrder(order));
 
-    const posSuccess = createdOrders.filter((order: any) => isPosOrder(order) && (isPaid(order) || isDelivered(order)));
+    const posSuccess = createdOrders.filter((order: any) => !isCancelled(order) && isPosOrder(order) && (isPaid(order) || isDelivered(order)));
     const facebookDelivered = successOrders.filter((order: any) => !isPosOrder(order) && isFacebookOrder(order) && isDelivered(order));
     const otherDelivered = successOrders.filter((order: any) => !isPosOrder(order) && !isFacebookOrder(order) && isDelivered(order));
 
     const sumAmount = (orders: any[]) => orders.reduce((sum, order) => sum + amountOf(order), 0);
+
+    const qtyOfItem = (item: any) => Number(item?.qty ?? item?.quantity ?? 0) || 0;
+    const unitCostOfItem = (item: any) => {
+      const candidates = [
+        item?.costPrice,
+        item?.unitCost,
+        item?.cost,
+        item?.purchasePrice,
+        item?.variant?.costPrice,
+        item?.variant?.purchasePrice,
+        item?.variant?.importPrice,
+      ];
+      for (const value of candidates) {
+        const parsed = Number(value || 0);
+        if (Number.isFinite(parsed) && parsed > 0) return parsed;
+      }
+      return 0;
+    };
+    const costOfOrder = (order: any) => {
+      const items = Array.isArray(order?.items) ? order.items : [];
+      return items.reduce((sum: number, item: any) => sum + unitCostOfItem(item) * qtyOfItem(item), 0);
+    };
+    const sumCost = (orders: any[]) => orders.reduce((sum, order) => sum + costOfOrder(order), 0);
 
     const normalizeOrder = (order: any) => ({
       ...order,
@@ -5025,6 +5177,117 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       ahamoveStatus: order?.shipment?.ahamoveStatus || null,
       ahamoveSubStatus: order?.shipment?.ahamoveSubStatus || null,
     });
+
+    const debugDeliveredSamples = facebookDelivered.slice(0, 20).map((order: any) => {
+      const debug = getDeliveryDebugInfo(order);
+      return {
+        orderId: order?.id || null,
+        orderCode: order?.orderCode || order?.code || null,
+        salesChannel: order?.salesChannel || order?.channel || null,
+        trackingCode: order?.shipment?.trackingCode || null,
+        amount: amountOf(order),
+        cost: costOfOrder(order),
+        costRate: amountOf(order) > 0 ? Number(((costOfOrder(order) / amountOf(order)) * 100).toFixed(1)) : 0,
+        status: order?.status || null,
+        fulfillmentStatus: order?.fulfillmentStatus || null,
+        shippingStatus: order?.shipment?.shippingStatus || null,
+        partnerStatus: order?.shipment?.partnerStatus || null,
+        deliveryDate: debug.deliveryDate,
+        deliveryDateSource: debug.deliveryDateSource,
+        shipmentUpdatedAt: order?.shipment?.updatedAt || null,
+        lastSyncedAt: order?.shipment?.lastSyncedAt || null,
+        metadataFinishDate: order?.shipment?.metadata?.finish_date || order?.shipment?.metadata?.finishDate || null,
+      };
+    });
+
+    const localDayKey = (value?: Date | string | null) => {
+      if (!value) return "";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "";
+      return ymd(date);
+    };
+
+    const upsertDailySuccessRow = (
+      map: Map<string, any>,
+      dateKey: string,
+      bucket: "pos" | "facebook" | "other",
+      order: any,
+    ) => {
+      if (!dateKey) return;
+      const current =
+        map.get(dateKey) || {
+          date: dateKey,
+          successOrders: 0,
+          successAmount: 0,
+          successCost: 0,
+          posOrders: 0,
+          posAmount: 0,
+          posCost: 0,
+          facebookDeliveredOrders: 0,
+          facebookDeliveredAmount: 0,
+          facebookDeliveredCost: 0,
+          otherDeliveredOrders: 0,
+          otherDeliveredAmount: 0,
+          otherDeliveredCost: 0,
+        };
+
+      const amount = amountOf(order);
+      const cost = costOfOrder(order);
+      current.successOrders += 1;
+      current.successAmount += amount;
+      current.successCost += cost;
+
+      if (bucket === "pos") {
+        current.posOrders += 1;
+        current.posAmount += amount;
+        current.posCost += cost;
+      } else if (bucket === "facebook") {
+        current.facebookDeliveredOrders += 1;
+        current.facebookDeliveredAmount += amount;
+        current.facebookDeliveredCost += cost;
+      } else {
+        current.otherDeliveredOrders += 1;
+        current.otherDeliveredAmount += amount;
+        current.otherDeliveredCost += cost;
+      }
+
+      map.set(dateKey, current);
+    };
+
+    const dailySuccessMap = new Map<string, any>();
+
+    for (const order of posSuccess) {
+      const posDate =
+        order?.soldAt ||
+        order?.paidAt ||
+        order?.completedAt ||
+        order?.updatedAt ||
+        order?.createdAt;
+      const dateKey = localDayKey(posDate);
+      if (dateKey && inRange(posDate)) {
+        upsertDailySuccessRow(dailySuccessMap, dateKey, "pos", order);
+      }
+    }
+
+    for (const order of facebookDelivered) {
+      const debug = getDeliveryDebugInfo(order);
+      const dateKey = localDayKey(debug.deliveryDate);
+      if (dateKey) {
+        upsertDailySuccessRow(dailySuccessMap, dateKey, "facebook", order);
+      }
+    }
+
+    for (const order of otherDelivered) {
+      const debug = getDeliveryDebugInfo(order);
+      const dateKey = localDayKey(debug.deliveryDate);
+      if (dateKey) {
+        upsertDailySuccessRow(dailySuccessMap, dateKey, "other", order);
+      }
+    }
+
+    const dailySuccessRows = Array.from(dailySuccessMap.values()).sort((a, b) =>
+      String(a.date) < String(b.date) ? 1 : -1,
+    );
 
     return {
       range,
@@ -5041,15 +5304,19 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       revenueSuccess: {
         totalOrders: posSuccess.length + facebookDelivered.length + otherDelivered.length,
         totalAmount: sumAmount(posSuccess) + sumAmount(facebookDelivered) + sumAmount(otherDelivered),
-        pos: { orders: posSuccess.length, amount: sumAmount(posSuccess) },
-        facebookDelivered: { orders: facebookDelivered.length, amount: sumAmount(facebookDelivered) },
-        otherDelivered: { orders: otherDelivered.length, amount: sumAmount(otherDelivered) },
+        totalCost: sumCost(posSuccess) + sumCost(facebookDelivered) + sumCost(otherDelivered),
+        pos: { orders: posSuccess.length, amount: sumAmount(posSuccess), cost: sumCost(posSuccess) },
+        facebookDelivered: { orders: facebookDelivered.length, amount: sumAmount(facebookDelivered), cost: sumCost(facebookDelivered) },
+        otherDelivered: { orders: otherDelivered.length, amount: sumAmount(otherDelivered), cost: sumCost(otherDelivered) },
       },
+      dailySuccessRows,
       createdOrders: createdOrders.map(normalizeOrder),
       successOrders: [...posSuccess, ...facebookDelivered, ...otherDelivered].map(normalizeOrder),
+      debugDeliveredSamples,
       deliverySource: {
         deliveredTimelineEvents: deliveredEvents?.length || 0,
-        note: "POS thành công lấy từ đơn POS đã paid/completed. Facebook giao thành công lấy từ shipment DELIVERED/timeline DELIVERED; không lấy SHIPPED làm thành công.",
+        ignoredSyntheticDeliveredEvents: Math.max((rawDeliveredEvents?.length || 0) - (deliveredEvents?.length || 0), 0),
+        note: "POS thành công lấy từ đơn POS đã paid/completed. Facebook giao thành công lấy theo mốc giao thật từ GHN/timeline carrier hoặc finish_date, không lấy updatedAt/lastSyncedAt của cron/backfill. Giá vốn lấy theo đúng tập đơn thành công trong ngày.",
       },
     };
   }

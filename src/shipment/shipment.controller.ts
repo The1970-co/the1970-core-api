@@ -86,6 +86,11 @@ export class ShipmentController {
     return this.shipmentService.runGhnTrackingSyncCronNow();
   }
 
+  @Get("war-room/delivery-revenue")
+  getWarRoomDeliveryRevenue(@Query() query: any) {
+    return this.shipmentService.getWarRoomDeliveryRevenue(query);
+  }
+
   @Get("order/:orderId/timeline")
   getShipmentTimelineByOrder(@Param("orderId") orderId: string) {
     return this.shipmentService.getShipmentTimelineByOrder(orderId);
