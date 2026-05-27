@@ -1350,7 +1350,7 @@ export class MetaAdsSyncService {
       generatedAt: new Date().toISOString(),
       range: dateRange,
       level,
-      count: normalized.length,
+      count: enrichedNormalized.length,
       summary,
       officialSummary: summary,
       dbSummary: null,
@@ -1361,14 +1361,14 @@ export class MetaAdsSyncService {
         spendDiffPercent: 0,
       },
       statusBreakdown: {
-        campaigns: { total: level === 'campaign' ? normalized.length : 0, active: 0, inactive: 0 },
-        adSets: { total: level === 'adset' ? normalized.length : 0, active: 0, inactive: 0 },
-        ads: { total: level === 'ad' ? normalized.length : 0, active: 0, inactive: 0 },
+        campaigns: { total: level === 'campaign' ? enrichedNormalized.length : 0, active: 0, inactive: 0 },
+        adSets: { total: level === 'adset' ? enrichedNormalized.length : 0, active: 0, inactive: 0 },
+        ads: { total: level === 'ad' ? enrichedNormalized.length : 0, active: 0, inactive: 0 },
       },
       dailyRows: [],
-      topCampaigns: level === 'campaign' ? normalized : [],
-      topAdSets: level === 'adset' ? normalized : [],
-      topAds: level === 'ad' ? normalized : [],
+      topCampaigns: level === 'campaign' ? enrichedNormalized : [],
+      topAdSets: level === 'adset' ? enrichedNormalized : [],
+      topAds: level === 'ad' ? enrichedNormalized : [],
       warnings: [],
       latestLogs: [],
       attribution: {
@@ -1482,54 +1482,114 @@ export class MetaAdsSyncService {
   private async enrichLiveRowsWithStructure(rows: any[], level: string) {
     if (!Array.isArray(rows) || !rows.length) return rows;
 
-    const ids = rows
-      .map((row) => String(row?.id || row?.metaAdId || row?.metaCampaignId || row?.metaAdSetId || '').trim())
-      .filter(Boolean);
+    // Quan trọng: insight live chỉ có số liệu, không có ảnh/trạng thái.
+    // Với level ad, gọi trực tiếp Graph /?ids=... để lấy effective_status + creative thumbnail.
+    if (level === 'ad') {
+      const adIds = Array.from(
+        new Set(
+          rows
+            .map((row) => String(row?.metaAdId || row?.id || '').trim())
+            .filter(Boolean),
+        ),
+      );
+
+      if (!adIds.length) return rows;
+
+      const enrichMap = new Map<string, any>();
+
+      for (let i = 0; i < adIds.length; i += 50) {
+        const chunk = adIds.slice(i, i + 50);
+        try {
+          const data = await this.graphGet<Record<string, any>>('/', {
+            ids: chunk.join(','),
+            fields:
+              'id,name,status,effective_status,configured_status,creative{id,thumbnail_url,image_url,object_story_spec}',
+          });
+
+          for (const id of chunk) {
+            const item = (data as any)?.[id];
+            if (!item) continue;
+            const creative = item.creative || {};
+            const objectStory = creative.object_story_spec || {};
+            enrichMap.set(id, {
+              status: item.status || item.configured_status || item.effective_status || null,
+              effectiveStatus: item.effective_status || item.status || item.configured_status || null,
+              thumbnailUrl:
+                creative.thumbnail_url ||
+                creative.image_url ||
+                objectStory?.link_data?.picture ||
+                objectStory?.video_data?.image_url ||
+                null,
+            });
+          }
+        } catch (error) {
+          this.logger.warn(`[META_LIVE_ENRICH_GRAPH] skip ad chunk: ${error?.message || error}`);
+        }
+      }
+
+      return rows.map((row) => {
+        const id = String(row?.metaAdId || row?.id || '').trim();
+        const extra = enrichMap.get(id);
+        if (!extra) return row;
+        return {
+          ...row,
+          status: row.status || extra.status,
+          effectiveStatus: row.effectiveStatus || extra.effectiveStatus,
+          thumbnailUrl: row.thumbnailUrl || extra.thumbnailUrl,
+          imageUrl: row.imageUrl || extra.thumbnailUrl,
+        };
+      });
+    }
+
+    // Campaign/adset: chỉ cần trạng thái; nếu không lấy được thì để nguyên.
+    const ids = Array.from(
+      new Set(
+        rows
+          .map((row) =>
+            String(
+              level === 'campaign'
+                ? row?.metaCampaignId || row?.id || ''
+                : row?.metaAdSetId || row?.id || '',
+            ).trim(),
+          )
+          .filter(Boolean),
+      ),
+    );
 
     if (!ids.length) return rows;
 
-    let map = new Map<string, any>();
+    const enrichMap = new Map<string, any>();
+    for (let i = 0; i < ids.length; i += 50) {
+      const chunk = ids.slice(i, i + 50);
+      try {
+        const data = await this.graphGet<Record<string, any>>('/', {
+          ids: chunk.join(','),
+          fields: 'id,name,status,effective_status,configured_status',
+        });
 
-    try {
-      if (level === 'campaign') {
-        const items = await (this.prisma as any).metaCampaign.findMany({
-          where: { metaCampaignId: { in: ids } },
-          take: ids.length,
-        });
-        map = new Map(items.map((item: any) => [String(item.metaCampaignId), item]));
-      } else if (level === 'adset') {
-        const items = await (this.prisma as any).metaAdSet.findMany({
-          where: { metaAdSetId: { in: ids } },
-          take: ids.length,
-        });
-        map = new Map(items.map((item: any) => [String(item.metaAdSetId), item]));
-      } else {
-        const items = await (this.prisma as any).metaAd.findMany({
-          where: { metaAdId: { in: ids } },
-          take: ids.length,
-        });
-        map = new Map(items.map((item: any) => [String(item.metaAdId), item]));
+        for (const id of chunk) {
+          const item = (data as any)?.[id];
+          if (!item) continue;
+          enrichMap.set(id, {
+            status: item.status || item.configured_status || item.effective_status || null,
+            effectiveStatus: item.effective_status || item.status || item.configured_status || null,
+          });
+        }
+      } catch (error) {
+        this.logger.warn(`[META_LIVE_ENRICH_GRAPH] skip ${level} chunk: ${error?.message || error}`);
       }
-    } catch (error) {
-      this.logger.warn(`[META_LIVE_ENRICH] skip structure enrich: ${error?.message || error}`);
-      return rows;
     }
 
     return rows.map((row) => {
-      const id = String(row?.id || row?.metaAdId || row?.metaCampaignId || row?.metaAdSetId || '').trim();
-      const entity = map.get(id);
-      if (!entity) return row;
-
-      const thumbnailUrl = this.pickFirstString(row.thumbnailUrl, row.thumbnail_url, this.pickMetaThumbnail(entity));
-      const effectiveStatus = this.pickFirstString(row.effectiveStatus, row.effective_status, this.pickMetaStatus(entity));
-      const status = this.pickFirstString(row.status, entity.status, effectiveStatus);
-
+      const id = String(
+        level === 'campaign' ? row?.metaCampaignId || row?.id || '' : row?.metaAdSetId || row?.id || '',
+      ).trim();
+      const extra = enrichMap.get(id);
+      if (!extra) return row;
       return {
         ...row,
-        thumbnailUrl,
-        imageUrl: this.pickFirstString(row.imageUrl, row.image_url, thumbnailUrl),
-        effectiveStatus,
-        status,
+        status: row.status || extra.status,
+        effectiveStatus: row.effectiveStatus || extra.effectiveStatus,
       };
     });
   }

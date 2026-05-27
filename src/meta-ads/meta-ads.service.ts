@@ -153,36 +153,51 @@ export class MetaAdsService {
     return process.env.META_AD_ACCOUNT_NAME || 'Nam Nguyen';
   }
 
-  private toDateInput(date: Date) {
-    const yyyy = date.getFullYear();
-    const mm = String(date.getMonth() + 1).padStart(2, '0');
-    const dd = String(date.getDate()).padStart(2, '0');
-    return `${yyyy}-${mm}-${dd}`;
+  private hcmYmd(date: Date) {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(date);
+  }
+
+  private hcmBoundary(ymd: string, end = false) {
+    return new Date(`${ymd}${end ? 'T23:59:59.999+07:00' : 'T00:00:00.000+07:00'}`);
+  }
+
+  private addDays(ymd: string, days: number) {
+    const d = this.hcmBoundary(ymd, false);
+    d.setUTCDate(d.getUTCDate() + days);
+    return this.hcmYmd(d);
   }
 
   private getDateRange(range?: MetaRange, fromDate?: string, toDate?: string) {
     if (range === 'custom' && fromDate && toDate) {
-      return { since: fromDate, until: toDate };
+      return { since: fromDate.slice(0, 10), until: toDate.slice(0, 10) };
     }
 
-    const end = new Date();
-    const start = new Date();
+    const today = this.hcmYmd(new Date());
+    let since = today;
+    let until = today;
 
     if (range === 'yesterday') {
-      start.setDate(start.getDate() - 1);
-      end.setDate(end.getDate() - 1);
+      since = this.addDays(today, -1);
+      until = since;
     } else if (range === '7d') {
-      start.setDate(start.getDate() - 6);
+      // Giống Meta "7 ngày qua": 7 ngày đã kết thúc, không lấy hôm nay.
+      until = this.addDays(today, -1);
+      since = this.addDays(until, -6);
     } else if (range === '10d') {
-      start.setDate(start.getDate() - 9);
+      // Dashboard War Room đang xem 10 ngày gồm hôm nay + 9 ngày trước.
+      since = this.addDays(today, -9);
+      until = today;
     } else if (range === '30d') {
-      start.setDate(start.getDate() - 29);
+      since = this.addDays(today, -29);
+      until = today;
     }
 
-    return {
-      since: this.toDateInput(start),
-      until: this.toDateInput(end),
-    };
+    return { since, until };
   }
 
   private async graphGet<T>(path: string, params: Record<string, string>) {
@@ -213,6 +228,14 @@ export class MetaAdsService {
     });
   }
 
+  /**
+   * Summary endpoint cũ của Dashboard.
+   *
+   * Lỗi cũ: sum theo level=campaign + paging riêng nên có lúc lệch với Meta Ads Manager.
+   * Fix an toàn: query account-level insights theo ngày, time_increment=1.
+   * Đây là tổng chi tiêu chính thức của account trong range, không phụ thuộc trạng thái,
+   * không phụ thuộc danh sách ads đang hiển thị, không phụ thuộc filter FE.
+   */
   async getCampaignInsights(params: {
     range?: MetaRange;
     fromDate?: string;
@@ -233,19 +256,20 @@ export class MetaAdsService {
     );
     firstUrl.searchParams.set(
       'fields',
-      'date_start,date_stop,campaign_id,campaign_name,spend,impressions,clicks,actions,action_values,cost_per_action_type',
+      'date_start,date_stop,spend,impressions,clicks,reach,inline_link_clicks',
     );
-    firstUrl.searchParams.set('level', 'campaign');
     firstUrl.searchParams.set('time_increment', '1');
     firstUrl.searchParams.set('time_range', JSON.stringify({ since, until }));
-    firstUrl.searchParams.set('limit', '500');
+    firstUrl.searchParams.set('action_report_time', 'conversion');
+    firstUrl.searchParams.set('use_unified_attribution_setting', 'true');
+    firstUrl.searchParams.set('limit', '100');
     firstUrl.searchParams.set('access_token', this.accessToken);
 
     const rows: MetaAdsInsightRow[] = [];
     let nextUrl: string | undefined = firstUrl.toString();
     let page = 0;
 
-    while (nextUrl && page < 20) {
+    while (nextUrl && page < 10) {
       page += 1;
 
       const res = await fetch(nextUrl, { method: 'GET' });
@@ -283,7 +307,11 @@ export class MetaAdsService {
       totalAdsCost,
       impressions,
       clicks,
+      // Giữ key campaigns để không vỡ Dashboard cũ, nhưng dữ liệu là account daily rows.
       campaigns: rows,
+      daily: rows,
+      source: 'meta_account_insights_daily',
+      range: this.getDateRange(params.range || 'today', params.fromDate, params.toDate),
     };
   }
 }

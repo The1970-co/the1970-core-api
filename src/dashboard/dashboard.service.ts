@@ -605,68 +605,117 @@ export class DashboardService {
       })
       .sort((a, b) => this.n((b as any).orders) - this.n((a as any).orders));
 
-    const adsCostByDay = new Map<string, number>();
-    const adsCostByDayNumber = new Map<string, number>();
     const adsCostByDatePlain: Record<string, number> = {};
-    const adsCostByDayPlain: Record<string, number> = {};
+    let metaAdsConnected = false;
 
-    // Lấy ads spend 30 ngày từ Meta và gom theo từng ngày để bảng dailyRows có đủ adsCost/ROAS.
-    // Không để frontend tự suy luận: core trả raw.adsCost theo từng dòng ngày.
-    const metaSummary = await this.metaAdsService
-      .getSummary({ range: "30d" as any })
-      .catch((error) => {
-        console.error(
-          "[Dashboard] Meta ads summary failed:",
-          error?.message || error,
-        );
-        return {
-          connected: false,
-          totalAdsCost: 0,
-          impressions: 0,
-          clicks: 0,
-          campaigns: [] as any[],
+    // CHỈ SỬA NGUỒN CHI PHÍ ADS.
+    // Không động doanh thu, giá vốn, đơn hàng, lợi nhuận ngoài việc thay adsCost theo ngày.
+    // Dashboard cần số tiền chạy theo từng ngày, nên lấy live campaign insights time_increment=1
+    // từ MetaAdsService.getCampaignInsights() giống flow cũ trước khi Meta Brain Center đổi sang live table.
+    const sumAdsRowsToMap = (rows: any[]) => {
+      for (const row of rows || []) {
+        const rawDate =
+          row?.dateStart || row?.date_start || row?.dateStop || row?.date_stop;
+        const key =
+          rawDate instanceof Date
+            ? this.dayKey(rawDate)
+            : String(rawDate || "").slice(0, 10);
+        const spend = this.n(row?.spend);
+        if (!key || spend <= 0) continue;
+        adsCostByDatePlain[key] = (adsCostByDatePlain[key] || 0) + spend;
+      }
+    };
+
+    // Ưu tiên live campaign daily từ Meta API để chi phí hôm nay / từng ngày khớp Ads Manager.
+    // Không dùng DB metaAdInsightDaily làm nguồn chính vì DB có thể stale sau khi đổi flow Meta live.
+    try {
+      const liveDailyRows = await this.metaAdsService.getCampaignInsights({
+        range: "custom" as any,
+        fromDate: this.dayKey(monthStart),
+        toDate: this.dayKey(todayStart),
+      } as any);
+
+      sumAdsRowsToMap(Array.isArray(liveDailyRows) ? liveDailyRows : []);
+      metaAdsConnected = Boolean(
+        Array.isArray(liveDailyRows) ||
+        Object.values(adsCostByDatePlain).some((value) => this.n(value) > 0) ||
+        process.env.META_ACCESS_TOKEN,
+      );
+    } catch (error) {
+      console.error(
+        "[Dashboard] Meta ads live daily spend query failed:",
+        (error as any)?.message || error,
+      );
+    }
+
+    // Fallback an toàn: chỉ dùng DB daily khi live Meta lỗi/không trả được.
+    if (!Object.values(adsCostByDatePlain).some((value) => this.n(value) > 0)) {
+      try {
+        const prismaAny = this.prisma as any;
+        const baseWhere = {
+          dateStart: { gte: monthStart, lt: tomorrowStart },
         };
-      });
 
-    const adsRows = Array.isArray((metaSummary as any).campaigns)
-      ? ((metaSummary as any).campaigns as any[])
-      : [];
+        const adDailyRows = await prismaAny.metaAdInsightDaily.findMany({
+          where: { ...baseWhere, level: "ad" },
+          select: { dateStart: true, spend: true },
+        });
 
-    for (const row of adsRows) {
-      const key = String(row?.date_start || row?.date_stop || "").slice(0, 10);
-      const spend = this.n(row?.spend);
-      if (!key || spend <= 0) continue;
+        if (Array.isArray(adDailyRows) && adDailyRows.length > 0) {
+          sumAdsRowsToMap(adDailyRows);
+        } else {
+          const campaignDailyRows = await prismaAny.metaAdInsightDaily.findMany(
+            {
+              where: { ...baseWhere, level: "campaign" },
+              select: { dateStart: true, spend: true },
+            },
+          );
+          sumAdsRowsToMap(campaignDailyRows);
+        }
 
-      const dayNumber = key.slice(8, 10);
-      adsCostByDay.set(key, (adsCostByDay.get(key) || 0) + spend);
-      adsCostByDatePlain[key] = (adsCostByDatePlain[key] || 0) + spend;
-
-      if (dayNumber) {
-        adsCostByDayNumber.set(
-          dayNumber,
-          (adsCostByDayNumber.get(dayNumber) || 0) + spend,
+        metaAdsConnected = Boolean(
+          metaAdsConnected ||
+          Object.values(adsCostByDatePlain).some((value) => this.n(value) > 0),
         );
-        adsCostByDayPlain[dayNumber] =
-          (adsCostByDayPlain[dayNumber] || 0) + spend;
+      } catch (error) {
+        console.error(
+          "[Dashboard] Meta ads daily DB fallback failed:",
+          (error as any)?.message || error,
+        );
       }
     }
 
-    const getAdsCostForDay = (key: string) => {
-      const dayNumber = key.slice(8, 10);
-      return (
-        adsCostByDatePlain[key] ||
-        adsCostByDay.get(key) ||
-        adsCostByDayPlain[dayNumber] ||
-        adsCostByDayNumber.get(dayNumber) ||
-        0
-      );
-    };
+    // Fallback cuối cùng: giữ tương thích getSummary cũ nếu live + DB đều không có.
+    if (!Object.values(adsCostByDatePlain).some((value) => this.n(value) > 0)) {
+      const metaSummary = await this.metaAdsService
+        .getSummary({ range: "30d" as any })
+        .catch((error) => {
+          console.error(
+            "[Dashboard] Meta ads summary fallback failed:",
+            error?.message || error,
+          );
+          return null;
+        });
 
-    const metaAdsConnected = Boolean(
-      (metaSummary as any).connected ||
-      adsRows.length ||
-      process.env.META_ACCESS_TOKEN,
-    );
+      const rows = Array.isArray((metaSummary as any)?.campaigns)
+        ? ((metaSummary as any).campaigns as any[])
+        : [];
+      sumAdsRowsToMap(rows);
+      metaAdsConnected = Boolean(
+        metaAdsConnected ||
+        (metaSummary as any)?.connected ||
+        rows.length ||
+        Object.values(adsCostByDatePlain).some((value) => this.n(value) > 0) ||
+        process.env.META_ACCESS_TOKEN,
+      );
+    }
+
+    const getAdsCostForDay = (key: string) => adsCostByDatePlain[key] || 0;
+
+    const adsRows = Object.entries(adsCostByDatePlain).map(([date, spend]) => ({
+      date,
+      spend,
+    }));
 
     const dailyMap = new Map<
       string,
