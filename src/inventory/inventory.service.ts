@@ -2003,18 +2003,369 @@ export class InventoryService {
     };
   }
 
-  async getInventoryMovements(limit = 50000, user?: any) {
+  private normalizeInventorySearchValue(value: any) {
+    return String(value ?? "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/đ/g, "d")
+      .replace(/Đ/g, "D")
+      .toLowerCase()
+      .trim();
+  }
+
+  private compactInventorySearchValue(value: any) {
+    return this.normalizeInventorySearchValue(value).replace(/[^a-z0-9]/g, "");
+  }
+
+  private inventorySearchTokens(value: any) {
+    const raw = String(value ?? "").trim();
+    const normalized = this.normalizeInventorySearchValue(raw);
+    const compact = this.compactInventorySearchValue(raw);
+    const withoutOrd = compact.replace(/^ord/, "");
+    const digits = raw.replace(/\D/g, "");
+
+    return Array.from(
+      new Set([normalized, compact, withoutOrd, digits].filter(Boolean)),
+    );
+  }
+
+  private movementMatchesSearch(row: any, keyword?: string | null) {
+    const tokens = this.inventorySearchTokens(keyword);
+    if (!tokens.length) return true;
+
+    const values = [
+      row.id,
+      row.type,
+      row.qty,
+      row.note,
+      row.refType,
+      row.refId,
+      row.refCode,
+      row.orderCode,
+      row.documentCode,
+      row.sourceCode,
+      row.purchaseReceiptCode,
+      row.stocktakeSessionCode,
+      row.stockTransferCode,
+      row.branchId,
+      row.createdAt,
+      row.createdAtText,
+      row.updatedAt,
+      row.createdById,
+      row.createdByName,
+      row.createdByEmail,
+      row.actorId,
+      row.actorName,
+      row.actorEmail,
+      row.status,
+      row.sku,
+      row.barcode,
+      row.productName,
+      row.productId,
+      row.variantId,
+      row.color,
+      row.size,
+    ];
+
+    const normalizedHaystack = values
+      .map((value) => this.normalizeInventorySearchValue(value))
+      .filter(Boolean)
+      .join(" ");
+    const compactHaystack = values
+      .map((value) => this.compactInventorySearchValue(value))
+      .filter(Boolean)
+      .join(" ");
+    const digitHaystack = values
+      .map((value) => String(value ?? "").replace(/\D/g, ""))
+      .filter(Boolean)
+      .join(" ");
+
+    return tokens.some((token) => {
+      if (!token) return false;
+      if (/^\d+$/.test(token)) return digitHaystack.includes(token);
+      if (token.includes(" ")) return normalizedHaystack.includes(token);
+      return (
+        compactHaystack.includes(token) || normalizedHaystack.includes(token)
+      );
+    });
+  }
+
+  private async mapRefCodesFromRefs(rows: any[]) {
+    const result = new Map<string, string>();
+
+    const addCode = (movementId: string, code: any) => {
+      const clean = String(code || "").trim();
+      if (movementId && clean && !result.has(movementId)) {
+        result.set(movementId, clean);
+      }
+    };
+
+    for (const row of rows) {
+      addCode(
+        row.id,
+        row?.refCode ||
+          row?.orderCode ||
+          row?.documentCode ||
+          row?.sourceCode ||
+          row?.purchaseReceiptCode ||
+          row?.stocktakeSessionCode ||
+          row?.stockTransferCode,
+      );
+    }
+
+    const refGroups = new Map<string, Map<string, string[]>>();
+
+    for (const row of rows) {
+      if (result.has(row.id)) continue;
+
+      const refType = this.normalizeRefType(row.refType);
+      const refId = row.refId ? String(row.refId).trim() : "";
+      if (!refType || !refId) continue;
+
+      const group = refGroups.get(refType) || new Map<string, string[]>();
+      const movementIds = group.get(refId) || [];
+      movementIds.push(row.id);
+      group.set(refId, movementIds);
+      refGroups.set(refType, group);
+    }
+
+    const refConfig: Record<string, { table: string; codeColumns: string[] }> = {
+      ORDER: {
+        table: "Order",
+        codeColumns: [
+          "orderCode",
+          "code",
+          "orderNumber",
+          "displayId",
+          "clientOrderCode",
+          "trackingCode",
+          "shipmentTrackingCode",
+        ],
+      },
+      SALE: {
+        table: "Order",
+        codeColumns: [
+          "orderCode",
+          "code",
+          "orderNumber",
+          "displayId",
+          "clientOrderCode",
+          "trackingCode",
+          "shipmentTrackingCode",
+        ],
+      },
+      POS: {
+        table: "Order",
+        codeColumns: [
+          "orderCode",
+          "code",
+          "orderNumber",
+          "displayId",
+          "clientOrderCode",
+        ],
+      },
+      PURCHASE_RECEIPT: {
+        table: "PurchaseReceipt",
+        codeColumns: ["code", "receiptCode", "purchaseReceiptCode"],
+      },
+      STOCKTAKE: {
+        table: "StocktakeSession",
+        codeColumns: ["code", "sessionCode", "stocktakeCode"],
+      },
+      STOCKTAKE_SESSION: {
+        table: "StocktakeSession",
+        codeColumns: ["code", "sessionCode", "stocktakeCode"],
+      },
+      INVENTORY_TRANSFER: {
+        table: "StockTransfer",
+        codeColumns: ["code", "transferCode", "stockTransferCode"],
+      },
+      STOCK_TRANSFER: {
+        table: "StockTransfer",
+        codeColumns: ["code", "transferCode", "stockTransferCode"],
+      },
+    };
+
+    for (const [refType, group] of refGroups.entries()) {
+      const config = refConfig[refType];
+      if (!config || !(await this.tableExists(config.table))) continue;
+
+      const columns = await this.getPublicColumns(config.table);
+      const searchableColumns = ["id", ...config.codeColumns].filter(
+        (column, index, array) =>
+          columns.has(column) && array.indexOf(column) === index,
+      );
+      const selectColumns = searchableColumns;
+
+      if (!searchableColumns.length) continue;
+
+      const refs = Array.from(group.keys());
+      if (!refs.length) continue;
+
+      const whereSql = searchableColumns
+        .map((column) => `${this.quoteIdent(column)} = ANY($1::text[])`)
+        .join(" OR ");
+
+      const sql = `SELECT ${selectColumns.map((column) => this.quoteIdent(column)).join(", ")}
+        FROM ${this.quoteIdent(config.table)}
+        WHERE ${whereSql}`;
+
+      const refRows = await this.prisma.$queryRawUnsafe<any[]>(sql, refs);
+
+      for (const refRow of refRows) {
+        const matchedMovementIds = new Set<string>();
+
+        for (const column of searchableColumns) {
+          const refValue = refRow?.[column];
+          if (refValue === null || refValue === undefined) continue;
+          const idsForRef = group.get(String(refValue)) || [];
+          idsForRef.forEach((movementId) => matchedMovementIds.add(movementId));
+        }
+
+        const code =
+          config.codeColumns
+            .map((column) => refRow?.[column])
+            .find((value) => value !== null && value !== undefined && String(value).trim()) ||
+          refRow?.id;
+
+        for (const movementId of matchedMovementIds) {
+          addCode(movementId, code);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  private mapInventoryMovementRow(
+    row: any,
+    actorByMovementId: Map<string, any>,
+    refCodeByMovementId: Map<string, string>,
+  ) {
+    const variant = row.variant;
+    const actor =
+      actorByMovementId.get(row.id) || this.getActorFromMovementRow(row) || {};
+    const createdAtIso = row.createdAt
+      ? new Date(row.createdAt).toISOString()
+      : null;
+    const refCode =
+      row.refCode ||
+      row.orderCode ||
+      row.documentCode ||
+      row.sourceCode ||
+      row.purchaseReceiptCode ||
+      row.stocktakeSessionCode ||
+      row.stockTransferCode ||
+      refCodeByMovementId.get(row.id) ||
+      null;
+
+    return {
+      id: row.id,
+      type: row.type,
+      qty: row.qty,
+      note: row.note,
+      refType: row.refType,
+      refId: row.refId,
+      refCode,
+      orderCode:
+        row.orderCode ||
+        (this.normalizeRefType(row.refType) === "ORDER" ? refCode : null),
+      documentCode: row.documentCode || refCode,
+      sourceCode: row.sourceCode || refCode,
+      branchId: row.branchId,
+      createdAt: createdAtIso,
+      createdAtText: this.formatDateTime(row.createdAt),
+      updatedAt: row.updatedAt ? new Date(row.updatedAt).toISOString() : null,
+      createdById: actor?.id || null,
+      createdByName: actor?.name || null,
+      createdByEmail: actor?.email || null,
+      createdBy: row.createdBy
+        ? {
+            id: row.createdBy.id,
+            fullName: row.createdBy.fullName,
+            email: row.createdBy.email,
+          }
+        : null,
+      actorId: actor?.id || null,
+      actorName: actor?.name || null,
+      actorEmail: actor?.email || null,
+      beforeQty: row.beforeQty ?? row.previousQty ?? row.qtyBefore ?? null,
+      afterQty: row.afterQty ?? row.nextQty ?? row.qtyAfter ?? null,
+      status: row.status || row.movementStatus || "RECORDED",
+      sku: variant?.sku || "—",
+      barcode: variant?.barcode || variant?.barCode || null,
+      productName: variant?.product?.name || "—",
+      productId: variant?.product?.id || null,
+      variantId: row.variantId,
+      color: variant?.color || "",
+      size: variant?.size || "",
+    };
+  }
+
+  async getInventoryMovements(
+    limit = 50000,
+    user?: any,
+    options?: {
+      q?: string;
+      branchId?: string;
+      type?: string;
+      source?: string;
+      status?: string;
+      dateFrom?: string;
+      dateTo?: string;
+    },
+  ) {
+    const keyword = String(options?.q || "").trim();
     const safeLimit = Math.min(Math.max(Number(limit || 50000), 1), 50000);
-    const where = this.isOwner(user)
+    const effectiveTake = keyword ? 50000 : safeLimit;
+    const where: Prisma.InventoryMovementWhereInput = this.isOwner(user)
       ? {}
       : {
           branchId: this.resolveBranchIdFromUser(user) || "__NO_BRANCH__",
         };
 
+    const requestedBranchId = String(options?.branchId || "").trim();
+    if (requestedBranchId && requestedBranchId !== "ALL") {
+      this.ensureBranchAccess(user, requestedBranchId);
+      where.branchId = requestedBranchId;
+    }
+
+    const requestedType = String(options?.type || "").trim();
+    if (requestedType && requestedType !== "ALL") {
+      (where as any).type = requestedType;
+    }
+
+    const requestedStatus = String(options?.status || "").trim();
+    if (requestedStatus && requestedStatus !== "ALL") {
+      (where as any).status = requestedStatus;
+    }
+
+    const requestedSource = String(options?.source || "").trim();
+    if (requestedSource && requestedSource !== "ALL") {
+      (where as any).refType = requestedSource;
+    }
+
+    const dateFrom = String(options?.dateFrom || "").trim();
+    const dateTo = String(options?.dateTo || "").trim();
+    if (dateFrom || dateTo) {
+      const createdAt: any = {};
+      if (dateFrom) {
+        const from = new Date(`${dateFrom.slice(0, 10)}T00:00:00.000+07:00`);
+        if (!Number.isNaN(from.getTime())) createdAt.gte = from;
+      }
+      if (dateTo) {
+        const to = new Date(`${dateTo.slice(0, 10)}T23:59:59.999+07:00`);
+        if (!Number.isNaN(to.getTime())) createdAt.lte = to;
+      }
+      if (Object.keys(createdAt).length) {
+        (where as any).createdAt = createdAt;
+      }
+    }
+
     const rows = await this.prisma.inventoryMovement.findMany({
       where,
       orderBy: { createdAt: "desc" },
-      take: safeLimit,
+      take: effectiveTake,
       include: {
         createdBy: {
           select: {
@@ -2031,65 +2382,24 @@ export class InventoryService {
       },
     });
 
-    const actorByMovementId = await this.mapActorsFromRefs(rows as any[]);
+    const [actorByMovementId, refCodeByMovementId] = await Promise.all([
+      this.mapActorsFromRefs(rows as any[]),
+      this.mapRefCodesFromRefs(rows as any[]),
+    ]);
 
-    return rows.map((row) => {
-      const anyRow = row as any;
-      const variant = anyRow.variant;
-      const actor =
-        actorByMovementId.get(row.id) ||
-        this.getActorFromMovementRow(anyRow) ||
-        {};
-      const createdAtIso = row.createdAt
-        ? new Date(row.createdAt).toISOString()
-        : null;
+    const mappedRows = rows.map((row) =>
+      this.mapInventoryMovementRow(
+        row as any,
+        actorByMovementId,
+        refCodeByMovementId,
+      ),
+    );
 
-      return {
-        id: row.id,
-        type: row.type,
-        qty: row.qty,
-        note: row.note,
-        refType: row.refType,
-        refId: row.refId,
-        refCode:
-          anyRow.refCode ||
-          anyRow.orderCode ||
-          anyRow.purchaseReceiptCode ||
-          anyRow.stocktakeSessionCode ||
-          anyRow.stockTransferCode ||
-          null,
-        branchId: row.branchId,
-        createdAt: createdAtIso,
-        createdAtText: this.formatDateTime(row.createdAt),
-        updatedAt: anyRow.updatedAt
-          ? new Date(anyRow.updatedAt).toISOString()
-          : null,
-        createdById: actor?.id || null,
-        createdByName: actor?.name || null,
-        createdByEmail: actor?.email || null,
-        createdBy: anyRow.createdBy
-          ? {
-              id: anyRow.createdBy.id,
-              fullName: anyRow.createdBy.fullName,
-              email: anyRow.createdBy.email,
-            }
-          : null,
-        actorId: actor?.id || null,
-        actorName: actor?.name || null,
-        actorEmail: actor?.email || null,
-        beforeQty:
-          anyRow.beforeQty ?? anyRow.previousQty ?? anyRow.qtyBefore ?? null,
-        afterQty: anyRow.afterQty ?? anyRow.nextQty ?? anyRow.qtyAfter ?? null,
-        status: anyRow.status || anyRow.movementStatus || "RECORDED",
-        sku: variant?.sku || "—",
-        barcode: variant?.barcode || variant?.barCode || null,
-        productName: variant?.product?.name || "—",
-        productId: variant?.product?.id || null,
-        variantId: row.variantId,
-        color: variant?.color || "",
-        size: variant?.size || "",
-      };
-    });
+    const filteredRows = keyword
+      ? mappedRows.filter((row) => this.movementMatchesSearch(row, keyword))
+      : mappedRows;
+
+    return filteredRows.slice(0, safeLimit);
   }
 
 

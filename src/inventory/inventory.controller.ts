@@ -102,10 +102,26 @@ export class InventoryController {
   @RequirePermissions("inventory.logs.view")
   async getInventoryMovements(
     @Query("limit") limit?: string,
+    @Query("q") q?: string,
+    @Query("keyword") keyword?: string,
+    @Query("branchId") branchId?: string,
+    @Query("type") type?: string,
+    @Query("source") source?: string,
+    @Query("status") status?: string,
+    @Query("dateFrom") dateFrom?: string,
+    @Query("dateTo") dateTo?: string,
     @Req() req?: Request & { user?: any },
   ) {
     const parsedLimit = Number(limit || 100);
-    return this.inventoryService.getInventoryMovements(parsedLimit, req?.user);
+    return this.inventoryService.getInventoryMovements(parsedLimit, req?.user, {
+      q: q || keyword || "",
+      branchId,
+      type,
+      source,
+      status,
+      dateFrom,
+      dateTo,
+    });
   }
 
 

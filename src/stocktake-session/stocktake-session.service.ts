@@ -1304,33 +1304,25 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
       throw new NotFoundException("Không tìm thấy phiên kiểm kho.");
     }
 
-    // DETAIL SIÊU NHANH:
-    // Chỉ dựng dữ liệu từ SKU đã phát sinh trong phiếu (StocktakeCount).
-    // Không load toàn bộ snapshot của kho, không load log scan sẵn khi mở chi tiết.
-    // Snapshot chỉ lookup theo đúng variantId đã kiểm để tính lệch.
+    // FAST DETAIL MODE:
+    // Chi tiết phiên chỉ cần những SKU đã phát sinh trong phiên (StocktakeCount / ScanEvent),
+    // không load toàn bộ StocktakeSnapshot của cả kho nữa. Snapshot chỉ được lookup theo
+    // variantId đã kiểm để lấy tồn hệ thống lúc bắt đầu phiên và tính lệch.
+    // Biến ensureSnapshot giữ lại để không phá chữ ký hàm cũ, nhưng detail không tự tạo snapshot
+    // vì createSnapshotForSession có thể quét toàn kho và làm chậm khi mở chi tiết.
     void ensureSnapshot;
 
-    const countRows = await this.prisma.stocktakeCount.findMany({
-      where: { sessionId, branchId: session.branchId },
-      select: {
-        id: true,
-        sessionId: true,
-        workerId: true,
-        branchId: true,
-        variantId: true,
-        sku: true,
-        countedQty: true,
-        eventCount: true,
-        zone: true,
-        areaId: true,
-        rackId: true,
-        rackCode: true,
-        locationCode: true,
-        status: true,
-        lastScannedAt: true,
-      },
-      orderBy: { lastScannedAt: "asc" },
-    });
+    const [countRows, scanEvents] = await Promise.all([
+      this.prisma.stocktakeCount.findMany({
+        where: { sessionId, branchId: session.branchId },
+        orderBy: { lastScannedAt: "asc" },
+      }),
+      this.prisma.stocktakeScanEvent.findMany({
+        where: { sessionId, branchId: session.branchId },
+        orderBy: { createdAt: "desc" },
+        take: 1000,
+      }),
+    ]);
 
     const workerMap = new Map(
       (session.workers || []).map((worker) => [worker.id, worker]),
@@ -1370,9 +1362,9 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
       barcode?: string | null;
     }) => {
       const sku = String(input.sku || "").trim();
-      const variantId = input.variantId ? String(input.variantId) : null;
-      if (!sku && !variantId) return;
+      if (!sku && !input.variantId) return;
 
+      const variantId = input.variantId ? String(input.variantId) : null;
       const key = variantId || `SKU:${sku}`;
       const current =
         countMap.get(key) ||
@@ -1431,32 +1423,10 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
       });
     }
 
-    // Fallback cho phiên cũ chưa có StocktakeCount: chỉ lúc đó mới đọc log scan.
-    // Phiên mới không load log ở detail nữa; tab Log quét dùng endpoint /:id/logs riêng.
-    let fallbackScanEvents: any[] = [];
-    if (!countMap.size) {
-      fallbackScanEvents = await this.prisma.stocktakeScanEvent.findMany({
-        where: { sessionId, branchId: session.branchId },
-        select: {
-          id: true,
-          sessionId: true,
-          workerId: true,
-          branchId: true,
-          variantId: true,
-          sku: true,
-          barcode: true,
-          qtyDelta: true,
-          zone: true,
-          locationCode: true,
-          status: true,
-          note: true,
-          createdAt: true,
-        },
-        orderBy: { createdAt: "asc" },
-        take: 3000,
-      });
-
-      for (const event of fallbackScanEvents) {
+    // Fallback cho phiên cũ chưa có StocktakeCount: đọc log scan và aggregate trong RAM,
+    // không ghi backfill để tránh mở chi tiết mà phát sinh nhiều write.
+    if (!countMap.size && scanEvents.length) {
+      for (const event of scanEvents) {
         upsertCountAgg({
           variantId: event.variantId,
           sku: event.sku,
@@ -1469,6 +1439,18 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
           lastScannedAt: event.createdAt,
           barcode: event.barcode,
         });
+      }
+    } else {
+      // Bổ sung barcode / worker cuối từ log scan cho các count đã có.
+      for (const event of scanEvents) {
+        const key = event.variantId || `SKU:${event.sku}`;
+        const current = countMap.get(key);
+        if (!current) continue;
+        current.barcode = event.barcode || current.barcode;
+        if (event.workerId) current.workerIds.add(String(event.workerId));
+        if (!current.lastScannedAt || event.createdAt > current.lastScannedAt) {
+          current.lastScannedAt = event.createdAt;
+        }
       }
     }
 
@@ -1497,19 +1479,7 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
       variantIds.length
         ? this.prisma.productVariant.findMany({
             where: { id: { in: variantIds } },
-            select: {
-              id: true,
-              sku: true,
-              color: true,
-              size: true,
-              costPrice: true,
-              price: true,
-              product: {
-                select: {
-                  name: true,
-                },
-              },
-            },
+            include: { product: true, locations: true },
           })
         : Promise.resolve([]),
       variantIds.length
@@ -1525,7 +1495,9 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
         (item) => [item.variantId, Number(item.snapshotQty || 0)] as [string, number],
       ),
     );
-    const variantMap = new Map((variants || []).map((variant) => [variant.id, variant]));
+    const variantMap = new Map<string, any>(
+      (variants || []).map((variant: any) => [String(variant.id), variant] as [string, any]),
+    );
     const inventoryMap = new Map(
       (inventoryItems || []).map(
         (item) => [item.variantId, Number(item.availableQty || 0)] as [string, number],
@@ -1546,7 +1518,7 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
     };
 
     const rows = counts.map((count) => {
-      const variant = count.variantId ? variantMap.get(count.variantId) : null;
+      const variant: any = count.variantId ? variantMap.get(String(count.variantId)) : null;
       const snapshotQty = count.variantId
         ? Number(snapshotMap.get(count.variantId) || 0)
         : 0;
@@ -1619,7 +1591,7 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
       totalCountedQty: rows.reduce((sum, row) => sum + Number(row.countedQty || 0), 0),
       totalDiffQty: discrepancyRows.reduce((sum, row) => sum + Number(row.diff || 0), 0),
       totalDiffValue: discrepancyRows.reduce((sum, row) => sum + Number(row.diffValue || 0), 0),
-      scanEvents: session._count?.scanEvents || fallbackScanEvents.length,
+      scanEvents: session._count?.scanEvents || scanEvents.length,
       workerCount: session.workers.length,
       fastMode: true,
     };
@@ -1632,14 +1604,14 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
       items: rows,
       uncountedRows,
       discrepancyRows,
-      logs: fallbackScanEvents.map((log) => {
+      logs: scanEvents.map((log) => {
         const worker = log.workerId ? workerMap.get(log.workerId) : null;
         return {
           ...log,
           workerName: worker?.name || null,
         };
       }),
-      recentLogs: [],
+      recentLogs: scanEvents,
     };
   }
 
@@ -1693,9 +1665,15 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
       );
     }
 
-    // Detail fast đã scope theo sessionId + branchId ở buildSessionDetail.
-    // Không gọi filterRowsBySessionBranchV27 ở đây nữa vì hàm đó query toàn bộ inventoryItem của branch, làm /items chậm không cần thiết.
-    return rows;
+    const session = await this.prisma.stocktakeSession.findUnique({
+      where: { id: sessionId },
+    });
+
+    if (!session) {
+      return rows;
+    }
+
+    return await this.filterRowsBySessionBranchV27(session, rows);
   }
 
   async getSessionLogs(sessionId: string, user?: any) {
@@ -1756,11 +1734,14 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
         let totalDelta = 0;
 
         for (const row of rowsToApply) {
+          const variantId = String(row.variantId || "");
+          if (!variantId) continue;
+
           const diff = Number(row.diff || 0);
           const inventoryItem = await tx.inventoryItem.findUnique({
             where: {
               variantId_branchId: {
-                variantId: row.variantId,
+                variantId,
                 branchId: session.branchId,
               },
             },
@@ -1774,7 +1755,7 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
           await tx.inventoryItem.update({
             where: {
               variantId_branchId: {
-                variantId: row.variantId,
+                variantId,
                 branchId: session.branchId,
               },
             },
@@ -1785,7 +1766,7 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
 
           await tx.inventoryMovement.create({
             data: {
-              variantId: row.variantId,
+              variantId,
               branchId: session.branchId,
               type: InventoryMovementType.ADJUSTMENT,
               qty: diff,
