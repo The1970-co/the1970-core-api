@@ -55,14 +55,27 @@ export class PromotionEngineService {
     for (const promotion of promotions) {
       if (promotion.type === PromotionType.PRODUCT_DISCOUNT) {
         const targetProductIds = new Set(
-          promotion.products.map((p) => String(p.productId)),
+          promotion.products
+            .map((p) => p.productId)
+            .filter(Boolean)
+            .map((productId) => String(productId)),
+        );
+        const targetVariantIds = new Set(
+          promotion.products
+            .map((p) => p.variantId)
+            .filter(Boolean)
+            .map((variantId) => String(variantId)),
         );
 
         let totalDiscountForPromotion = 0;
 
         for (const item of items) {
-          if (!item.productId) continue;
-          if (!targetProductIds.has(String(item.productId))) continue;
+          const matchesVariant = targetVariantIds.has(String(item.variantId));
+          const matchesProduct = item.productId
+            ? targetProductIds.has(String(item.productId))
+            : false;
+
+          if (!matchesVariant && !matchesProduct) continue;
 
           const alreadyDiscountedPerUnit =
             Number(item.discountAmount || 0) / Math.max(1, item.quantity);

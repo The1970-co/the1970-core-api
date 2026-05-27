@@ -19,28 +19,14 @@ export class PromotionsService {
   async findAll() {
     return this.prisma.promotion.findMany({
       orderBy: [{ status: "asc" }, { priority: "desc" }, { createdAt: "desc" }],
-      include: {
-        branch: true,
-        products: {
-          include: {
-            product: true,
-          },
-        },
-      },
+      include: this.promotionInclude(),
     });
   }
 
   async findOne(id: string) {
     const promotion = await this.prisma.promotion.findUnique({
       where: { id },
-      include: {
-        branch: true,
-        products: {
-          include: {
-            product: true,
-          },
-        },
-      },
+      include: this.promotionInclude(),
     });
 
     if (!promotion) {
@@ -51,9 +37,8 @@ export class PromotionsService {
   }
 
   async create(dto: CreatePromotionDto) {
-    this.validatePromotion(dto);
-
-    const productIds = Array.from(new Set(dto.productIds ?? [])).filter(Boolean);
+    const targets = await this.normalizeAndValidateTargets(dto);
+    this.validatePromotion(dto, targets);
 
     return this.prisma.promotion.create({
       data: {
@@ -75,22 +60,11 @@ export class PromotionsService {
         products: {
           create:
             dto.type === PromotionType.PRODUCT_DISCOUNT
-              ? productIds.map((productId) => ({
-                  product: {
-                    connect: { id: productId },
-                  },
-                }))
+              ? this.buildPromotionProductCreates(targets)
               : [],
         },
       },
-      include: {
-        branch: true,
-        products: {
-          include: {
-            product: true,
-          },
-        },
-      },
+      include: this.promotionInclude(),
     });
   }
 
@@ -99,54 +73,70 @@ export class PromotionsService {
 
     const nextType = dto.type ?? existing.type;
     const nextProductIds =
-      dto.productIds ?? existing.products.map((row) => row.productId);
+      dto.productIds ??
+      existing.products
+        .map((row) => row.productId)
+        .filter(Boolean) as string[];
+    const nextVariantIds =
+      dto.variantIds ??
+      existing.products
+        .map((row) => row.variantId)
+        .filter(Boolean) as string[];
 
-    this.validatePromotion({
-      name: dto.name ?? existing.name,
-      type: nextType,
-      status: dto.status ?? existing.status,
-      discountType: dto.discountType ?? existing.discountType,
-      discountValue:
-        dto.discountValue !== undefined
-          ? dto.discountValue
-          : Number(existing.discountValue),
-      minOrderAmount:
-        dto.minOrderAmount !== undefined
-          ? dto.minOrderAmount
-          : existing.minOrderAmount
-            ? Number(existing.minOrderAmount)
-            : undefined,
-      branchId: dto.branchId ?? existing.branchId ?? undefined,
-      salesChannel: dto.salesChannel ?? existing.salesChannel ?? undefined,
-      startAt:
-        dto.startAt !== undefined
-          ? dto.startAt
-          : existing.startAt
-            ? existing.startAt.toISOString()
-            : undefined,
-      endAt:
-        dto.endAt !== undefined
-          ? dto.endAt
-          : existing.endAt
-            ? existing.endAt.toISOString()
-            : undefined,
-      priority: dto.priority ?? existing.priority,
-      note: dto.note ?? existing.note ?? undefined,
+    const targets = await this.normalizeAndValidateTargets({
       productIds: nextProductIds,
+      variantIds: nextVariantIds,
     });
 
+    this.validatePromotion(
+      {
+        name: dto.name ?? existing.name,
+        type: nextType,
+        status: dto.status ?? existing.status,
+        discountType: dto.discountType ?? existing.discountType,
+        discountValue:
+          dto.discountValue !== undefined
+            ? dto.discountValue
+            : Number(existing.discountValue),
+        minOrderAmount:
+          dto.minOrderAmount !== undefined
+            ? dto.minOrderAmount
+            : existing.minOrderAmount
+              ? Number(existing.minOrderAmount)
+              : undefined,
+        branchId: dto.branchId ?? existing.branchId ?? undefined,
+        salesChannel: dto.salesChannel ?? existing.salesChannel ?? undefined,
+        startAt:
+          dto.startAt !== undefined
+            ? dto.startAt
+            : existing.startAt
+              ? existing.startAt.toISOString()
+              : undefined,
+        endAt:
+          dto.endAt !== undefined
+            ? dto.endAt
+            : existing.endAt
+              ? existing.endAt.toISOString()
+              : undefined,
+        priority: dto.priority ?? existing.priority,
+        note: dto.note ?? existing.note ?? undefined,
+        productIds: targets.productIds,
+        variantIds: targets.variantIds,
+      },
+      targets,
+    );
+
     return this.prisma.$transaction(async (tx) => {
-      if (dto.productIds !== undefined || dto.type === PromotionType.ORDER_DISCOUNT) {
+      const targetsChanged = dto.productIds !== undefined || dto.variantIds !== undefined;
+      if (targetsChanged || dto.type === PromotionType.ORDER_DISCOUNT) {
         await tx.promotionProduct.deleteMany({
           where: { promotionId: id },
         });
       }
 
       const shouldCreateProducts =
-        (dto.productIds !== undefined || dto.type === PromotionType.PRODUCT_DISCOUNT) &&
+        (targetsChanged || dto.type === PromotionType.PRODUCT_DISCOUNT) &&
         nextType === PromotionType.PRODUCT_DISCOUNT;
-
-      const uniqueProductIds = Array.from(new Set(nextProductIds)).filter(Boolean);
 
       return tx.promotion.update({
         where: { id },
@@ -157,7 +147,7 @@ export class PromotionsService {
           discountType: dto.discountType,
           discountValue: dto.discountValue,
           minOrderAmount:
-            dto.type === PromotionType.PRODUCT_DISCOUNT
+            nextType === PromotionType.PRODUCT_DISCOUNT
               ? null
               : dto.minOrderAmount,
           branchId: dto.branchId === undefined ? undefined : dto.branchId || null,
@@ -179,22 +169,11 @@ export class PromotionsService {
           note: dto.note,
           products: shouldCreateProducts
             ? {
-                create: uniqueProductIds.map((productId) => ({
-                  product: {
-                    connect: { id: productId },
-                  },
-                })),
+                create: this.buildPromotionProductCreates(targets),
               }
             : undefined,
         },
-        include: {
-          branch: true,
-          products: {
-            include: {
-              product: true,
-            },
-          },
-        },
+        include: this.promotionInclude(),
       });
     });
   }
@@ -241,17 +220,128 @@ export class PromotionsService {
     });
   }
 
-  private validatePromotion(dto: Partial<CreatePromotionDto>) {
+  private promotionInclude() {
+    return {
+      branch: true,
+      products: {
+        include: {
+          product: true,
+          variant: {
+            include: {
+              product: true,
+            },
+          },
+        },
+      },
+    } as const;
+  }
+
+  private buildPromotionProductCreates(targets: {
+    productIds: string[];
+    variantIds: string[];
+  }) {
+    return [
+      ...targets.productIds.map((productId) => ({
+        product: {
+          connect: { id: productId },
+        },
+      })),
+      ...targets.variantIds.map((variantId) => ({
+        variant: {
+          connect: { id: variantId },
+        },
+      })),
+    ];
+  }
+
+  private async normalizeAndValidateTargets(dto: {
+    productIds?: string[];
+    variantIds?: string[];
+  }) {
+    const rawProductIds = Array.from(new Set(dto.productIds ?? []))
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    const rawVariantIds = Array.from(new Set(dto.variantIds ?? []))
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+
+    // Chống lỗi UI cũ gửi nhầm SKU con vào productIds: backend sẽ tự nhận diện
+    // id/sku của ProductVariant rồi chuyển sang variantIds để không còn crash 500.
+    const variantLookupKeys = Array.from(new Set([...rawProductIds, ...rawVariantIds]));
+    const variants = variantLookupKeys.length
+      ? await this.prisma.productVariant.findMany({
+          where: {
+            OR: [{ id: { in: variantLookupKeys } }, { sku: { in: variantLookupKeys } }],
+          },
+          select: { id: true, productId: true, sku: true },
+        })
+      : [];
+
+    const variantByInput = new Map<string, (typeof variants)[number]>();
+    for (const variant of variants) {
+      variantByInput.set(variant.id, variant);
+      variantByInput.set(variant.sku, variant);
+    }
+
+    const productIds = rawProductIds.filter((idOrSku) => !variantByInput.has(idOrSku));
+    const variantIds = Array.from(
+      new Set(
+        [...rawVariantIds, ...rawProductIds]
+          .map((idOrSku) => variantByInput.get(idOrSku)?.id)
+          .filter(Boolean) as string[],
+      ),
+    );
+
+    const missingVariants = rawVariantIds.filter((idOrSku) => !variantByInput.has(idOrSku));
+    if (missingVariants.length) {
+      throw new BadRequestException(
+        `Không tìm thấy SKU con: ${missingVariants.join(", ")}`,
+      );
+    }
+
+    if (productIds.length) {
+      const products = await this.prisma.product.findMany({
+        where: { id: { in: productIds } },
+        select: { id: true },
+      });
+      const foundProductIds = new Set(products.map((product) => product.id));
+      const missingProducts = productIds.filter((id) => !foundProductIds.has(id));
+      if (missingProducts.length) {
+        throw new BadRequestException(
+          `Không tìm thấy mã chính: ${missingProducts.join(", ")}`,
+        );
+      }
+    }
+
+    const selectedVariants = variantIds
+      .map((id) => variants.find((variant) => variant.id === id))
+      .filter(Boolean) as typeof variants;
+    const productIdSet = new Set(productIds);
+    const conflictSkus = selectedVariants.filter((variant) => productIdSet.has(variant.productId));
+    if (conflictSkus.length) {
+      throw new BadRequestException(
+        "Không được chọn đồng thời mã chính và SKU con của cùng một sản phẩm",
+      );
+    }
+
+    return { productIds, variantIds };
+  }
+
+  private validatePromotion(
+    dto: Partial<CreatePromotionDto>,
+    targets?: { productIds: string[]; variantIds: string[] },
+  ) {
     if (!dto.name || !String(dto.name).trim()) {
       throw new BadRequestException("Thiếu tên khuyến mại");
     }
 
-    if (
-      dto.type === PromotionType.PRODUCT_DISCOUNT &&
-      (!dto.productIds || dto.productIds.length === 0)
-    ) {
+    const totalTargetCount =
+      (targets?.productIds?.length ?? dto.productIds?.length ?? 0) +
+      (targets?.variantIds?.length ?? dto.variantIds?.length ?? 0);
+
+    if (dto.type === PromotionType.PRODUCT_DISCOUNT && totalTargetCount === 0) {
       throw new BadRequestException(
-        "Khuyến mại sản phẩm phải chọn ít nhất 1 sản phẩm"
+        "Khuyến mại sản phẩm phải chọn ít nhất 1 mã chính hoặc SKU con",
       );
     }
 
@@ -268,7 +358,7 @@ export class PromotionsService {
 
     if (dto.startAt && dto.endAt && new Date(dto.startAt) > new Date(dto.endAt)) {
       throw new BadRequestException(
-        "Ngày bắt đầu không được lớn hơn ngày kết thúc"
+        "Ngày bắt đầu không được lớn hơn ngày kết thúc",
       );
     }
   }

@@ -61,4 +61,9 @@ export class UpdatePromotionDto {
   @IsArray()
   @IsString({ each: true })
   productIds?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  variantIds?: string[];
 }

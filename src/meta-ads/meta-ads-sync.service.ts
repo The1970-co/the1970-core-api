@@ -1,3 +1,110 @@
+
+function getMetaActionValueExact(actions: any, actionTypes: string[]): number {
+  if (!Array.isArray(actions)) return 0;
+  const allowed = new Set(actionTypes.map((x) => String(x).toLowerCase()));
+  return actions.reduce((sum, item) => {
+    const type = String(item?.action_type || item?.actionType || '').toLowerCase();
+    if (!allowed.has(type)) return sum;
+    return sum + (Number(item?.value || 0) || 0);
+  }, 0);
+}
+
+function getMetaCostValueExact(costs: any, actionTypes: string[]): number {
+  if (!Array.isArray(costs)) return 0;
+  const allowed = new Set(actionTypes.map((x) => String(x).toLowerCase()));
+  const found = costs.find((item) => allowed.has(String(item?.action_type || item?.actionType || '').toLowerCase()));
+  return Number(found?.value || 0) || 0;
+}
+
+function applyLiveMatchedMetaMetrics(row: any, metrics: any = {}) {
+  const raw = row?.rawJson || row || {};
+  const actions = row?.actionsJson || raw?.actions || row?.actions || [];
+  const costActions = raw?.cost_per_action_type || row?.cost_per_action_type || row?.costPerActionType || [];
+  const spend = Number(metrics?.spend ?? row?.spend ?? raw?.spend ?? 0) || 0;
+
+  // Đã đối chiếu live ngày 26/05: khớp Meta Ads Manager.
+  // Kết quả = "Lượt bắt đầu cuộc trò chuyện qua tin nhắn"
+  const resultStartedChat = getMetaActionValueExact(actions, [
+    'onsite_conversion.messaging_conversation_started_7d',
+    'messaging_conversation_started_7d',
+  ]);
+
+  // Cột Meta: "Tổng số người liên hệ nhắn tin"
+  const totalMessagingContact = getMetaActionValueExact(actions, [
+    'onsite_conversion.total_messaging_connection',
+    'total_messaging_connection',
+  ]);
+
+  // Cột Meta: "Người liên hệ nhắn tin"
+  const messagingContact = getMetaActionValueExact(actions, [
+    'onsite_conversion.messaging_conversation_replied_7d',
+    'messaging_conversation_replied_7d',
+    'onsite_conversion.messaging_first_reply',
+    'messaging_first_reply',
+  ]);
+
+  // Cột Meta: "Bình luận về bài viết"
+  const postComment = getMetaActionValueExact(actions, [
+    'comment',
+    'post_comment',
+  ]);
+
+  const costPerResultFromMeta = getMetaCostValueExact(costActions, [
+    'onsite_conversion.messaging_conversation_started_7d',
+    'messaging_conversation_started_7d',
+  ]);
+
+  const costPerResult = costPerResultFromMeta || (resultStartedChat > 0 ? spend / resultStartedChat : 0);
+
+  return {
+    ...metrics,
+
+    // Giữ key cũ để FE không vỡ, nhưng ý nghĩa đã map đúng cột Meta.
+    purchases: resultStartedChat,
+    result: resultStartedChat,
+    messages: totalMessagingContact,
+    conversationStarts: resultStartedChat,
+    comments: postComment,
+
+    metaResultStartedChat: resultStartedChat,
+    metaTotalMessagingContact: totalMessagingContact,
+    metaMessagingContact: messagingContact,
+    metaPostComment: postComment,
+
+    costPerResult,
+    costPerMessage: totalMessagingContact > 0 ? spend / totalMessagingContact : costPerResult,
+    costPerConversation: costPerResult,
+  };
+}
+
+
+
+function getActionCountByExactTypes(actions: any, types: string[]): number {
+  if (!Array.isArray(actions)) return 0;
+  const set = new Set(types.map((x) => String(x).toLowerCase()));
+  let total = 0;
+  for (const item of actions) {
+    const t = String(item?.action_type || item?.actionType || '').toLowerCase();
+    if (set.has(t)) total += Number(item?.value || 0) || 0;
+  }
+  return total;
+}
+
+function getCostPerActionByExactTypes(costs: any, types: string[]): number {
+  if (!Array.isArray(costs)) return 0;
+  const set = new Set(types.map((x) => String(x).toLowerCase()));
+  for (const item of costs) {
+    const t = String(item?.action_type || item?.actionType || '').toLowerCase();
+    if (set.has(t)) return Number(item?.value || 0) || 0;
+  }
+  return 0;
+}
+
+function mapMetaAdsManagerMetrics(row: any, metrics: any = {}) {
+  return applyLiveMatchedMetaMetrics(row, metrics);
+}
+
+
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { SyncMetaAdsDto, MetaInsightLevel } from './dto/sync-meta-ads.dto';
@@ -154,7 +261,7 @@ export class MetaAdsSyncService {
     return actions.reduce((sum, action) => {
       const type = String(action?.action_type || action?.actionType || '').toLowerCase();
       if (!type) return sum;
-      const matched = wanted.some((alias) => type === alias || type.includes(alias));
+      const matched = wanted.some((alias) => type === alias || type === alias);
       return matched ? sum + this.n(action?.value) : sum;
     }, 0);
   }
@@ -165,7 +272,7 @@ export class MetaAdsSyncService {
     for (const action of actions) {
       const type = String(action?.action_type || action?.actionType || '').toLowerCase();
       if (!type) continue;
-      const matched = wanted.some((alias) => type === alias || type.includes(alias));
+      const matched = wanted.some((alias) => type === alias || type === alias);
       if (matched) return this.n(action?.value);
     }
     return 0;
@@ -173,15 +280,8 @@ export class MetaAdsSyncService {
 
   private metaMessagingAliases() {
     return [
-      'onsite_conversion.messaging_conversation_started_7d',
-      'messaging_conversation_started_7d',
-      'messaging_conversation_started',
-      'onsite_conversion.messaging_first_reply',
-      'messaging_first_reply',
       'onsite_conversion.total_messaging_connection',
       'total_messaging_connection',
-      'onsite_conversion.new_messaging_connection',
-      'new_messaging_connection',
     ];
   }
 
@@ -189,7 +289,6 @@ export class MetaAdsSyncService {
     return [
       'onsite_conversion.messaging_conversation_started_7d',
       'messaging_conversation_started_7d',
-      'messaging_conversation_started',
     ];
   }
 
@@ -230,9 +329,11 @@ export class MetaAdsSyncService {
     const purchases = this.n(purchasesInput ?? row?.purchases);
     const purchaseValue = this.n(purchaseValueInput ?? row?.purchaseValue);
 
-    const messages = Math.round(this.pickActionCountLoose(payload.actions, this.metaMessagingAliases()));
-    const conversationStarts = Math.round(this.pickActionCountLoose(payload.actions, this.metaConversationStartAliases()));
-    const comments = Math.round(this.pickActionCountLoose(payload.actions, this.metaCommentAliases()));
+    // Đã đối chiếu live với Meta Ads Manager ngày 26/05:
+    // Kết quả = Lượt bắt đầu cuộc trò chuyện qua tin nhắn.
+    const messages = Math.round(this.pickActionCount(payload.actions, this.metaMessagingAliases()));
+    const conversationStarts = Math.round(this.pickActionCount(payload.actions, this.metaConversationStartAliases()));
+    const comments = Math.round(this.pickActionCount(payload.actions, this.metaCommentAliases()));
 
     const costPerMessageFromMeta = this.pickCostPerAction(payload.costPerActionType, this.metaMessagingAliases());
     const costPerConversationFromMeta = this.pickCostPerAction(payload.costPerActionType, this.metaConversationStartAliases());
@@ -245,14 +346,7 @@ export class MetaAdsSyncService {
       costPerMessage: costPerMessageFromMeta || (messages > 0 ? spend / messages : 0),
       costPerConversation: costPerConversationFromMeta || (conversationStarts > 0 ? spend / conversationStarts : 0),
       costPerPurchase: costPerPurchaseFromMeta || (purchases > 0 ? spend / purchases : 0),
-      costPerResult:
-        purchases > 0
-          ? (costPerPurchaseFromMeta || spend / purchases)
-          : conversationStarts > 0
-            ? (costPerConversationFromMeta || spend / conversationStarts)
-            : messages > 0
-              ? (costPerMessageFromMeta || spend / messages)
-              : 0,
+      costPerResult: costPerConversationFromMeta || (conversationStarts > 0 ? spend / conversationStarts : 0),
       averagePurchaseValue: purchases > 0 ? purchaseValue / purchases : 0,
     };
   }
@@ -270,16 +364,9 @@ export class MetaAdsSyncService {
       messages,
       conversationStarts,
       comments,
-      costPerMessage: messages > 0 ? spend / messages : 0,
-      costPerConversation: conversationStarts > 0 ? spend / conversationStarts : 0,
-      costPerResult:
-        purchases > 0
-          ? spend / purchases
-          : conversationStarts > 0
-            ? spend / conversationStarts
-            : messages > 0
-              ? spend / messages
-              : 0,
+      costPerMessage: this.n(sum?.messages) > 0 ? spend / this.n(sum?.messages) : 0,
+      costPerConversation: this.n(sum?.conversationStarts) > 0 ? spend / this.n(sum?.conversationStarts) : 0,
+      costPerResult: this.n(sum?.conversationStarts) > 0 ? spend / this.n(sum?.conversationStarts) : 0,
       averagePurchaseValue: purchases > 0 ? purchaseValue / purchases : 0,
     };
   }
@@ -491,9 +578,9 @@ export class MetaAdsSyncService {
     let totalRows = 0;
 
     const fieldsByLevel: Record<MetaInsightLevel, string> = {
-      campaign: 'date_start,date_stop,campaign_id,campaign_name,spend,impressions,reach,clicks,inline_link_clicks,cpc,cpm,ctr,actions,action_values,purchase_roas,cost_per_action_type',
-      adset: 'date_start,date_stop,campaign_id,campaign_name,adset_id,adset_name,spend,impressions,reach,clicks,inline_link_clicks,cpc,cpm,ctr,actions,action_values,purchase_roas,cost_per_action_type',
-      ad: 'date_start,date_stop,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,reach,clicks,inline_link_clicks,cpc,cpm,ctr,actions,action_values,purchase_roas,cost_per_action_type',
+      campaign: 'date_start,date_stop,account_id,campaign_id,campaign_name,spend,impressions,reach,frequency,clicks,inline_link_clicks,cpc,cpm,ctr,actions,cost_per_action_type,action_values,purchase_roas,website_purchase_roas',
+      adset: 'date_start,date_stop,account_id,campaign_id,campaign_name,adset_id,adset_name,spend,impressions,reach,frequency,clicks,inline_link_clicks,cpc,cpm,ctr,actions,cost_per_action_type,action_values,purchase_roas,website_purchase_roas',
+      ad: 'date_start,date_stop,account_id,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,reach,frequency,clicks,inline_link_clicks,cpc,cpm,ctr,actions,cost_per_action_type,action_values,purchase_roas,website_purchase_roas',
     };
 
     for (const level of levels) {
@@ -501,9 +588,11 @@ export class MetaAdsSyncService {
         fields: fieldsByLevel[level],
         level,
         time_increment: '1',
+        action_report_time: 'conversion',
+        use_unified_attribution_setting: 'true',
         time_range: JSON.stringify(dateRange),
         limit: String(Math.min(Math.max(Number(input.limit || 500), 50), 1000)),
-      }, 30);
+      }, 100);
 
       for (const row of rows) {
         if (row.campaign_id) {
@@ -537,7 +626,8 @@ export class MetaAdsSyncService {
         const purchaseValue = this.pickActionValue(actionValues, ['purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase']);
         const purchaseRoas = Array.isArray(row.purchase_roas) ? this.n(row.purchase_roas?.[0]?.value) : 0;
         const actionMetrics = this.metaActionMetrics(row, spend, purchases, purchaseValue);
-        const costPerPurchase = actionMetrics.costPerPurchase || (purchases > 0 ? spend / purchases : 0);
+        const metaResult = actionMetrics.conversationStarts;
+        const costPerPurchase = actionMetrics.costPerResult || (metaResult > 0 ? spend / metaResult : 0);
         const roas = purchaseRoas || this.calcRoas(spend, purchaseValue);
 
         const existing = await this.prisma.metaAdInsightDaily.findFirst({
@@ -571,7 +661,7 @@ export class MetaAdsSyncService {
           cpc: this.n(row.cpc),
           cpm: this.n(row.cpm),
           ctr: this.n(row.ctr),
-          purchases: Math.round(purchases),
+          purchases: Math.round(metaResult),
           purchaseValue,
           costPerPurchase,
           roas,
@@ -613,7 +703,16 @@ export class MetaAdsSyncService {
     } as any);
 
     try {
-      const structure = input.includeStructure === false ? null : await this.syncStructure(undefined, Number(input.limit || 500));
+      const insightOnlyAdSync =
+        Array.isArray(input.levels) &&
+        input.levels.length === 1 &&
+        String(input.levels[0]).toLowerCase() === 'ad' &&
+        input.includeInsights !== false;
+
+      // Khi chỉ sync ad insights, tuyệt đối không kéo structure/creative để tránh đơ server.
+      const structure = input.includeStructure === false || insightOnlyAdSync
+        ? null
+        : await this.syncStructure(undefined, Number(input.limit || 500));
       const insights = input.includeInsights === false ? null : await this.syncInsights(input);
       const scanned = (structure?.campaignCount || 0) + (structure?.adSetCount || 0) + (structure?.adCount || 0) + (insights?.insightRows || 0);
 
@@ -783,7 +882,7 @@ export class MetaAdsSyncService {
       reach,
       clicks,
       inlineLinkClicks,
-      purchases,
+      purchases: this.n(sum?.conversationStarts),
       purchaseValue,
       ctr: impressions > 0 ? (clicks / impressions) * 100 : 0,
       cpc: clicks > 0 ? spend / clicks : 0,
@@ -795,14 +894,7 @@ export class MetaAdsSyncService {
       comments: this.n(sum?.comments),
       costPerMessage: this.n(sum?.messages) > 0 ? spend / this.n(sum?.messages) : 0,
       costPerConversation: this.n(sum?.conversationStarts) > 0 ? spend / this.n(sum?.conversationStarts) : 0,
-      costPerResult:
-        purchases > 0
-          ? spend / purchases
-          : this.n(sum?.conversationStarts) > 0
-            ? spend / this.n(sum?.conversationStarts)
-            : this.n(sum?.messages) > 0
-              ? spend / this.n(sum?.messages)
-              : 0,
+      costPerResult: this.n(sum?.conversationStarts) > 0 ? spend / this.n(sum?.conversationStarts) : 0,
       averagePurchaseValue: purchases > 0 ? purchaseValue / purchases : 0,
     };
   }
@@ -909,17 +1001,22 @@ export class MetaAdsSyncService {
 
 
   private metricsFromMetaInsightRow(row: any) {
-    const actions = Array.isArray(row?.actions) ? row.actions : [];
-    const actionValues = Array.isArray(row?.action_values) ? row.action_values : [];
     const spend = this.n(row?.spend);
     const impressions = Math.round(this.n(row?.impressions));
     const reach = Math.round(this.n(row?.reach));
     const clicks = Math.round(this.n(row?.clicks));
-    const inlineLinkClicks = Math.round(this.n(row?.inline_link_clicks));
-    const purchases = Math.round(this.pickActionCount(actions, ['purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase']));
-    const purchaseValue = this.pickActionValue(actionValues, ['purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase']);
-    const purchaseRoas = Array.isArray(row?.purchase_roas) ? this.n(row.purchase_roas?.[0]?.value) : 0;
-    const actionMetrics = this.metaActionMetrics(row, spend, purchases, purchaseValue);
+    const inlineLinkClicks = Math.round(this.n(row?.inline_link_clicks ?? row?.inlineLinkClicks));
+    const cpc = this.n(row?.cpc);
+    const cpm = this.n(row?.cpm);
+    const ctr = this.n(row?.ctr);
+
+    const payload = this.actionPayloadFromInsight(row);
+    const messages = Math.round(this.pickActionCount(payload.actions, this.metaMessagingAliases()));
+    const conversationStarts = Math.round(this.pickActionCount(payload.actions, this.metaConversationStartAliases()));
+    const comments = Math.round(this.pickActionCount(payload.actions, this.metaCommentAliases()));
+
+    const costPerMessageFromMeta = this.pickCostPerAction(payload.costPerActionType, this.metaMessagingAliases());
+    const costPerConversationFromMeta = this.pickCostPerAction(payload.costPerActionType, this.metaConversationStartAliases());
 
     return {
       spend,
@@ -927,20 +1024,22 @@ export class MetaAdsSyncService {
       reach,
       clicks,
       inlineLinkClicks,
-      purchases,
-      purchaseValue,
-      ctr: impressions > 0 ? (clicks / impressions) * 100 : this.n(row?.ctr),
-      cpc: clicks > 0 ? spend / clicks : this.n(row?.cpc),
-      cpm: impressions > 0 ? (spend / impressions) * 1000 : this.n(row?.cpm),
-      costPerPurchase: actionMetrics.costPerPurchase || (purchases > 0 ? spend / purchases : 0),
-      roas: purchaseRoas || (spend > 0 ? purchaseValue / spend : 0),
-      messages: actionMetrics.messages,
-      conversationStarts: actionMetrics.conversationStarts,
-      comments: actionMetrics.comments,
-      costPerMessage: actionMetrics.costPerMessage,
-      costPerConversation: actionMetrics.costPerConversation,
-      costPerResult: actionMetrics.costPerResult,
-      averagePurchaseValue: actionMetrics.averagePurchaseValue,
+      cpc,
+      cpm,
+      ctr,
+
+      // Meta Ads Manager: Kết quả = Lượt bắt đầu cuộc trò chuyện qua tin nhắn.
+      purchases: conversationStarts,
+      purchaseValue: 0,
+      roas: 0,
+
+      messages,
+      conversationStarts,
+      comments,
+      costPerMessage: costPerMessageFromMeta || (messages > 0 ? spend / messages : 0),
+      costPerConversation: costPerConversationFromMeta || (conversationStarts > 0 ? spend / conversationStarts : 0),
+      costPerResult: costPerConversationFromMeta || (conversationStarts > 0 ? spend / conversationStarts : 0),
+      averagePurchaseValue: 0,
     };
   }
 
@@ -965,10 +1064,12 @@ export class MetaAdsSyncService {
     // DB rows remain used for drilldown/creative table, but KPI total should reconcile with Meta official.
     const accountId = this.normalizeAccountId(query.metaAccountId || this.defaultAdAccountId);
     const rows = await this.graphList<any>(`/${accountId}/insights`, {
-      fields: 'date_start,date_stop,spend,impressions,reach,clicks,inline_link_clicks,cpc,cpm,ctr,actions,action_values,purchase_roas,cost_per_action_type',
+      fields: 'date_start,date_stop,account_id,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,reach,frequency,clicks,inline_link_clicks,cpc,cpm,ctr,actions,cost_per_action_type,action_values,purchase_roas,website_purchase_roas',
       time_increment: '1',
       time_range: JSON.stringify(range),
-      limit: '1000',
+      action_report_time: 'conversion',
+        use_unified_attribution_setting: 'true',
+        limit: '1000',
     }, 10);
 
     const dailyRows = rows.map((row: any) => ({

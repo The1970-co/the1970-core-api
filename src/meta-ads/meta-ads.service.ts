@@ -1,3 +1,110 @@
+
+function getMetaActionValueExact(actions: any, actionTypes: string[]): number {
+  if (!Array.isArray(actions)) return 0;
+  const allowed = new Set(actionTypes.map((x) => String(x).toLowerCase()));
+  return actions.reduce((sum, item) => {
+    const type = String(item?.action_type || item?.actionType || '').toLowerCase();
+    if (!allowed.has(type)) return sum;
+    return sum + (Number(item?.value || 0) || 0);
+  }, 0);
+}
+
+function getMetaCostValueExact(costs: any, actionTypes: string[]): number {
+  if (!Array.isArray(costs)) return 0;
+  const allowed = new Set(actionTypes.map((x) => String(x).toLowerCase()));
+  const found = costs.find((item) => allowed.has(String(item?.action_type || item?.actionType || '').toLowerCase()));
+  return Number(found?.value || 0) || 0;
+}
+
+function applyLiveMatchedMetaMetrics(row: any, metrics: any = {}) {
+  const raw = row?.rawJson || row || {};
+  const actions = row?.actionsJson || raw?.actions || row?.actions || [];
+  const costActions = raw?.cost_per_action_type || row?.cost_per_action_type || row?.costPerActionType || [];
+  const spend = Number(metrics?.spend ?? row?.spend ?? raw?.spend ?? 0) || 0;
+
+  // Đã đối chiếu live ngày 26/05: khớp Meta Ads Manager.
+  // Kết quả = "Lượt bắt đầu cuộc trò chuyện qua tin nhắn"
+  const resultStartedChat = getMetaActionValueExact(actions, [
+    'onsite_conversion.messaging_conversation_started_7d',
+    'messaging_conversation_started_7d',
+  ]);
+
+  // Cột Meta: "Tổng số người liên hệ nhắn tin"
+  const totalMessagingContact = getMetaActionValueExact(actions, [
+    'onsite_conversion.total_messaging_connection',
+    'total_messaging_connection',
+  ]);
+
+  // Cột Meta: "Người liên hệ nhắn tin"
+  const messagingContact = getMetaActionValueExact(actions, [
+    'onsite_conversion.messaging_conversation_replied_7d',
+    'messaging_conversation_replied_7d',
+    'onsite_conversion.messaging_first_reply',
+    'messaging_first_reply',
+  ]);
+
+  // Cột Meta: "Bình luận về bài viết"
+  const postComment = getMetaActionValueExact(actions, [
+    'comment',
+    'post_comment',
+  ]);
+
+  const costPerResultFromMeta = getMetaCostValueExact(costActions, [
+    'onsite_conversion.messaging_conversation_started_7d',
+    'messaging_conversation_started_7d',
+  ]);
+
+  const costPerResult = costPerResultFromMeta || (resultStartedChat > 0 ? spend / resultStartedChat : 0);
+
+  return {
+    ...metrics,
+
+    // Giữ key cũ để FE không vỡ, nhưng ý nghĩa đã map đúng cột Meta.
+    purchases: resultStartedChat,
+    result: resultStartedChat,
+    messages: totalMessagingContact,
+    conversationStarts: resultStartedChat,
+    comments: postComment,
+
+    metaResultStartedChat: resultStartedChat,
+    metaTotalMessagingContact: totalMessagingContact,
+    metaMessagingContact: messagingContact,
+    metaPostComment: postComment,
+
+    costPerResult,
+    costPerMessage: totalMessagingContact > 0 ? spend / totalMessagingContact : costPerResult,
+    costPerConversation: costPerResult,
+  };
+}
+
+
+
+function getActionCountByExactTypes(actions: any, types: string[]): number {
+  if (!Array.isArray(actions)) return 0;
+  const set = new Set(types.map((x) => String(x).toLowerCase()));
+  let total = 0;
+  for (const item of actions) {
+    const t = String(item?.action_type || item?.actionType || '').toLowerCase();
+    if (set.has(t)) total += Number(item?.value || 0) || 0;
+  }
+  return total;
+}
+
+function getCostPerActionByExactTypes(costs: any, types: string[]): number {
+  if (!Array.isArray(costs)) return 0;
+  const set = new Set(types.map((x) => String(x).toLowerCase()));
+  for (const item of costs) {
+    const t = String(item?.action_type || item?.actionType || '').toLowerCase();
+    if (set.has(t)) return Number(item?.value || 0) || 0;
+  }
+  return 0;
+}
+
+function mapMetaAdsManagerMetrics(row: any, metrics: any = {}) {
+  return applyLiveMatchedMetaMetrics(row, metrics);
+}
+
+
 import { Injectable, Logger } from '@nestjs/common';
 
 type MetaRange = 'today' | 'yesterday' | '7d' | '10d' | '30d' | 'custom';
