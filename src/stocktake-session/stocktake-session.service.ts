@@ -1304,39 +1304,123 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
       throw new NotFoundException("Không tìm thấy phiên kiểm kho.");
     }
 
-    if (ensureSnapshot) {
-      await this.createSnapshotForSession(sessionId, session.branchId);
-    }
+    // DETAIL SIÊU NHANH:
+    // Chỉ dựng dữ liệu từ SKU đã phát sinh trong phiếu (StocktakeCount).
+    // Không load toàn bộ snapshot của kho, không load log scan sẵn khi mở chi tiết.
+    // Snapshot chỉ lookup theo đúng variantId đã kiểm để tính lệch.
+    void ensureSnapshot;
 
-    const [snapshots, counts, scanEvents] = await Promise.all([
-      this.prisma.stocktakeSnapshot.findMany({
-        where: { sessionId, branchId: session.branchId },
-        orderBy: { createdAt: "asc" },
-      }),
-      this.prisma.stocktakeCount.findMany({
-        where: { sessionId, branchId: session.branchId },
-        orderBy: { lastScannedAt: "asc" },
-      }),
-      this.prisma.stocktakeScanEvent.findMany({
-        where: { sessionId, branchId: session.branchId },
-        orderBy: { createdAt: "desc" },
-        take: 500,
-      }),
-    ]);
+    const countRows = await this.prisma.stocktakeCount.findMany({
+      where: { sessionId, branchId: session.branchId },
+      select: {
+        id: true,
+        sessionId: true,
+        workerId: true,
+        branchId: true,
+        variantId: true,
+        sku: true,
+        countedQty: true,
+        eventCount: true,
+        zone: true,
+        areaId: true,
+        rackId: true,
+        rackCode: true,
+        locationCode: true,
+        status: true,
+        lastScannedAt: true,
+      },
+      orderBy: { lastScannedAt: "asc" },
+    });
 
     const workerMap = new Map(
       (session.workers || []).map((worker) => [worker.id, worker]),
     );
 
-    const countMap = new Map<string, any>();
-    for (const count of counts) {
-      const key = count.variantId || `SKU:${count.sku}`;
-      const current = countMap.get(key) || {
+    type FastCountAgg = {
+      variantId: string | null;
+      sku: string;
+      countedQty: number;
+      eventCount: number;
+      workerIds: Set<string>;
+      zone?: string | null;
+      areaId?: string | null;
+      rackId?: string | null;
+      rackCode?: string | null;
+      locationCode?: string | null;
+      status?: string | null;
+      lastScannedAt?: Date | null;
+      barcode?: string | null;
+    };
+
+    const countMap = new Map<string, FastCountAgg>();
+
+    const upsertCountAgg = (input: {
+      variantId?: string | null;
+      sku?: string | null;
+      countedQty?: number | null;
+      eventCount?: number | null;
+      workerId?: string | null;
+      zone?: string | null;
+      areaId?: string | null;
+      rackId?: string | null;
+      rackCode?: string | null;
+      locationCode?: string | null;
+      status?: string | null;
+      lastScannedAt?: Date | string | null;
+      barcode?: string | null;
+    }) => {
+      const sku = String(input.sku || "").trim();
+      const variantId = input.variantId ? String(input.variantId) : null;
+      if (!sku && !variantId) return;
+
+      const key = variantId || `SKU:${sku}`;
+      const current =
+        countMap.get(key) ||
+        ({
+          variantId,
+          sku,
+          countedQty: 0,
+          eventCount: 0,
+          workerIds: new Set<string>(),
+          zone: input.zone || null,
+          areaId: input.areaId || null,
+          rackId: input.rackId || null,
+          rackCode: input.rackCode || null,
+          locationCode: input.locationCode || null,
+          status: input.status || null,
+          lastScannedAt: input.lastScannedAt ? new Date(input.lastScannedAt) : null,
+          barcode: input.barcode || null,
+        } satisfies FastCountAgg);
+
+      current.countedQty += Number(input.countedQty || 0);
+      current.eventCount += Number(input.eventCount || 0);
+      if (input.workerId) current.workerIds.add(String(input.workerId));
+      current.zone = input.zone || current.zone;
+      current.areaId = input.areaId || current.areaId;
+      current.rackId = input.rackId || current.rackId;
+      current.rackCode = input.rackCode || current.rackCode;
+      current.locationCode = input.locationCode || current.locationCode;
+      current.status = input.status || current.status;
+      current.barcode = input.barcode || current.barcode;
+
+      const nextLastScannedAt = input.lastScannedAt ? new Date(input.lastScannedAt) : null;
+      if (
+        nextLastScannedAt &&
+        (!current.lastScannedAt || nextLastScannedAt > current.lastScannedAt)
+      ) {
+        current.lastScannedAt = nextLastScannedAt;
+      }
+
+      countMap.set(key, current);
+    };
+
+    for (const count of countRows || []) {
+      upsertCountAgg({
         variantId: count.variantId,
         sku: count.sku,
-        countedQty: 0,
-        eventCount: 0,
-        workerIds: new Set<string>(),
+        countedQty: Number(count.countedQty || 0),
+        eventCount: Number(count.eventCount || 0),
+        workerId: count.workerId,
         zone: count.zone,
         areaId: count.areaId,
         rackId: count.rackId,
@@ -1344,72 +1428,111 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
         locationCode: count.locationCode,
         status: count.status,
         lastScannedAt: count.lastScannedAt,
-      };
-
-      current.countedQty += Number(count.countedQty || 0);
-      current.eventCount += Number(count.eventCount || 0);
-      if (count.workerId) current.workerIds.add(count.workerId);
-      current.zone = count.zone || current.zone;
-      current.areaId = count.areaId || current.areaId;
-      current.rackId = count.rackId || current.rackId;
-      current.rackCode = count.rackCode || current.rackCode;
-      current.locationCode = count.locationCode || current.locationCode;
-      current.status = count.status || current.status;
-      if (
-        count.lastScannedAt &&
-        (!current.lastScannedAt || count.lastScannedAt > current.lastScannedAt)
-      ) {
-        current.lastScannedAt = count.lastScannedAt;
-      }
-      countMap.set(key, current);
+      });
     }
 
-    // Branch-scope cứng cho detail: phiên CL/QO/TH chỉ được tính SKU thuộc branch đó.
-    // Với các phiên cũ lỡ chụp toàn hệ thống, lọc lại bằng InventoryItem của session.branchId.
-    const branchInventoryItemsForDetail = await this.prisma.inventoryItem.findMany({
-      where: { branchId: session.branchId },
-      select: { variantId: true, availableQty: true },
-    });
+    // Fallback cho phiên cũ chưa có StocktakeCount: chỉ lúc đó mới đọc log scan.
+    // Phiên mới không load log ở detail nữa; tab Log quét dùng endpoint /:id/logs riêng.
+    let fallbackScanEvents: any[] = [];
+    if (!countMap.size) {
+      fallbackScanEvents = await this.prisma.stocktakeScanEvent.findMany({
+        where: { sessionId, branchId: session.branchId },
+        select: {
+          id: true,
+          sessionId: true,
+          workerId: true,
+          branchId: true,
+          variantId: true,
+          sku: true,
+          barcode: true,
+          qtyDelta: true,
+          zone: true,
+          locationCode: true,
+          status: true,
+          note: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: "asc" },
+        take: 3000,
+      });
 
-    const branchVariantIdSet = new Set(
-      branchInventoryItemsForDetail.map((item) => item.variantId),
+      for (const event of fallbackScanEvents) {
+        upsertCountAgg({
+          variantId: event.variantId,
+          sku: event.sku,
+          countedQty: Number(event.qtyDelta || 0),
+          eventCount: 1,
+          workerId: event.workerId,
+          zone: event.zone,
+          locationCode: event.locationCode,
+          status: event.status,
+          lastScannedAt: event.createdAt,
+          barcode: event.barcode,
+        });
+      }
+    }
+
+    const counts = Array.from(countMap.values()).filter(
+      (row) => Number(row.eventCount || 0) > 0 || Number(row.countedQty || 0) !== 0,
     );
 
+    const variantIds = Array.from(
+      new Set(counts.map((row) => row.variantId).filter(Boolean)),
+    ) as string[];
+
+    const [snapshots, variants, inventoryItems] = await Promise.all([
+      variantIds.length
+        ? this.prisma.stocktakeSnapshot.findMany({
+            where: {
+              sessionId,
+              branchId: session.branchId,
+              variantId: { in: variantIds },
+            },
+            select: {
+              variantId: true,
+              snapshotQty: true,
+            },
+          })
+        : Promise.resolve([]),
+      variantIds.length
+        ? this.prisma.productVariant.findMany({
+            where: { id: { in: variantIds } },
+            select: {
+              id: true,
+              sku: true,
+              color: true,
+              size: true,
+              costPrice: true,
+              price: true,
+              product: {
+                select: {
+                  name: true,
+                },
+              },
+            },
+          })
+        : Promise.resolve([]),
+      variantIds.length
+        ? this.prisma.inventoryItem.findMany({
+            where: { branchId: session.branchId, variantId: { in: variantIds } },
+            select: { variantId: true, availableQty: true },
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const snapshotMap = new Map(
+      (snapshots || []).map(
+        (item) => [item.variantId, Number(item.snapshotQty || 0)] as [string, number],
+      ),
+    );
+    const variantMap = new Map((variants || []).map((variant) => [variant.id, variant]));
     const inventoryMap = new Map(
-      branchInventoryItemsForDetail.map(
+      (inventoryItems || []).map(
         (item) => [item.variantId, Number(item.availableQty || 0)] as [string, number],
       ),
     );
 
-    const scopedSnapshots = snapshots.filter((snapshot) => {
-      if (!snapshot?.variantId) return false;
-      return branchVariantIdSet.has(snapshot.variantId) || countMap.has(snapshot.variantId);
-    });
-
-    const variantIds = Array.from(
-      new Set([
-        ...scopedSnapshots.map((item) => item.variantId).filter(Boolean),
-        ...counts.map((item) => item.variantId).filter(Boolean),
-      ]),
-    ) as string[];
-
-    const variants = variantIds.length
-      ? await this.prisma.productVariant.findMany({
-          where: { id: { in: variantIds } },
-          include: { product: true, locations: true },
-        })
-      : [];
-
-    const variantMap = new Map(variants.map((variant) => [variant.id, variant]));
-
-    // inventoryMap đã được tạo từ toàn bộ InventoryItem của branch phía trên.
-
-    const snapshotVariantIds = new Set(scopedSnapshots.map((item) => item.variantId));
-    const extraCounts = Array.from(countMap.values()).filter(
-      (item) => !item.variantId || !snapshotVariantIds.has(item.variantId),
-    );
-
-    const buildWorkerInfo = (count?: any) => {
+    const buildWorkerInfo = (count?: FastCountAgg) => {
       const workerIds = Array.from(count?.workerIds || []) as string[];
       const lastWorkerId = workerIds[workerIds.length - 1] || null;
       const lastWorker = lastWorkerId ? workerMap.get(lastWorkerId) : null;
@@ -1422,105 +1545,58 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
       };
     };
 
-    const rows = [
-      ...scopedSnapshots.map((snapshot) => {
-        const count = countMap.get(snapshot.variantId);
-        const variant = variantMap.get(snapshot.variantId);
-        const hasCount = Boolean(count);
-        const countedQty = hasCount ? Number(count.countedQty || 0) : 0;
-        const snapshotQty = Number(snapshot.snapshotQty || 0);
-        const diff = hasCount ? countedQty - snapshotQty : -snapshotQty;
-        const unitCost = Number(variant?.costPrice || 0);
-        const statusInfo = this.normalizeDetailStatus({
-          hasCount,
-          countedQty,
-          snapshotQty,
-          variantId: snapshot.variantId,
-          rawStatus: count?.status,
-        });
-        const workerInfo = buildWorkerInfo(count);
+    const rows = counts.map((count) => {
+      const variant = count.variantId ? variantMap.get(count.variantId) : null;
+      const snapshotQty = count.variantId
+        ? Number(snapshotMap.get(count.variantId) || 0)
+        : 0;
+      const countedQty = Number(count.countedQty || 0);
+      const diff = countedQty - snapshotQty;
+      const unitCost = Number(variant?.costPrice || 0);
+      const statusInfo = this.normalizeDetailStatus({
+        hasCount: true,
+        countedQty,
+        snapshotQty,
+        variantId: count.variantId,
+        rawStatus: count.status,
+      });
+      const workerInfo = buildWorkerInfo(count);
 
-        return {
-          sessionId,
-          branchId: session.branchId,
-          variantId: snapshot.variantId,
-          sku: variant?.sku || count?.sku || snapshot.variantId,
-          productName: variant?.product?.name || "",
-          color: variant?.color || null,
-          size: variant?.size || null,
-          barcode: (variant as any)?.barcode || null,
-          unitCost,
-          costPrice: unitCost,
-          price: Number(variant?.price || 0),
-          snapshotQty,
-          countedQty,
-          diff,
-          currentQty: inventoryMap.get(snapshot.variantId) || 0,
-          isCounted: hasCount,
-          status: statusInfo.status,
-          statusLabel: statusInfo.statusLabel,
-          diffType: statusInfo.diffType,
-          diffValue: diff * unitCost,
-          valueDiff: diff * unitCost,
-          eventCount: Number(count?.eventCount || 0),
-          ...workerInfo,
-          zone: count?.zone || null,
-          areaId: count?.areaId || null,
-          rackId: count?.rackId || null,
-          rackCode: count?.rackCode || null,
-          locationCode: count?.locationCode || null,
-          lastScannedAt: count?.lastScannedAt || null,
-        };
-      }),
-      ...extraCounts.map((count) => {
-        const variant = count.variantId ? variantMap.get(count.variantId) : null;
-        const countedQty = Number(count.countedQty || 0);
-        const unitCost = Number(variant?.costPrice || 0);
-        const statusInfo = this.normalizeDetailStatus({
-          hasCount: true,
-          countedQty,
-          snapshotQty: 0,
-          variantId: count.variantId,
-          rawStatus: count.status,
-        });
-        const workerInfo = buildWorkerInfo(count);
+      return {
+        sessionId,
+        branchId: session.branchId,
+        variantId: count.variantId || null,
+        sku: variant?.sku || count.sku,
+        productName: variant?.product?.name || "",
+        color: variant?.color || null,
+        size: variant?.size || null,
+        barcode: count.barcode || count.sku,
+        unitCost,
+        costPrice: unitCost,
+        price: Number(variant?.price || 0),
+        snapshotQty,
+        countedQty,
+        diff,
+        currentQty: count.variantId ? Number(inventoryMap.get(count.variantId) || 0) : 0,
+        isCounted: true,
+        status: statusInfo.status,
+        statusLabel: statusInfo.statusLabel,
+        diffType: statusInfo.diffType,
+        diffValue: diff * unitCost,
+        valueDiff: diff * unitCost,
+        eventCount: Number(count.eventCount || 0),
+        ...workerInfo,
+        zone: count.zone || null,
+        areaId: count.areaId || null,
+        rackId: count.rackId || null,
+        rackCode: count.rackCode || null,
+        locationCode: count.locationCode || null,
+        lastScannedAt: count.lastScannedAt || null,
+      };
+    });
 
-        return {
-          sessionId,
-          branchId: session.branchId,
-          variantId: count.variantId || null,
-          sku: variant?.sku || count.sku,
-          productName: variant?.product?.name || "",
-          color: variant?.color || null,
-          size: variant?.size || null,
-          barcode: (variant as any)?.barcode || count.sku,
-          unitCost,
-          costPrice: unitCost,
-          price: Number(variant?.price || 0),
-          snapshotQty: 0,
-          countedQty,
-          diff: countedQty,
-          currentQty: count.variantId ? inventoryMap.get(count.variantId) || 0 : 0,
-          isCounted: true,
-          status: statusInfo.status,
-          statusLabel: statusInfo.statusLabel,
-          diffType: statusInfo.diffType,
-          diffValue: countedQty * unitCost,
-          valueDiff: countedQty * unitCost,
-          eventCount: Number(count.eventCount || 0),
-          ...workerInfo,
-          zone: count.zone || null,
-          areaId: count.areaId || null,
-          rackId: count.rackId || null,
-          rackCode: count.rackCode || null,
-          locationCode: count.locationCode || null,
-          lastScannedAt: count.lastScannedAt || null,
-        };
-      }),
-    ];
-
-    const countedRows = rows.filter((row) => row.isCounted);
-    const uncountedRows = rows.filter((row) => row.status === "UNCOUNTED");
+    const countedRows = rows;
+    const uncountedRows: any[] = [];
     const matchedRows = rows.filter((row) => row.status === "MATCH");
     const notFoundRows = rows.filter((row) => row.status === "NOT_FOUND");
     const discrepancyRows = rows.filter((row) => row.status === "MISMATCH");
@@ -1528,11 +1604,11 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
     const shortRows = rows.filter((row) => row.diffType === "SHORT");
 
     const kpi = {
-      totalSnapshotSku: scopedSnapshots.length,
+      totalSnapshotSku: rows.length,
       totalSku: rows.length,
       totalRows: rows.length,
       countedSku: countedRows.length,
-      uncountedSku: uncountedRows.length,
+      uncountedSku: 0,
       matchedSku: matchedRows.length,
       mismatchSku: discrepancyRows.length,
       discrepancySku: discrepancyRows.length,
@@ -1543,8 +1619,9 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
       totalCountedQty: rows.reduce((sum, row) => sum + Number(row.countedQty || 0), 0),
       totalDiffQty: discrepancyRows.reduce((sum, row) => sum + Number(row.diff || 0), 0),
       totalDiffValue: discrepancyRows.reduce((sum, row) => sum + Number(row.diffValue || 0), 0),
-      scanEvents: scanEvents.length,
+      scanEvents: session._count?.scanEvents || fallbackScanEvents.length,
       workerCount: session.workers.length,
+      fastMode: true,
     };
 
     return {
@@ -1555,14 +1632,14 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
       items: rows,
       uncountedRows,
       discrepancyRows,
-      logs: scanEvents.map((log) => {
+      logs: fallbackScanEvents.map((log) => {
         const worker = log.workerId ? workerMap.get(log.workerId) : null;
         return {
           ...log,
           workerName: worker?.name || null,
         };
       }),
-      recentLogs: scanEvents,
+      recentLogs: [],
     };
   }
 
@@ -1616,15 +1693,9 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
       );
     }
 
-    const session = await this.prisma.stocktakeSession.findUnique({
-      where: { id: sessionId },
-    });
-
-    if (!session) {
-      return rows;
-    }
-
-    return await this.filterRowsBySessionBranchV27(session, rows);
+    // Detail fast đã scope theo sessionId + branchId ở buildSessionDetail.
+    // Không gọi filterRowsBySessionBranchV27 ở đây nữa vì hàm đó query toàn bộ inventoryItem của branch, làm /items chậm không cần thiết.
+    return rows;
   }
 
   async getSessionLogs(sessionId: string, user?: any) {
