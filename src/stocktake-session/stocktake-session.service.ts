@@ -222,7 +222,7 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
 
   private buildSessionListWhere(
     branchId?: string,
-    filters?: { status?: string; from?: string; to?: string },
+    filters?: { status?: string; from?: string; to?: string; q?: string; query?: string; productQuery?: string; productQ?: string; sku?: string },
     user?: any,
   ) {
     const where: any = {};
@@ -257,6 +257,154 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
     const skip = (page - 1) * limit;
 
     return { page, limit, skip };
+  }
+
+  private normalizeSearchText(value?: string | null) {
+    return String(value || "").trim();
+  }
+
+  private mergeIdFilter(where: any, sessionIds: string[]) {
+    if (!Array.isArray(sessionIds)) return where;
+
+    const uniqueIds = Array.from(new Set(sessionIds.filter(Boolean)));
+    if (!uniqueIds.length) {
+      where.id = { in: ["__NO_STOCKTAKE_SESSION_MATCH__"] };
+      return where;
+    }
+
+    if (where.id?.in && Array.isArray(where.id.in)) {
+      const current = new Set(where.id.in.map((id: any) => String(id)));
+      where.id = { in: uniqueIds.filter((id) => current.has(String(id))) };
+      if (!where.id.in.length) where.id = { in: ["__NO_STOCKTAKE_SESSION_MATCH__"] };
+      return where;
+    }
+
+    where.id = { in: uniqueIds };
+    return where;
+  }
+
+  private async findSessionIdsByProductSearch(rawQuery?: string | null) {
+    const q = this.normalizeSearchText(rawQuery);
+    if (!q) return null;
+
+    const db = this.prisma as any;
+    const variantRows = await this.prisma.productVariant.findMany({
+      where: {
+        OR: [
+          { sku: { contains: q, mode: "insensitive" } },
+          { color: { contains: q, mode: "insensitive" } },
+          { size: { contains: q, mode: "insensitive" } },
+          { product: { name: { contains: q, mode: "insensitive" } } },
+        ],
+      },
+      select: { id: true },
+      take: 500,
+    });
+
+    const variantIds = variantRows.map((item) => item.id).filter(Boolean);
+    const sessionIds = new Set<string>();
+
+    const [countRows, snapshotRows, scanRows] = await Promise.all([
+      db.stocktakeCount?.findMany
+        ? db.stocktakeCount.findMany({
+            where: {
+              OR: [
+                { sku: { contains: q, mode: "insensitive" } },
+                ...(variantIds.length ? [{ variantId: { in: variantIds } }] : []),
+              ],
+            },
+            select: { sessionId: true },
+            take: 2000,
+          })
+        : Promise.resolve([]),
+      db.stocktakeSnapshot?.findMany && variantIds.length
+        ? db.stocktakeSnapshot.findMany({
+            where: { variantId: { in: variantIds } },
+            select: { sessionId: true },
+            take: 2000,
+          })
+        : Promise.resolve([]),
+      db.stocktakeScanEvent?.findMany
+        ? db.stocktakeScanEvent.findMany({
+            where: {
+              OR: [
+                { sku: { contains: q, mode: "insensitive" } },
+                { barcode: { contains: q, mode: "insensitive" } },
+                ...(variantIds.length ? [{ variantId: { in: variantIds } }] : []),
+              ],
+            },
+            select: { sessionId: true },
+            take: 2000,
+          })
+        : Promise.resolve([]),
+    ]);
+
+    [...(countRows || []), ...(snapshotRows || []), ...(scanRows || [])].forEach((row: any) => {
+      if (row?.sessionId) sessionIds.add(String(row.sessionId));
+    });
+
+    return Array.from(sessionIds);
+  }
+
+  private async applySessionListSearchFilters(where: any, filters?: { q?: string; query?: string; productQuery?: string; productQ?: string; sku?: string }) {
+    const productSearch =
+      this.normalizeSearchText(filters?.productQuery) ||
+      this.normalizeSearchText(filters?.productQ) ||
+      this.normalizeSearchText(filters?.sku);
+
+    if (productSearch) {
+      const sessionIds = await this.findSessionIdsByProductSearch(productSearch);
+      if (sessionIds) this.mergeIdFilter(where, sessionIds);
+    }
+
+    const generalSearch =
+      this.normalizeSearchText(filters?.query) ||
+      this.normalizeSearchText(filters?.q);
+
+    if (generalSearch) {
+      where.AND = [
+        ...(Array.isArray(where.AND) ? where.AND : []),
+        {
+          OR: [
+            { id: { contains: generalSearch, mode: "insensitive" } },
+            { name: { contains: generalSearch, mode: "insensitive" } },
+            { note: { contains: generalSearch, mode: "insensitive" } },
+          ],
+        },
+      ];
+    }
+
+    return where;
+  }
+
+  async updateSessionNote(sessionId: string, body: { note?: string | null } = {}, user?: any) {
+    await this.ensureSessionAccess(sessionId, user);
+
+    const session = await this.prisma.stocktakeSession.findUnique({
+      where: { id: sessionId },
+      select: { id: true },
+    });
+
+    if (!session) {
+      throw new NotFoundException("Không tìm thấy phiên kiểm kho.");
+    }
+
+    const note = String(body?.note ?? "").trim();
+
+    return this.prisma.stocktakeSession.update({
+      where: { id: sessionId },
+      data: { note },
+      include: {
+        workers: {
+          orderBy: { createdAt: "asc" },
+        },
+        _count: {
+          select: {
+            scanEvents: true,
+          },
+        },
+      },
+    });
   }
 
   private async enrichSessionListRows(sessions: any[]) {
@@ -456,10 +604,11 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
 
   async listSessions(
     branchId?: string,
-    filters?: { status?: string; from?: string; to?: string; page?: number; limit?: number },
+    filters?: { status?: string; from?: string; to?: string; page?: number; limit?: number; q?: string; query?: string; productQuery?: string; productQ?: string; sku?: string },
     user?: any,
   ) {
     const where = this.buildSessionListWhere(branchId, filters, user);
+    await this.applySessionListSearchFilters(where, filters);
     const { page, limit, skip } = this.normalizePagination(filters);
 
     const [total, sessions] = await Promise.all([
@@ -495,10 +644,11 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
 
   async getSessionsOverview(
     branchId?: string,
-    filters?: { status?: string; from?: string; to?: string },
+    filters?: { status?: string; from?: string; to?: string; q?: string; query?: string; productQuery?: string; productQ?: string; sku?: string },
     user?: any,
   ) {
     const where = this.buildSessionListWhere(branchId, filters, user);
+    await this.applySessionListSearchFilters(where, filters);
 
     const sessions = await this.prisma.stocktakeSession.findMany({
       where,
