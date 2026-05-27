@@ -40,11 +40,11 @@ export class StocktakeSessionController {
     @Query("to") to?: string,
     @Query("page") page?: string,
     @Query("limit") limit?: string,
-    @Query("q") q?: string,
-    @Query("query") query?: string,
     @Query("productQuery") productQuery?: string,
     @Query("productQ") productQ?: string,
     @Query("sku") sku?: string,
+    @Query("q") q?: string,
+    @Query("query") query?: string,
     @Req() req?: any,
   ) {
     return this.service.listSessions(
@@ -55,11 +55,11 @@ export class StocktakeSessionController {
         to,
         page: page ? Number(page) : undefined,
         limit: limit ? Number(limit) : undefined,
-        q,
-        query,
-        productQuery,
+        productQuery: productQuery || productQ || sku || q || query,
         productQ,
         sku,
+        q,
+        query,
       },
       req?.user,
     );
@@ -72,18 +72,14 @@ export class StocktakeSessionController {
     @Query("status") status?: string,
     @Query("from") from?: string,
     @Query("to") to?: string,
-    @Query("q") q?: string,
-    @Query("query") query?: string,
     @Query("productQuery") productQuery?: string,
     @Query("productQ") productQ?: string,
     @Query("sku") sku?: string,
+    @Query("q") q?: string,
+    @Query("query") query?: string,
     @Req() req?: any,
   ) {
-    return this.service.getSessionsOverview(
-      branchId,
-      { status, from, to, q, query, productQuery, productQ, sku },
-      req?.user,
-    );
+    return this.service.getSessionsOverview(branchId, { status, from, to, productQuery: productQuery || productQ || sku || q || query, productQ, sku, q, query }, req?.user);
   }
 
   @Get("active/current")
@@ -91,6 +87,7 @@ export class StocktakeSessionController {
   getActiveSession(@Query("branchId") branchId: string | undefined, @Req() req: any) {
     return this.service.getActiveSession(branchId, req.user);
   }
+
 
   @Patch(":id")
   updateSessionNote(@Param("id") id: string, @Body() body: any, @Req() req: any) {
