@@ -1314,9 +1314,7 @@ export class MetaAdsSyncService {
     const normalized = rows.map((row) => {
       const metrics = this.metricsFromMetaInsightRow(row);
       
-    const liveLevelForEnrich = String(query.level || dtoRangeLevel || 'ad');
-    const enrichedRows = await this.enrichLiveRowsWithStructure(rows, liveLevelForEnrich);
-return {
+    return {
         id:
           level === 'campaign'
             ? String(row.campaign_id || row.campaign_name || '')
@@ -1342,7 +1340,9 @@ return {
       };
     });
 
-    const summary = this.mergeMetricRows(normalized.map((row) => row.metrics));
+    const enrichedNormalized = await this.enrichLiveRowsWithStructure(normalized, level);
+
+    const summary = this.mergeMetricRows(enrichedNormalized.map((row) => row.metrics));
 
     return {
       ok: true,
