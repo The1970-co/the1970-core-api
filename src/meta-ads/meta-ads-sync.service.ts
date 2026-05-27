@@ -1268,4 +1268,270 @@ export class MetaAdsSyncService {
     };
   }
 
+  async getLiveInsights(query: {
+    range?: string;
+    fromDate?: string;
+    toDate?: string;
+    level?: MetaInsightLevel;
+    limit?: number;
+  }) {
+    const rawRange = String(query.range || 'today');
+    const dtoRange =
+      rawRange === 'last_7d' ? '7d' :
+      rawRange === '7days' ? '7d' :
+      rawRange;
+
+    const dateRange = this.getMetaLiveDateRange({
+      range: dtoRange,
+      fromDate: query.fromDate,
+      toDate: query.toDate,
+    });
+
+    const level = (query.level || 'ad') as MetaInsightLevel;
+    const accountId = this.normalizeAccountId(this.defaultAdAccountId);
+
+    const fieldsByLevel: Record<MetaInsightLevel, string> = {
+      campaign:
+        'date_start,date_stop,account_id,campaign_id,campaign_name,spend,impressions,reach,frequency,clicks,inline_link_clicks,cpc,cpm,ctr,actions,cost_per_action_type,action_values,purchase_roas,website_purchase_roas',
+      adset:
+        'date_start,date_stop,account_id,campaign_id,campaign_name,adset_id,adset_name,spend,impressions,reach,frequency,clicks,inline_link_clicks,cpc,cpm,ctr,actions,cost_per_action_type,action_values,purchase_roas,website_purchase_roas',
+      ad:
+        'date_start,date_stop,account_id,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,reach,frequency,clicks,inline_link_clicks,cpc,cpm,ctr,actions,cost_per_action_type,action_values,purchase_roas,website_purchase_roas',
+    };
+
+    // Quan trọng: lấy theo insight live của Meta trong range.
+    // Insight API chỉ trả những entity có data trong range, kể cả hiện đã tắt.
+    const rows = await this.graphList<any>(`/${accountId}/insights`, {
+      fields: fieldsByLevel[level],
+      level,
+      time_increment: 'all_days',
+      time_range: JSON.stringify(dateRange),
+      action_report_time: 'conversion',
+      use_unified_attribution_setting: 'true',
+      limit: String(Math.min(Math.max(Number(query.limit || 1000), 50), 1000)),
+    }, 100);
+
+    const normalized = rows.map((row) => {
+      const metrics = this.metricsFromMetaInsightRow(row);
+      
+    const liveLevelForEnrich = String(query.level || dtoRangeLevel || 'ad');
+    const enrichedRows = await this.enrichLiveRowsWithStructure(rows, liveLevelForEnrich);
+return {
+        id:
+          level === 'campaign'
+            ? String(row.campaign_id || row.campaign_name || '')
+            : level === 'adset'
+              ? String(row.adset_id || row.adset_name || '')
+              : String(row.ad_id || row.ad_name || ''),
+        level,
+        name:
+          level === 'campaign'
+            ? String(row.campaign_name || '')
+            : level === 'adset'
+              ? String(row.adset_name || '')
+              : String(row.ad_name || ''),
+        campaignName: row.campaign_name || null,
+        adSetName: row.adset_name || null,
+        metaCampaignId: row.campaign_id || null,
+        metaAdSetId: row.adset_id || null,
+        metaAdId: row.ad_id || null,
+        status: null,
+        effectiveStatus: null,
+        metrics,
+        rawJson: row,
+      };
+    });
+
+    const summary = this.mergeMetricRows(normalized.map((row) => row.metrics));
+
+    return {
+      ok: true,
+      source: 'meta_live',
+      generatedAt: new Date().toISOString(),
+      range: dateRange,
+      level,
+      count: normalized.length,
+      summary,
+      officialSummary: summary,
+      dbSummary: null,
+      reconciliation: {
+        officialSpend: summary.spend,
+        dbSpend: 0,
+        spendDiff: 0,
+        spendDiffPercent: 0,
+      },
+      statusBreakdown: {
+        campaigns: { total: level === 'campaign' ? normalized.length : 0, active: 0, inactive: 0 },
+        adSets: { total: level === 'adset' ? normalized.length : 0, active: 0, inactive: 0 },
+        ads: { total: level === 'ad' ? normalized.length : 0, active: 0, inactive: 0 },
+      },
+      dailyRows: [],
+      topCampaigns: level === 'campaign' ? normalized : [],
+      topAdSets: level === 'adset' ? normalized : [],
+      topAds: level === 'ad' ? normalized : [],
+      warnings: [],
+      latestLogs: [],
+      attribution: {
+        enabled: true,
+        mode: 'meta_live_first',
+        note: 'Meta metrics lấy live từ Graph Insights theo range; DB chỉ dùng để ghép đơn nội bộ.',
+      },
+    };
+  }
+
+  private getMetaLiveDateRange(query: {
+    range?: string;
+    fromDate?: string;
+    toDate?: string;
+  }) {
+    if (query.fromDate && query.toDate) {
+      return { since: query.fromDate, until: query.toDate };
+    }
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const fmt = (d: Date) =>
+      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    const range = String(query.range || 'today');
+
+    if (range === 'today') {
+      return { since: fmt(today), until: fmt(today) };
+    }
+
+    if (range === 'yesterday') {
+      return { since: fmt(yesterday), until: fmt(yesterday) };
+    }
+
+    const rollingMap: Record<string, number> = {
+      '7d': 7,
+      '7days': 7,
+      'last_7d': 7,
+      '10d': 10,
+      '10days': 10,
+      'last_10d': 10,
+      '30d': 30,
+      '30days': 30,
+      'last_30d': 30,
+    };
+
+    const days = rollingMap[range];
+    if (days) {
+      // Meta Ads Manager "7 ngày qua" là 7 ngày đã hoàn tất,
+      // ví dụ ngày 27/05 thì range phải là 20/05 - 26/05, không lấy ngày 27/05.
+      const since = new Date(yesterday);
+      since.setDate(since.getDate() - days + 1);
+      return { since: fmt(since), until: fmt(yesterday) };
+    }
+
+    return this.getDateRange({
+      range: range as any,
+      fromDate: query.fromDate,
+      toDate: query.toDate,
+    } as SyncMetaAdsDto);
+  }
+
+  private pickFirstString(...values: any[]): string | null {
+    for (const value of values) {
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+    return null;
+  }
+
+  private pickMetaThumbnail(entity: any): string | null {
+    if (!entity) return null;
+    const raw = entity.rawJson || entity.raw || entity.creativeJson || {};
+    return this.pickFirstString(
+      entity.thumbnailUrl,
+      entity.thumbnail_url,
+      entity.imageUrl,
+      entity.image_url,
+      entity.creativeThumbnailUrl,
+      entity.creative?.thumbnailUrl,
+      entity.creative?.thumbnail_url,
+      entity.creative?.imageUrl,
+      entity.creative?.image_url,
+      raw.thumbnail_url,
+      raw.image_url,
+      raw.creative?.thumbnail_url,
+      raw.creative?.image_url,
+      raw.object_story_spec?.link_data?.picture,
+      raw.object_story_spec?.video_data?.image_url,
+    );
+  }
+
+  private pickMetaStatus(entity: any): string | null {
+    if (!entity) return null;
+    const raw = entity.rawJson || entity.raw || {};
+    return this.pickFirstString(
+      entity.effectiveStatus,
+      entity.effective_status,
+      entity.status,
+      entity.configuredStatus,
+      entity.configured_status,
+      raw.effective_status,
+      raw.status,
+      raw.configured_status,
+    );
+  }
+
+  private async enrichLiveRowsWithStructure(rows: any[], level: string) {
+    if (!Array.isArray(rows) || !rows.length) return rows;
+
+    const ids = rows
+      .map((row) => String(row?.id || row?.metaAdId || row?.metaCampaignId || row?.metaAdSetId || '').trim())
+      .filter(Boolean);
+
+    if (!ids.length) return rows;
+
+    let map = new Map<string, any>();
+
+    try {
+      if (level === 'campaign') {
+        const items = await (this.prisma as any).metaCampaign.findMany({
+          where: { metaCampaignId: { in: ids } },
+          take: ids.length,
+        });
+        map = new Map(items.map((item: any) => [String(item.metaCampaignId), item]));
+      } else if (level === 'adset') {
+        const items = await (this.prisma as any).metaAdSet.findMany({
+          where: { metaAdSetId: { in: ids } },
+          take: ids.length,
+        });
+        map = new Map(items.map((item: any) => [String(item.metaAdSetId), item]));
+      } else {
+        const items = await (this.prisma as any).metaAd.findMany({
+          where: { metaAdId: { in: ids } },
+          take: ids.length,
+        });
+        map = new Map(items.map((item: any) => [String(item.metaAdId), item]));
+      }
+    } catch (error) {
+      this.logger.warn(`[META_LIVE_ENRICH] skip structure enrich: ${error?.message || error}`);
+      return rows;
+    }
+
+    return rows.map((row) => {
+      const id = String(row?.id || row?.metaAdId || row?.metaCampaignId || row?.metaAdSetId || '').trim();
+      const entity = map.get(id);
+      if (!entity) return row;
+
+      const thumbnailUrl = this.pickFirstString(row.thumbnailUrl, row.thumbnail_url, this.pickMetaThumbnail(entity));
+      const effectiveStatus = this.pickFirstString(row.effectiveStatus, row.effective_status, this.pickMetaStatus(entity));
+      const status = this.pickFirstString(row.status, entity.status, effectiveStatus);
+
+      return {
+        ...row,
+        thumbnailUrl,
+        imageUrl: this.pickFirstString(row.imageUrl, row.image_url, thumbnailUrl),
+        effectiveStatus,
+        status,
+      };
+    });
+  }
+
 }

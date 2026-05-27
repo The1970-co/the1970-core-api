@@ -3,6 +3,7 @@ import { MetaAdsService } from './meta-ads.service';
 import { MetaAdsSyncService } from './meta-ads-sync.service';
 import { MetaAdsOrderAttributionService } from './meta-ads-order-attribution.service';
 import { SyncMetaAdsDto } from './dto/sync-meta-ads.dto';
+import type { MetaInsightLevel } from './dto/sync-meta-ads.dto';
 
 function hcmYmd(date: Date) {
   return new Intl.DateTimeFormat('en-CA', {
@@ -33,12 +34,18 @@ function parseDateRange(query: any) {
   if (range === 'yesterday') {
     sinceYmd = addDays(today, -1);
     untilYmd = sinceYmd;
+  } else if (range === '7d') {
+    untilYmd = addDays(today, -1);
+    sinceYmd = addDays(untilYmd, -6);
   } else if (range === '10d') {
-    sinceYmd = addDays(today, -9);
+    untilYmd = addDays(today, -1);
+    sinceYmd = addDays(untilYmd, -9);
   } else if (range === '30d') {
-    sinceYmd = addDays(today, -29);
-  } else if (range !== 'today') {
-    sinceYmd = addDays(today, -6);
+    untilYmd = addDays(today, -1);
+    sinceYmd = addDays(untilYmd, -29);
+  } else if (range !== 'today' && range !== 'custom') {
+    untilYmd = addDays(today, -1);
+    sinceYmd = addDays(untilYmd, -6);
   }
 
   if (query?.fromDate) sinceYmd = String(query.fromDate).slice(0, 10);
@@ -199,4 +206,21 @@ export class MetaAdsController {
       },
     };
   }
+  @Get('live-insights')
+  async getLiveInsights(
+    @Query('range') range?: string,
+    @Query('fromDate') fromDate?: string,
+    @Query('toDate') toDate?: string,
+    @Query('level') level?: MetaInsightLevel,
+    @Query('limit') limit?: string,
+  ) {
+    return this.metaAdsSyncService.getLiveInsights({
+      range: range || 'today',
+      fromDate,
+      toDate,
+      level: (level || 'ad') as MetaInsightLevel,
+      limit: Number(limit || 1000),
+    });
+  }
+
 }

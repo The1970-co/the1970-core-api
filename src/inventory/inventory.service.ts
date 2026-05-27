@@ -2003,8 +2003,8 @@ export class InventoryService {
     };
   }
 
-  async getInventoryMovements(limit = 100, user?: any) {
-    const safeLimit = Math.min(Math.max(Number(limit || 100), 1), 1000);
+  async getInventoryMovements(limit = 50000, user?: any) {
+    const safeLimit = Math.min(Math.max(Number(limit || 50000), 1), 50000);
     const where = this.isOwner(user)
       ? {}
       : {
