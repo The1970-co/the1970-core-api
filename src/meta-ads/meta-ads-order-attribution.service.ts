@@ -164,6 +164,8 @@ export class MetaAdsOrderAttributionService {
     }
 
     const productMap = new Map<string, AnyRow>();
+    const validOrderRevenueById = new Map<string, number>();
+    const cancelledOrderRevenueById = new Map<string, number>();
 
     for (const item of items) {
       const order = item.order || {};
@@ -213,6 +215,16 @@ export class MetaAdsOrderAttributionService {
       const cancelled = isCancelledOrReturned(order);
       const orderRevenueForSample = toNumber(order.finalAmount || order.totalAmount || lineRevenue);
 
+      // Tổng dashboard / Ads Center phải tính unique theo đơn, không cộng lại theo từng SKU family.
+      // Một đơn có nhiều sản phẩm hoặc một SKU được nhiều ads kéo về chỉ được tính doanh thu đơn 1 lần.
+      if (orderId) {
+        if (cancelled) {
+          if (!cancelledOrderRevenueById.has(orderId)) cancelledOrderRevenueById.set(orderId, orderRevenueForSample);
+        } else if (!validOrderRevenueById.has(orderId)) {
+          validOrderRevenueById.set(orderId, orderRevenueForSample);
+        }
+      }
+
       if (orderId && !existed.orderIds.has(orderId)) {
         existed.orderIds.add(orderId);
 
@@ -260,7 +272,7 @@ export class MetaAdsOrderAttributionService {
       productMap.set(key, existed);
     }
 
-    const rows = Array.from(productMap.values())
+    const allRows = Array.from(productMap.values())
       .map((row) => ({
         key: row.key,
         sku: row.familySku || row.key,
@@ -285,31 +297,28 @@ export class MetaAdsOrderAttributionService {
         sampleOrders: row.sampleOrders,
         cancelledSampleOrders: row.cancelledSampleOrders,
       }))
-      .sort((a, b) => b.revenue - a.revenue)
-      .slice(0, limit);
+      .sort((a, b) => b.revenue - a.revenue);
 
-    const orderIds = new Set<string>();
-    const cancelledOrderIds = new Set<string>();
-    for (const row of rows as any[]) {
-      for (const order of row.sampleOrders || []) if (order.orderId) orderIds.add(order.orderId);
-      for (const order of row.cancelledSampleOrders || []) if (order.orderId) cancelledOrderIds.add(order.orderId);
-    }
+    const rows = allRows.slice(0, limit);
+    const uniqueOrderRevenue = Array.from(validOrderRevenueById.values()).reduce((sum, value) => sum + toNumber(value), 0);
+    const uniqueCancelledOrderRevenue = Array.from(cancelledOrderRevenueById.values()).reduce((sum, value) => sum + toNumber(value), 0);
 
     return {
       ok: true,
       range: { since: params.since.toISOString(), until: params.until.toISOString() },
       sourceMode: params.sourceMode || 'facebook',
       orderMode,
-      totalProducts: rows.length,
-      totalOrders: orderIds.size,
-      totalCancelledOrders: cancelledOrderIds.size,
-      totalQuantity: rows.reduce((sum: number, row: any) => sum + toNumber(row.quantity), 0),
-      totalRevenue: rows.reduce((sum: number, row: any) => sum + toNumber(row.revenue), 0),
-      totalOrderRevenue: rows.reduce((sum: number, row: any) => sum + toNumber(row.orderRevenue), 0),
-      totalCancelledRevenue: rows.reduce((sum: number, row: any) => sum + toNumber(row.cancelledRevenue), 0),
-      totalCancelledOrderRevenue: rows.reduce((sum: number, row: any) => sum + toNumber(row.cancelledOrderRevenue), 0),
+      totalProducts: allRows.length,
+      totalOrders: validOrderRevenueById.size,
+      totalCancelledOrders: cancelledOrderRevenueById.size,
+      totalQuantity: allRows.reduce((sum: number, row: any) => sum + toNumber(row.quantity), 0),
+      // totalRevenue vẫn là doanh thu theo dòng sản phẩm; totalOrderRevenue mới là unique theo đơn.
+      totalRevenue: allRows.reduce((sum: number, row: any) => sum + toNumber(row.revenue), 0),
+      totalOrderRevenue: uniqueOrderRevenue,
+      totalCancelledRevenue: allRows.reduce((sum: number, row: any) => sum + toNumber(row.cancelledRevenue), 0),
+      totalCancelledOrderRevenue: uniqueCancelledOrderRevenue,
       rows,
-      note: 'V16: SKU family + source filter + bỏ đơn huỷ + tách lineRevenue/orderRevenue + chống nhân đôi ROAS.',
+      note: 'V17: SKU family + source filter + bỏ đơn huỷ + totalOrderRevenue unique theo order, không cộng trùng nhiều SKU/ads.',
     };
   }
 

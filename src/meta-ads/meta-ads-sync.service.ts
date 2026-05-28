@@ -335,8 +335,24 @@ export class MetaAdsSyncService {
     const conversationStarts = Math.round(this.pickActionCount(payload.actions, this.metaConversationStartAliases()));
     const comments = Math.round(this.pickActionCount(payload.actions, this.metaCommentAliases()));
 
+    const metaPurchases = Math.round(this.pickActionCount(payload.actions, [
+      'purchase',
+      'omni_purchase',
+      'offsite_conversion.fb_pixel_purchase',
+    ]));
+    const metaPurchaseValue = this.pickActionValue(payload.actionValues, [
+      'purchase',
+      'omni_purchase',
+      'offsite_conversion.fb_pixel_purchase',
+    ]);
+
     const costPerMessageFromMeta = this.pickCostPerAction(payload.costPerActionType, this.metaMessagingAliases());
     const costPerConversationFromMeta = this.pickCostPerAction(payload.costPerActionType, this.metaConversationStartAliases());
+    const costPerMetaPurchaseFromMeta = this.pickCostPerAction(payload.costPerActionType, [
+      'purchase',
+      'omni_purchase',
+      'offsite_conversion.fb_pixel_purchase',
+    ]);
     const costPerPurchaseFromMeta = this.pickCostPerAction(payload.costPerActionType, ['purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase']);
 
     return {
@@ -875,27 +891,39 @@ export class MetaAdsSyncService {
     const clicks = this.n(sum?.clicks);
     const inlineLinkClicks = this.n(sum?.inlineLinkClicks);
     const purchases = this.n(sum?.purchases);
+    const metaPurchases = this.n(sum?.metaPurchases);
     const purchaseValue = this.n(sum?.purchaseValue);
+    const metaPurchaseValue = this.n(sum?.metaPurchaseValue);
+    const conversationStarts = this.n(sum?.conversationStarts);
+    const messages = this.n(sum?.messages);
     return {
       spend,
       impressions,
       reach,
       clicks,
       inlineLinkClicks,
-      purchases: this.n(sum?.conversationStarts),
+
+      // Legacy key dùng cho cột "Kết quả" trong Ads Center: giữ là số bắt đầu chat để không phá UI hiện tại.
+      purchases: conversationStarts,
       purchaseValue,
       ctr: impressions > 0 ? (clicks / impressions) * 100 : 0,
       cpc: clicks > 0 ? spend / clicks : 0,
       cpm: impressions > 0 ? (spend / impressions) * 1000 : 0,
       costPerPurchase: purchases > 0 ? spend / purchases : 0,
       roas: spend > 0 ? purchaseValue / spend : 0,
-      messages: this.n(sum?.messages),
-      conversationStarts: this.n(sum?.conversationStarts),
+      messages,
+      conversationStarts,
       comments: this.n(sum?.comments),
-      costPerMessage: this.n(sum?.messages) > 0 ? spend / this.n(sum?.messages) : 0,
-      costPerConversation: this.n(sum?.conversationStarts) > 0 ? spend / this.n(sum?.conversationStarts) : 0,
-      costPerResult: this.n(sum?.conversationStarts) > 0 ? spend / this.n(sum?.conversationStarts) : 0,
+      costPerMessage: messages > 0 ? spend / messages : 0,
+      costPerConversation: conversationStarts > 0 ? spend / conversationStarts : 0,
+      costPerResult: conversationStarts > 0 ? spend / conversationStarts : 0,
       averagePurchaseValue: purchases > 0 ? purchaseValue / purchases : 0,
+
+      // Meta purchase thật để card "Lượt mua Meta" không bị lấy nhầm 870 tin nhắn.
+      metaPurchases,
+      metaPurchaseValue,
+      costPerMetaPurchase: metaPurchases > 0 ? spend / metaPurchases : 0,
+      metaAveragePurchaseValue: metaPurchases > 0 ? metaPurchaseValue / metaPurchases : 0,
     };
   }
 
@@ -1015,8 +1043,24 @@ export class MetaAdsSyncService {
     const conversationStarts = Math.round(this.pickActionCount(payload.actions, this.metaConversationStartAliases()));
     const comments = Math.round(this.pickActionCount(payload.actions, this.metaCommentAliases()));
 
+    const metaPurchases = Math.round(this.pickActionCount(payload.actions, [
+      'purchase',
+      'omni_purchase',
+      'offsite_conversion.fb_pixel_purchase',
+    ]));
+    const metaPurchaseValue = this.pickActionValue(payload.actionValues, [
+      'purchase',
+      'omni_purchase',
+      'offsite_conversion.fb_pixel_purchase',
+    ]);
+
     const costPerMessageFromMeta = this.pickCostPerAction(payload.costPerActionType, this.metaMessagingAliases());
     const costPerConversationFromMeta = this.pickCostPerAction(payload.costPerActionType, this.metaConversationStartAliases());
+    const costPerMetaPurchaseFromMeta = this.pickCostPerAction(payload.costPerActionType, [
+      'purchase',
+      'omni_purchase',
+      'offsite_conversion.fb_pixel_purchase',
+    ]);
 
     return {
       spend,
@@ -1040,6 +1084,10 @@ export class MetaAdsSyncService {
       costPerConversation: costPerConversationFromMeta || (conversationStarts > 0 ? spend / conversationStarts : 0),
       costPerResult: costPerConversationFromMeta || (conversationStarts > 0 ? spend / conversationStarts : 0),
       averagePurchaseValue: 0,
+      metaPurchases,
+      metaPurchaseValue,
+      costPerMetaPurchase: costPerMetaPurchaseFromMeta || (metaPurchases > 0 ? spend / metaPurchases : 0),
+      metaAveragePurchaseValue: metaPurchases > 0 ? metaPurchaseValue / metaPurchases : 0,
     };
   }
 
@@ -1052,6 +1100,8 @@ export class MetaAdsSyncService {
       inlineLinkClicks: rows.reduce((sum, row) => sum + this.n(row?.inlineLinkClicks), 0),
       purchases: rows.reduce((sum, row) => sum + this.n(row?.purchases), 0),
       purchaseValue: rows.reduce((sum, row) => sum + this.n(row?.purchaseValue), 0),
+      metaPurchases: rows.reduce((sum, row) => sum + this.n(row?.metaPurchases), 0),
+      metaPurchaseValue: rows.reduce((sum, row) => sum + this.n(row?.metaPurchaseValue), 0),
       messages: rows.reduce((sum, row) => sum + this.n(row?.messages), 0),
       conversationStarts: rows.reduce((sum, row) => sum + this.n(row?.conversationStarts), 0),
       comments: rows.reduce((sum, row) => sum + this.n(row?.comments), 0),
