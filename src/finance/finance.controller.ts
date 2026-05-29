@@ -301,11 +301,15 @@ export class FinanceController {
   @Get("local-delivery-reconciliation")
   @RequirePermissions("finance.local_delivery.view")
   getLocalDeliveryReconciliation(
+    @Req() req: any,
     @Query("dateFrom") dateFrom?: string,
     @Query("dateTo") dateTo?: string,
     @Query("branchId") branchId?: string,
     @Query("carrier") carrier?: string,
     @Query("status") status?: string,
+    @Query("reconciliationStatus") reconciliationStatus?: string,
+    @Query("orderStatus") orderStatus?: string,
+    @Query("paymentStatus") paymentStatus?: string,
     @Query("q") q?: string
   ) {
     return this.financeService.getLocalDeliveryReconciliation({
@@ -314,8 +318,11 @@ export class FinanceController {
       branchId,
       carrier,
       status,
+      reconciliationStatus,
+      orderStatus,
+      paymentStatus,
       q,
-    });
+    }, req.user);
   }
 
   @Patch("local-delivery-reconciliation/:orderId/delivered")
@@ -351,4 +358,81 @@ export class FinanceController {
       collectCod: true,
     });
   }
+  @Post("local-delivery-reconciliation")
+  @RequirePermissions("finance.local_delivery.confirm")
+  createLocalDeliveryReconciliation(
+    @Req() req: any,
+    @Body()
+    body: {
+      orderIds?: string[];
+      shipmentIds?: string[];
+      note?: string;
+      createdById?: string;
+      createdByName?: string;
+    }
+  ) {
+    return this.financeService.createLocalDeliveryReconciliation(body, req.user);
+  }
+
+  @Patch("local-delivery-reconciliation/reconciliations/:id")
+  @RequirePermissions("finance.local_delivery.confirm")
+  updateLocalDeliveryReconciliation(
+    @Req() req: any,
+    @Param("id") id: string,
+    @Body()
+    body: {
+      codAmount?: number;
+      shippingFee?: number;
+      note?: string;
+    }
+  ) {
+    return this.financeService.updateLocalDeliveryReconciliation(id, body, req.user);
+  }
+
+  @Patch("local-delivery-reconciliation/reconciliations/:id/confirm")
+  @RequirePermissions("finance.local_delivery.confirm")
+  confirmLocalDeliveryReconciliation(
+    @Req() req: any,
+    @Param("id") id: string,
+    @Body()
+    body: {
+      confirmedById?: string;
+      confirmedByName?: string;
+      note?: string;
+    }
+  ) {
+    return this.financeService.confirmLocalDeliveryReconciliation(id, body, req.user);
+  }
+
+  @Patch("local-delivery-reconciliation/reconciliations/:id/cancel")
+  @RequirePermissions("finance.local_delivery.confirm")
+  cancelLocalDeliveryReconciliation(
+    @Req() req: any,
+    @Param("id") id: string,
+    @Body()
+    body: {
+      cancelledById?: string;
+      cancelledByName?: string;
+      note?: string;
+    }
+  ) {
+    return this.financeService.cancelLocalDeliveryReconciliation(id, body, req.user);
+  }
+
+  @Patch("local-delivery-reconciliation/reconciliations/:id/pay")
+  @RequirePermissions("finance.local_delivery.confirm")
+  payLocalDeliveryReconciliation(
+    @Req() req: any,
+    @Param("id") id: string,
+    @Body()
+    body: {
+      payments: Array<{ paymentSourceId?: string; amount?: number }>;
+      note?: string;
+      paidById?: string;
+      paidByName?: string;
+    }
+  ) {
+    return this.financeService.payLocalDeliveryReconciliation(id, body, req.user);
+  }
+
 }

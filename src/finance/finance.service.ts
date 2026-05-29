@@ -1,4 +1,5 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import { randomUUID } from "crypto";
 import { FulfillmentStatus, OrderStatus, PaymentStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 
@@ -575,14 +576,608 @@ export class FinanceService {
     };
   }
 
+
+  private async ensureLocalDeliveryReconciliationTable() {
+    await this.prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "LocalDeliveryReconciliation" (
+        "id" TEXT PRIMARY KEY,
+        "code" TEXT UNIQUE,
+        "orderId" TEXT NOT NULL,
+        "shipmentId" TEXT,
+        "branchId" TEXT,
+        "carrier" TEXT,
+        "trackingCode" TEXT,
+        "status" TEXT NOT NULL DEFAULT 'DRAFT',
+        "codAmount" NUMERIC(18,2) NOT NULL DEFAULT 0,
+        "shippingFee" NUMERIC(18,2) NOT NULL DEFAULT 0,
+        "paidAmount" NUMERIC(18,2) NOT NULL DEFAULT 0,
+        "paymentRows" JSONB,
+        "note" TEXT,
+        "createdById" TEXT,
+        "createdByName" TEXT,
+        "confirmedById" TEXT,
+        "confirmedByName" TEXT,
+        "paidById" TEXT,
+        "paidByName" TEXT,
+        "cancelledById" TEXT,
+        "cancelledByName" TEXT,
+        "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
+        "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW(),
+        "confirmedAt" TIMESTAMP,
+        "paidAt" TIMESTAMP,
+        "cancelledAt" TIMESTAMP
+      );
+    `);
+
+    await this.prisma.$executeRawUnsafe(`
+      ALTER TABLE "LocalDeliveryReconciliation"
+      ADD COLUMN IF NOT EXISTS "code" TEXT,
+      ADD COLUMN IF NOT EXISTS "shipmentId" TEXT,
+      ADD COLUMN IF NOT EXISTS "branchId" TEXT,
+      ADD COLUMN IF NOT EXISTS "carrier" TEXT,
+      ADD COLUMN IF NOT EXISTS "trackingCode" TEXT,
+      ADD COLUMN IF NOT EXISTS "status" TEXT DEFAULT 'DRAFT',
+      ADD COLUMN IF NOT EXISTS "codAmount" NUMERIC(18,2) DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "shippingFee" NUMERIC(18,2) DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "paidAmount" NUMERIC(18,2) DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "paymentRows" JSONB,
+      ADD COLUMN IF NOT EXISTS "note" TEXT,
+      ADD COLUMN IF NOT EXISTS "createdById" TEXT,
+      ADD COLUMN IF NOT EXISTS "createdByName" TEXT,
+      ADD COLUMN IF NOT EXISTS "confirmedById" TEXT,
+      ADD COLUMN IF NOT EXISTS "confirmedByName" TEXT,
+      ADD COLUMN IF NOT EXISTS "paidById" TEXT,
+      ADD COLUMN IF NOT EXISTS "paidByName" TEXT,
+      ADD COLUMN IF NOT EXISTS "cancelledById" TEXT,
+      ADD COLUMN IF NOT EXISTS "cancelledByName" TEXT,
+      ADD COLUMN IF NOT EXISTS "confirmedAt" TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS "paidAt" TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS "cancelledAt" TIMESTAMP;
+    `);
+
+    await this.prisma.$executeRawUnsafe(`
+      CREATE UNIQUE INDEX IF NOT EXISTS "LocalDeliveryReconciliation_code_key"
+      ON "LocalDeliveryReconciliation" ("code")
+      WHERE "code" IS NOT NULL;
+    `);
+
+    await this.prisma.$executeRawUnsafe(`
+      CREATE INDEX IF NOT EXISTS "LocalDeliveryReconciliation_order_status_idx"
+      ON "LocalDeliveryReconciliation" ("orderId", "status", "createdAt");
+    `);
+
+    await this.prisma.$executeRawUnsafe(`
+      CREATE INDEX IF NOT EXISTS "LocalDeliveryReconciliation_shipment_status_idx"
+      ON "LocalDeliveryReconciliation" ("shipmentId", "status", "createdAt");
+    `);
+
+    await this.prisma.$executeRawUnsafe(`
+      CREATE INDEX IF NOT EXISTS "LocalDeliveryReconciliation_branch_createdAt_idx"
+      ON "LocalDeliveryReconciliation" ("branchId", "createdAt");
+    `);
+  }
+
+  private async generateLocalDeliveryReconciliationCode() {
+    await this.ensureLocalDeliveryReconciliationTable();
+
+    const today = new Date();
+    const ymd = [
+      today.getFullYear(),
+      String(today.getMonth() + 1).padStart(2, "0"),
+      String(today.getDate()).padStart(2, "0"),
+    ].join("");
+
+    const rows = await this.prisma.$queryRawUnsafe<Array<{ count: bigint | number | string }>>(
+      `SELECT COUNT(*)::int AS count FROM "LocalDeliveryReconciliation" WHERE COALESCE("code", '') LIKE $1`,
+      `DSNT${ymd}%`,
+    );
+
+    const count = Number(rows?.[0]?.count || 0) + 1;
+    return `DSNT${ymd}-${String(count).padStart(4, "0")}`;
+  }
+
+  private localReconciliationStatusLabel(status: string) {
+    switch (String(status || "").toUpperCase()) {
+      case "CONFIRMED":
+        return "Đã xác nhận";
+      case "PAID":
+        return "Đã thanh toán";
+      case "CANCELLED":
+        return "Đã huỷ";
+      default:
+        return "Nháp";
+    }
+  }
+
+  private async findActiveLocalReconciliationByOrderIds(orderIds: string[]) {
+    await this.ensureLocalDeliveryReconciliationTable();
+
+    if (!orderIds.length) return new Map<string, any>();
+
+    const placeholders = orderIds.map((_, index) => `$${index + 1}`).join(",");
+    const rows = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+        SELECT *
+        FROM "LocalDeliveryReconciliation"
+        WHERE "orderId" IN (${placeholders})
+          AND COALESCE("status", 'DRAFT') != 'CANCELLED'
+        ORDER BY "createdAt" DESC
+      `,
+      ...orderIds,
+    );
+
+    const map = new Map<string, any>();
+    rows.forEach((row) => {
+      if (!map.has(String(row.orderId))) {
+        map.set(String(row.orderId), row);
+      }
+    });
+
+    return map;
+  }
+
+  async createLocalDeliveryReconciliation(
+    body: {
+      orderIds?: string[];
+      shipmentIds?: string[];
+      note?: string;
+      createdById?: string;
+      createdByName?: string;
+    },
+    user?: any
+  ) {
+    await this.ensureLocalDeliveryReconciliationTable();
+
+    const orderIds = Array.from(new Set((body.orderIds || []).map((id) => String(id || "").trim()).filter(Boolean)));
+    const shipmentIds = Array.from(new Set((body.shipmentIds || []).map((id) => String(id || "").trim()).filter(Boolean)));
+
+    if (!orderIds.length && !shipmentIds.length) {
+      throw new BadRequestException("Chọn ít nhất 1 đơn nội thành để tạo đối soát.");
+    }
+
+    const where: Prisma.ShipmentWhereInput = {
+      NOT: [{ carrier: { equals: "GHN", mode: "insensitive" } }],
+      order: {
+        status: { not: OrderStatus.CANCELLED },
+      },
+    };
+
+    if (orderIds.length) {
+      where.orderId = { in: orderIds };
+    }
+
+    if (shipmentIds.length) {
+      where.id = { in: shipmentIds };
+    }
+
+    const shipments = await this.prisma.shipment.findMany({
+      where,
+      include: {
+        order: {
+          include: {
+            payments: true,
+          },
+        },
+      },
+      take: 200,
+    });
+
+    if (!shipments.length) {
+      throw new NotFoundException("Không tìm thấy đơn nội thành hợp lệ để tạo đối soát.");
+    }
+
+    const scopedOrderIds = shipments.map((shipment) => shipment.orderId).filter(Boolean) as string[];
+    const existingMap = await this.findActiveLocalReconciliationByOrderIds(scopedOrderIds);
+    const created: any[] = [];
+    const reused: any[] = [];
+
+    for (const shipment of shipments) {
+      const order = shipment.order;
+      this.ensureBranchScope(user, order.branchId);
+
+      if (this.isGhnCarrier(shipment.carrier)) {
+        continue;
+      }
+
+      const existing = existingMap.get(String(order.id));
+      if (existing) {
+        reused.push(existing);
+        continue;
+      }
+
+      const paidAmount = (order.payments || [])
+        .filter((payment) => payment.status === PaymentStatus.PAID || payment.status === PaymentStatus.PARTIAL)
+        .reduce((sum, payment) => sum + this.toNumber(payment.amount), 0);
+      const codAmount = Math.max(0, this.toNumber(order.finalAmount) - paidAmount);
+      const shippingFee = this.toNumber(shipment.shippingFee || order.shippingFee || 0);
+      const code = await this.generateLocalDeliveryReconciliationCode();
+
+      const rows = await this.prisma.$queryRawUnsafe<any[]>(
+        `
+          INSERT INTO "LocalDeliveryReconciliation" (
+            "id", "code", "orderId", "shipmentId", "branchId", "carrier", "trackingCode",
+            "status", "codAmount", "shippingFee", "paidAmount", "note",
+            "createdById", "createdByName", "createdAt", "updatedAt"
+          )
+          VALUES ($1,$2,$3,$4,$5,$6,$7,'DRAFT',$8,$9,0,$10,$11,$12,NOW(),NOW())
+          RETURNING *
+        `,
+        randomUUID(),
+        code,
+        order.id,
+        shipment.id,
+        order.branchId || null,
+        shipment.carrier || null,
+        shipment.trackingCode || (shipment as any).ahamoveOrderId || null,
+        codAmount,
+        shippingFee,
+        body.note?.trim() || null,
+        body.createdById || user?.id || null,
+        body.createdByName || user?.name || user?.fullName || null,
+      );
+
+      created.push(rows[0]);
+    }
+
+    return {
+      ok: true,
+      createdCount: created.length,
+      reusedCount: reused.length,
+      created,
+      reused,
+      rows: [...created, ...reused],
+    };
+  }
+
+  async updateLocalDeliveryReconciliation(
+    id: string,
+    body: {
+      codAmount?: number;
+      shippingFee?: number;
+      note?: string;
+    },
+    user?: any
+  ) {
+    await this.ensureLocalDeliveryReconciliationTable();
+
+    const currentRows = await this.prisma.$queryRawUnsafe<any[]>(
+      `SELECT * FROM "LocalDeliveryReconciliation" WHERE "id" = $1 LIMIT 1`,
+      id,
+    );
+    const current = currentRows[0];
+
+    if (!current) {
+      throw new NotFoundException("Không tìm thấy phiếu đối soát nội thành.");
+    }
+
+    this.ensureBranchScope(user, current.branchId);
+
+    if (["PAID", "CANCELLED"].includes(String(current.status || "").toUpperCase())) {
+      throw new BadRequestException("Phiếu đã thanh toán hoặc đã huỷ thì không sửa được.");
+    }
+
+    const rows = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+        UPDATE "LocalDeliveryReconciliation"
+        SET
+          "codAmount" = COALESCE($2, "codAmount"),
+          "shippingFee" = COALESCE($3, "shippingFee"),
+          "note" = COALESCE($4, "note"),
+          "updatedAt" = NOW()
+        WHERE "id" = $1
+        RETURNING *
+      `,
+      id,
+      body.codAmount === undefined ? null : Number(body.codAmount || 0),
+      body.shippingFee === undefined ? null : Number(body.shippingFee || 0),
+      body.note === undefined ? null : body.note?.trim() || null,
+    );
+
+    return rows[0];
+  }
+
+  async confirmLocalDeliveryReconciliation(
+    id: string,
+    body: {
+      confirmedById?: string;
+      confirmedByName?: string;
+      note?: string;
+    },
+    user?: any
+  ) {
+    await this.ensureLocalDeliveryReconciliationTable();
+
+    const currentRows = await this.prisma.$queryRawUnsafe<any[]>(
+      `SELECT * FROM "LocalDeliveryReconciliation" WHERE "id" = $1 LIMIT 1`,
+      id,
+    );
+    const current = currentRows[0];
+
+    if (!current) {
+      throw new NotFoundException("Không tìm thấy phiếu đối soát nội thành.");
+    }
+
+    this.ensureBranchScope(user, current.branchId);
+
+    if (String(current.status || "").toUpperCase() === "PAID") {
+      throw new BadRequestException("Phiếu đã thanh toán.");
+    }
+
+    if (String(current.status || "").toUpperCase() === "CANCELLED") {
+      throw new BadRequestException("Phiếu đã huỷ.");
+    }
+
+    const rows = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+        UPDATE "LocalDeliveryReconciliation"
+        SET
+          "status" = 'CONFIRMED',
+          "confirmedById" = COALESCE($2, "confirmedById"),
+          "confirmedByName" = COALESCE($3, "confirmedByName"),
+          "confirmedAt" = COALESCE("confirmedAt", NOW()),
+          "note" = COALESCE($4, "note"),
+          "updatedAt" = NOW()
+        WHERE "id" = $1
+        RETURNING *
+      `,
+      id,
+      body.confirmedById || user?.id || null,
+      body.confirmedByName || user?.name || user?.fullName || null,
+      body.note?.trim() || null,
+    );
+
+    return rows[0];
+  }
+
+  async cancelLocalDeliveryReconciliation(
+    id: string,
+    body: {
+      cancelledById?: string;
+      cancelledByName?: string;
+      note?: string;
+    },
+    user?: any
+  ) {
+    await this.ensureLocalDeliveryReconciliationTable();
+
+    const currentRows = await this.prisma.$queryRawUnsafe<any[]>(
+      `SELECT * FROM "LocalDeliveryReconciliation" WHERE "id" = $1 LIMIT 1`,
+      id,
+    );
+    const current = currentRows[0];
+
+    if (!current) {
+      throw new NotFoundException("Không tìm thấy phiếu đối soát nội thành.");
+    }
+
+    this.ensureBranchScope(user, current.branchId);
+
+    if (String(current.status || "").toUpperCase() === "PAID") {
+      throw new BadRequestException("Phiếu đã thanh toán thì không huỷ được.");
+    }
+
+    const rows = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+        UPDATE "LocalDeliveryReconciliation"
+        SET
+          "status" = 'CANCELLED',
+          "cancelledById" = COALESCE($2, "cancelledById"),
+          "cancelledByName" = COALESCE($3, "cancelledByName"),
+          "cancelledAt" = NOW(),
+          "note" = COALESCE($4, "note"),
+          "updatedAt" = NOW()
+        WHERE "id" = $1
+        RETURNING *
+      `,
+      id,
+      body.cancelledById || user?.id || null,
+      body.cancelledByName || user?.name || user?.fullName || null,
+      body.note?.trim() || null,
+    );
+
+    return rows[0];
+  }
+
+  async payLocalDeliveryReconciliation(
+    id: string,
+    body: {
+      payments: Array<{ paymentSourceId?: string; amount?: number }>;
+      note?: string;
+      paidById?: string;
+      paidByName?: string;
+    },
+    user?: any
+  ) {
+    await this.ensureLocalDeliveryReconciliationTable();
+
+    const paymentRows = Array.isArray(body.payments)
+      ? body.payments
+          .map((row) => ({
+            paymentSourceId: String(row.paymentSourceId || "").trim(),
+            amount: Number(row.amount || 0),
+          }))
+          .filter((row) => row.paymentSourceId && row.amount > 0)
+      : [];
+
+    if (!paymentRows.length) {
+      throw new BadRequestException("Nhập ít nhất 1 dòng thanh toán.");
+    }
+
+    if (paymentRows.length > 3) {
+      throw new BadRequestException("Mỗi phiếu chỉ chia tối đa 3 nguồn tiền.");
+    }
+
+    const currentRows = await this.prisma.$queryRawUnsafe<any[]>(
+      `SELECT * FROM "LocalDeliveryReconciliation" WHERE "id" = $1 LIMIT 1`,
+      id,
+    );
+    const current = currentRows[0];
+
+    if (!current) {
+      throw new NotFoundException("Không tìm thấy phiếu đối soát nội thành.");
+    }
+
+    this.ensureBranchScope(user, current.branchId);
+
+    if (String(current.status || "").toUpperCase() === "CANCELLED") {
+      throw new BadRequestException("Phiếu đã huỷ.");
+    }
+
+    if (String(current.status || "").toUpperCase() === "PAID") {
+      throw new BadRequestException("Phiếu đã thanh toán.");
+    }
+
+    const order = await this.prisma.order.findUnique({
+      where: { id: current.orderId },
+      include: {
+        shipment: true,
+        payments: {
+          include: { paymentSource: true },
+        },
+      },
+    });
+
+    if (!order || !order.shipment) {
+      throw new NotFoundException("Không tìm thấy đơn nội thành của phiếu đối soát.");
+    }
+
+    if (this.isGhnCarrier(order.shipment.carrier)) {
+      throw new BadRequestException("Đơn GHN dùng màn đối soát GHN.");
+    }
+
+    const totalPaid = paymentRows.reduce((sum, row) => sum + row.amount, 0);
+    const targetAmount = this.toNumber(current.codAmount || order.finalAmount || 0);
+
+    if (totalPaid <= 0) {
+      throw new BadRequestException("Số tiền thanh toán phải lớn hơn 0.");
+    }
+
+    if (targetAmount > 0 && totalPaid > targetAmount) {
+      throw new BadRequestException("Tổng tiền thanh toán không được lớn hơn COD cần thu.");
+    }
+
+    const sourceIds = Array.from(new Set(paymentRows.map((row) => row.paymentSourceId)));
+    const sources = await this.prisma.paymentSource.findMany({
+      where: { id: { in: sourceIds } },
+    });
+    const sourceMap = new Map(sources.map((source) => [source.id, source]));
+
+    for (const row of paymentRows) {
+      if (!sourceMap.has(row.paymentSourceId)) {
+        throw new BadRequestException("Có nguồn tiền không tồn tại.");
+      }
+    }
+
+    const note = body.note?.trim() || current.note || "Thanh toán đối soát nội thành";
+    const now = new Date();
+
+    return this.prisma.$transaction(async (tx) => {
+      const pendingCodPayments = order.payments.filter((payment) => payment.status === PaymentStatus.PENDING_COD);
+
+      if (pendingCodPayments.length) {
+        for (const payment of pendingCodPayments) {
+          await tx.payment.update({
+            where: { id: payment.id },
+            data: {
+              status: PaymentStatus.FAILED,
+              note: `${payment.note || "COD chờ thu"} - đã thay bằng thanh toán đối soát nội thành ${current.code || ""}`.trim(),
+            },
+          });
+        }
+      }
+
+      for (const row of paymentRows) {
+        const source = sourceMap.get(row.paymentSourceId)!;
+        await tx.payment.create({
+          data: {
+            orderId: order.id,
+            amount: new Prisma.Decimal(row.amount),
+            status: row.amount >= targetAmount ? PaymentStatus.PAID : PaymentStatus.PARTIAL,
+            paidAt: now,
+            method: source.name,
+            paymentSourceId: source.id,
+            note,
+          },
+        });
+      }
+
+      const paidAlready = order.payments
+        .filter((payment) => payment.status === PaymentStatus.PAID || payment.status === PaymentStatus.PARTIAL)
+        .reduce((sum, payment) => sum + this.toNumber(payment.amount), 0);
+      const nextPaid = paidAlready + totalPaid;
+      const finalAmount = this.toNumber(order.finalAmount);
+      const nextPaymentStatus = nextPaid >= finalAmount ? PaymentStatus.PAID : PaymentStatus.PARTIAL;
+
+      await tx.shipment.update({
+        where: { id: order.shipment!.id },
+        data: {
+          shippingStatus: "DELIVERED",
+          partnerStatus: "DELIVERED",
+          ahamoveStatus: order.shipment!.ahamoveStatus ? "COMPLETED" : order.shipment!.ahamoveStatus,
+          codReconciliationStatus: "RECONCILED",
+          codReconciledAt: now,
+          note,
+          lastSyncedAt: now,
+        },
+      });
+
+      const updatedOrder = await tx.order.update({
+        where: { id: order.id },
+        data: {
+          status: OrderStatus.COMPLETED,
+          fulfillmentStatus: FulfillmentStatus.FULFILLED,
+          paymentStatus: nextPaymentStatus,
+        },
+      });
+
+      const rows = await tx.$queryRawUnsafe<any[]>(
+        `
+          UPDATE "LocalDeliveryReconciliation"
+          SET
+            "status" = 'PAID',
+            "paidAmount" = $2,
+            "paymentRows" = $3::jsonb,
+            "paidById" = COALESCE($4, "paidById"),
+            "paidByName" = COALESCE($5, "paidByName"),
+            "paidAt" = NOW(),
+            "confirmedAt" = COALESCE("confirmedAt", NOW()),
+            "note" = COALESCE($6, "note"),
+            "updatedAt" = NOW()
+          WHERE "id" = $1
+          RETURNING *
+        `,
+        id,
+        totalPaid,
+        JSON.stringify(paymentRows.map((row) => ({
+          ...row,
+          paymentSourceName: sourceMap.get(row.paymentSourceId)?.name || "",
+        }))),
+        body.paidById || user?.id || null,
+        body.paidByName || user?.name || user?.fullName || null,
+        note,
+      );
+
+      return {
+        ok: true,
+        reconciliation: rows[0],
+        orderId: updatedOrder.id,
+        orderCode: updatedOrder.orderCode,
+        paymentStatus: updatedOrder.paymentStatus,
+      };
+    });
+  }
+
   async getLocalDeliveryReconciliation(params: {
     dateFrom?: string;
     dateTo?: string;
     branchId?: string;
     carrier?: string;
     status?: string;
+    reconciliationStatus?: string;
+    orderStatus?: string;
+    paymentStatus?: string;
     q?: string;
-  }) {
+  }, user?: any) {
     const { from, to, dateFrom, dateTo } = this.makeDateRange(
       params.dateFrom,
       params.dateTo
@@ -648,10 +1243,16 @@ export class FinanceService {
       take: 500,
     });
 
+    const reconciliationMap = await this.findActiveLocalReconciliationByOrderIds(
+      shipments.map((shipment) => shipment.orderId).filter(Boolean) as string[],
+    );
+
     const rows = shipments
       .filter((shipment) => !this.isGhnCarrier(shipment.carrier))
       .map((shipment) => {
         const order = shipment.order;
+        const reconciliation = reconciliationMap.get(String(order.id));
+        const reconciliationStatus = String(reconciliation?.status || "NONE").toUpperCase();
         const status = this.normalizeLocalDeliveryStatus(order, shipment);
         const payments = Array.isArray(order?.payments) ? order.payments : [];
         const paidAmount = payments
@@ -670,6 +1271,7 @@ export class FinanceService {
           customerName: order.shippingRecipientName || order.customerName || "Khách lẻ",
           customerPhone: order.shippingPhone || order.customerPhone || "—",
           branchId: order.branchId || "—",
+          branchName: (order as any).branch?.name || order.branchId || "—",
           carrier: shipment.carrier,
           carrierName: this.normalizeCarrier(shipment.carrier),
           trackingCode: shipment.trackingCode || shipment.ahamoveOrderId || "—",
@@ -680,6 +1282,8 @@ export class FinanceService {
           localStatusLabel: this.localDeliveryStatusLabel(status),
           orderStatus: order.status,
           paymentStatus: order.paymentStatus,
+          orderCreatedAt: order.createdAt,
+          orderUpdatedAt: order.updatedAt,
           codAmount,
           shippingFee,
           finalAmount: this.toNumber(order.finalAmount),
@@ -693,13 +1297,59 @@ export class FinanceService {
               .join(", ") ||
             "—",
           note: shipment.note || order.note || "",
+          reconciliationId: reconciliation?.id || null,
+          reconciliationCode: reconciliation?.code || null,
+          reconciliationStatus,
+          reconciliationStatusLabel: reconciliation
+            ? this.localReconciliationStatusLabel(reconciliationStatus)
+            : "Chưa tạo",
+          reconciliationCodAmount: this.toNumber(reconciliation?.codAmount || 0),
+          reconciliationShippingFee: this.toNumber(reconciliation?.shippingFee || 0),
+          reconciliationPaidAmount: this.toNumber(reconciliation?.paidAmount || 0),
+          reconciliationPaymentRows: reconciliation?.paymentRows || null,
+          reconciliationNote: reconciliation?.note || "",
+          reconciliationCreatedAt: reconciliation?.createdAt || null,
+          reconciliationUpdatedAt: reconciliation?.updatedAt || null,
+          reconciliationConfirmedAt: reconciliation?.confirmedAt || null,
+          reconciliationPaidAt: reconciliation?.paidAt || null,
+          reconciliationCancelledAt: reconciliation?.cancelledAt || null,
+          shipmentCreatedAt: shipment.createdAt,
+          shipmentUpdatedAt: shipment.updatedAt,
           createdAt: shipment.createdAt,
           updatedAt: shipment.updatedAt,
         };
       })
       .filter((row) => {
-        if (!params.status || params.status === "ALL") return true;
-        return row.localStatus === params.status;
+        if (params.status && params.status !== "ALL" && row.localStatus !== params.status) {
+          return false;
+        }
+
+        if (params.orderStatus && params.orderStatus !== "ALL" && row.orderStatus !== params.orderStatus) {
+          return false;
+        }
+
+        if (params.paymentStatus && params.paymentStatus !== "ALL" && row.paymentStatus !== params.paymentStatus) {
+          return false;
+        }
+
+        if (params.reconciliationStatus && params.reconciliationStatus !== "ALL") {
+          const requested = String(params.reconciliationStatus || "").toUpperCase();
+          const hasProblem =
+            row.localStatus === "FAILED" ||
+            row.orderStatus === "CANCELLED" ||
+            row.reconciliationStatus === "CANCELLED" ||
+            (
+              this.toNumber(row.reconciliationCodAmount) > 0 &&
+              this.toNumber(row.needCollectAmount) > 0 &&
+              this.toNumber(row.reconciliationCodAmount) !== this.toNumber(row.needCollectAmount)
+            );
+
+          if (requested === "PROBLEM") return hasProblem;
+          if (requested === "NONE") return !row.reconciliationId;
+          return row.reconciliationStatus === requested;
+        }
+
+        return true;
       });
 
     const summary = rows.reduce(
@@ -712,6 +1362,26 @@ export class FinanceService {
         else if (row.localStatus === "FAILED") acc.failed += 1;
         else if (row.localStatus === "DELIVERING") acc.delivering += 1;
         else acc.pending += 1;
+
+        if (row.reconciliationStatus === "DRAFT") acc.reconciliationDraft += 1;
+        else if (row.reconciliationStatus === "CONFIRMED") acc.reconciliationConfirmed += 1;
+        else if (row.reconciliationStatus === "PAID") acc.reconciliationPaid += 1;
+        else if (row.reconciliationStatus === "CANCELLED") acc.reconciliationCancelled += 1;
+        else acc.reconciliationNone += 1;
+
+        if (
+          row.localStatus === "FAILED" ||
+          row.orderStatus === "CANCELLED" ||
+          row.reconciliationStatus === "CANCELLED" ||
+          (
+            this.toNumber(row.reconciliationCodAmount) > 0 &&
+            this.toNumber(row.needCollectAmount) > 0 &&
+            this.toNumber(row.reconciliationCodAmount) !== this.toNumber(row.needCollectAmount)
+          )
+        ) {
+          acc.problemRows += 1;
+        }
+
         return acc;
       },
       {
@@ -723,6 +1393,12 @@ export class FinanceService {
         totalCod: 0,
         totalFee: 0,
         totalNeedCollect: 0,
+        reconciliationNone: 0,
+        reconciliationDraft: 0,
+        reconciliationConfirmed: 0,
+        reconciliationPaid: 0,
+        reconciliationCancelled: 0,
+        problemRows: 0,
       }
     );
 

@@ -1521,6 +1521,155 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     return "";
   }
 
+  private getSafeShipmentMetadata(shipment?: any) {
+    const metadata = shipment?.metadata;
+    return metadata && typeof metadata === "object" && !Array.isArray(metadata) ? metadata : {};
+  }
+
+  private isGhnSyncIgnoredShipment(shipment?: any) {
+    const metadata = this.getSafeShipmentMetadata(shipment);
+    return metadata.ghnSyncIgnored === true || metadata.ghnOrderNotFound === true;
+  }
+
+  private isGhnOrderNotFoundError(error: any) {
+    const raw = [
+      error?.message,
+      error?.response?.message,
+      error?.response?.data?.message,
+      error?.cause?.message,
+      typeof error === "string" ? error : "",
+    ]
+      .filter(Boolean)
+      .join(" | ");
+
+    const normalized = this.normalizeCarrierStatusText(raw);
+
+    return (
+      normalized.includes("don hang khong ton tai") ||
+      normalized.includes("order not found") ||
+      normalized.includes("corev2 tenant order detail")
+    );
+  }
+
+  private async markGhnSyncIgnored(shipment: any, reason: string) {
+    const currentMetadata = this.getSafeShipmentMetadata(shipment);
+    const ignoredAt = new Date().toISOString();
+
+    try {
+      await this.prisma.shipment.update({
+        where: { id: shipment.id },
+        data: {
+          metadata: {
+            ...currentMetadata,
+            ghnSyncIgnored: true,
+            ghnSyncIgnoredReason: reason,
+            ghnSyncIgnoredAt: ignoredAt,
+          } as any,
+          lastSyncedAt: new Date(),
+        } as any,
+      });
+    } catch (markError) {
+      this.logger.warn(
+        `[GHN_SYNC_CRON] cannot mark ignored shipment=${shipment?.id || "unknown"} code=${shipment?.trackingCode || ""}: ${
+          markError instanceof Error ? markError.message : String(markError)
+        }`,
+      );
+    }
+  }
+
+  private async applyGhnTrackingPreviewToShipment(
+    shipment: any,
+    preview: { raw: any; normalized: any; orderSyncData?: any },
+    source: string,
+  ) {
+    const now = new Date();
+    const raw = preview.raw;
+    const normalized = preview.normalized;
+    const expiresAt = new Date(now.getTime() + this.trackingCacheMinutes * 60 * 1000);
+
+    await this.prisma.$transaction(
+      async (tx) => {
+        await tx.shipmentTrackingCache.create({
+          data: {
+            shipmentId: shipment.id,
+            carrier: shipment.carrier,
+            trackingCode: shipment.trackingCode || "",
+            payloadJson: raw,
+            normalizedJson: normalized,
+            fetchedAt: now,
+            expiresAt,
+          },
+        });
+
+        await tx.shipment.update({
+          where: { id: shipment.id },
+          data: {
+            shippingStatus: normalized.shippingStatus,
+            partnerStatus: normalized.partnerStatus,
+            codAmount: normalized.codAmount,
+            shippingFee: normalized.shippingFee,
+            fromName: normalized.from.name || null,
+            fromPhone: normalized.from.phone || null,
+            fromAddress: normalized.from.address || null,
+            toName: normalized.to.name || null,
+            toPhone: normalized.to.phone || null,
+            toAddress: normalized.to.address || null,
+            lastSyncedAt: now,
+            metadata: this.buildShipmentMetadata(raw, shipment, normalized.shippingStatus),
+          },
+        });
+
+        await this.appendShipmentTimelineEvent(tx, {
+          shipmentId: shipment.id,
+          orderId: shipment.orderId,
+          carrier: shipment.carrier,
+          trackingCode: shipment.trackingCode || "",
+          status: normalized.shippingStatus,
+          partnerStatus: normalized.partnerStatus,
+          title: this.timelineTitle(normalized.shippingStatus, shipment.carrier),
+          description:
+            normalized.timeline?.[0]?.description ||
+            normalized.timeline?.[0]?.location ||
+            null,
+          raw,
+          source,
+        });
+
+        await this.appendCarrierTimelineEvents(tx, {
+          shipmentId: shipment.id,
+          orderId: shipment.orderId,
+          carrier: shipment.carrier,
+          trackingCode: shipment.trackingCode || "",
+          timeline: normalized.timeline,
+          source,
+        });
+
+        const orderSyncData = (preview.orderSyncData || {}) as any;
+        if (Object.keys(orderSyncData).length > 0) {
+          await tx.order.update({
+            where: { id: shipment.orderId },
+            data: orderSyncData as any,
+          });
+        }
+      },
+      {
+        maxWait: Number(process.env.PRISMA_TRANSACTION_MAX_WAIT_MS || 10000),
+        timeout: Number(process.env.PRISMA_TRANSACTION_TIMEOUT_MS || 30000),
+      },
+    );
+
+    return this.prisma.shipment.findUnique({
+      where: { id: shipment.id },
+      select: {
+        shippingStatus: true,
+        partnerStatus: true,
+        metadata: true,
+        order: { select: { status: true, fulfillmentStatus: true, paymentStatus: true } },
+      },
+    });
+  }
+
+
   async confirmGhnReturnReceivedByOrderId(orderId: string, user?: any) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
@@ -1685,7 +1834,12 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       take: limit,
     });
 
-    const targets = shipments.filter((shipment) => String(shipment.trackingCode || "").trim());
+    const skippedIgnored = shipments.filter(
+      (shipment) => String(shipment.trackingCode || "").trim() && this.isGhnSyncIgnoredShipment(shipment),
+    ).length;
+    const targets = shipments.filter(
+      (shipment) => String(shipment.trackingCode || "").trim() && !this.isGhnSyncIgnoredShipment(shipment),
+    );
 
     let refreshed = 0;
     let unchanged = 0;
@@ -1693,6 +1847,8 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     let orderStatusChangedCount = 0;
     let paymentStatusChangedCount = 0;
     let skippedNotDelivered = 0;
+    let skippedGhnIgnored = skippedIgnored;
+    let skippedGhnNotFound = 0;
 
     const failed: Array<{ orderId: string | null; orderCode: string | null; trackingCode: string | null; reason: string }> = [];
     const changed: Array<{
@@ -1745,19 +1901,14 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         let applied = false;
 
         if (!dryRun && canApply) {
-          const result: any = await this.getShipmentTracking(shipment.id, true);
-          const afterRow = await this.prisma.shipment.findUnique({
-            where: { id: shipment.id },
-            select: {
-              shippingStatus: true,
-              partnerStatus: true,
-              metadata: true,
-              order: { select: { status: true, fulfillmentStatus: true, paymentStatus: true } },
-            },
-          });
+          const afterRow = await this.applyGhnTrackingPreviewToShipment(
+            shipment,
+            preview,
+            source.includes("cron") ? "ghn_cron_sync" : "ghn_manual_refresh",
+          );
 
-          afterShipmentStatus = String(afterRow?.shippingStatus || result?.shipment?.shippingStatus || "");
-          afterPartnerStatus = String(afterRow?.partnerStatus || result?.shipment?.partnerStatus || "");
+          afterShipmentStatus = String(afterRow?.shippingStatus || "");
+          afterPartnerStatus = String(afterRow?.partnerStatus || "");
           afterOrderStatus = String(afterRow?.order?.status || "");
           afterFulfillmentStatus = String(afterRow?.order?.fulfillmentStatus || "");
           afterPaymentStatus = String(afterRow?.order?.paymentStatus || "");
@@ -1799,11 +1950,41 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
           unchanged += 1;
         }
       } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+
+        if (this.isGhnOrderNotFoundError(error)) {
+          skippedGhnNotFound += 1;
+          skippedGhnIgnored += 1;
+
+          if (!dryRun) {
+            await this.markGhnSyncIgnored(shipment, "GHN_ORDER_NOT_FOUND");
+          }
+
+          changed.push({
+            orderId: shipment.orderId,
+            orderCode: shipment.order?.orderCode || null,
+            trackingCode: shipment.trackingCode || null,
+            beforeShipmentStatus: beforeShipmentStatus || null,
+            afterShipmentStatus: beforeShipmentStatus || null,
+            beforeOrderStatus: beforeOrderStatus || null,
+            afterOrderStatus: beforeOrderStatus || null,
+            beforeFulfillmentStatus: beforeFulfillmentStatus || null,
+            afterFulfillmentStatus: beforeFulfillmentStatus || null,
+            beforePaymentStatus: beforePaymentStatus || null,
+            afterPaymentStatus: beforePaymentStatus || null,
+            partnerStatus: beforePartnerStatus || null,
+            dryRun,
+            applied: false,
+            skippedReason: "GHN báo đơn không tồn tại; đã đánh dấu bỏ qua để cron không gọi lại.",
+          });
+          continue;
+        }
+
         failed.push({
           orderId: shipment.orderId,
           orderCode: shipment.order?.orderCode || null,
           trackingCode: shipment.trackingCode || null,
-          reason: error instanceof Error ? error.message : String(error),
+          reason,
         });
       }
     }
@@ -1827,6 +2008,8 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       refreshed,
       unchanged,
       skippedNotDelivered,
+      skippedGhnIgnored,
+      skippedGhnNotFound,
       corrected: orderStatusChangedCount,
       correctedOrderStatus: orderStatusChangedCount,
       shipmentStatusChanged: shipmentStatusChangedCount,
@@ -1839,8 +2022,8 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       changed: changed.slice(0, 200),
       failedItems: failed.slice(0, 200),
       message: dryRun
-        ? `GHN dry-run xong: kiểm tra ${refreshed}/${targets.length} vận đơn (${progressPercent}%). Sẽ sửa trạng thái đơn ${orderStatusChangedCount}, đổi trạng thái vận đơn ${shipmentStatusChangedCount}, đổi thanh toán ${paymentStatusChangedCount}, bỏ qua chưa delivered ${skippedNotDelivered}, lỗi ${failed.length}. Chưa ghi DB.`
-        : `GHN chạy xong: ${refreshed}/${targets.length} vận đơn (${progressPercent}%). Đúng trạng thái ${unchanged}, sửa trạng thái đơn ${orderStatusChangedCount}, đổi trạng thái vận đơn ${shipmentStatusChangedCount}, đổi thanh toán ${paymentStatusChangedCount}, bỏ qua chưa delivered ${skippedNotDelivered}, lỗi ${failed.length}. Thời gian chuẩn hoá ${elapsedSeconds}s.`,
+        ? `GHN dry-run xong: kiểm tra ${refreshed}/${targets.length} vận đơn (${progressPercent}%). Sẽ sửa trạng thái đơn ${orderStatusChangedCount}, đổi trạng thái vận đơn ${shipmentStatusChangedCount}, đổi thanh toán ${paymentStatusChangedCount}, bỏ qua chưa delivered ${skippedNotDelivered}, bỏ qua GHN lỗi/đã chặn ${skippedGhnIgnored}, lỗi ${failed.length}. Chưa ghi DB.`
+        : `GHN chạy xong: ${refreshed}/${targets.length} vận đơn (${progressPercent}%). Đúng trạng thái ${unchanged}, sửa trạng thái đơn ${orderStatusChangedCount}, đổi trạng thái vận đơn ${shipmentStatusChangedCount}, đổi thanh toán ${paymentStatusChangedCount}, bỏ qua chưa delivered ${skippedNotDelivered}, bỏ qua GHN lỗi/đã chặn ${skippedGhnIgnored}, lỗi ${failed.length}. Thời gian chuẩn hoá ${elapsedSeconds}s.`,
     };
   }
 
