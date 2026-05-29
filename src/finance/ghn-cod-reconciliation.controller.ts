@@ -1,8 +1,10 @@
 import {
   Body,
   Controller,
+  Get,
   Param,
   Post,
+  Query,
   Req,
   UploadedFile,
   UseGuards,
@@ -31,6 +33,16 @@ export class GhnCodReconciliationController {
   @Post("rows/delete")
   deleteRows(@Body() body: any) {
     return this.service.deleteRows(body?.rowIds || [], body?.batchId);
+  }
+
+  @Get("history")
+  history(@Query() query: any) {
+    return this.service.listHistory(query);
+  }
+
+  @Get("history/:batchId")
+  historyDetail(@Param("batchId") batchId: string) {
+    return this.service.getHistoryBatch(batchId);
   }
 
   @Post(":batchId/save")

@@ -35,6 +35,12 @@ type GetOrdersParams = {
   paymentStatus?: string;
   dateFrom?: string;
   dateTo?: string;
+  /**
+   * Bộ lọc đối soát COD dùng cho danh sách đơn hàng.
+   * Hỗ trợ: RECONCILED, NOT_RECONCILED, MISMATCH, NOT_FOUND, SAVED.
+   * Có thể truyền nhiều giá trị dạng comma-separated.
+   */
+  codReconciliationStatus?: string;
 };
 
 @Injectable()
@@ -2266,6 +2272,169 @@ export class OrderService implements OnModuleInit {
     return { OR: broadOr };
   }
 
+
+  private normalizeCodReconciliationFilter(value?: string | null) {
+    return String(value || "")
+      .split(/[,\|;]/g)
+      .map((item) => item.trim().toUpperCase())
+      .filter((item) => item && item !== "ALL");
+  }
+
+  private trueCodReconciliationStatusSql(alias = "s") {
+    return `UPPER(COALESCE(${alias}."codReconciliationStatus", '')) IN (
+      'PAID',
+      'CONFIRMED',
+      'RECONCILED',
+      'COD_RECONCILED',
+      'COD_RECONCILIATION_PAID',
+      'USER_CONFIRMED'
+    )
+    OR UPPER(COALESCE(${alias}."codReconciliationIssue", '')) LIKE '%COD_RECONCILIATION_PAID%'
+    OR UPPER(COALESCE(${alias}."codReconciliationIssue", '')) LIKE '%USER_CONFIRMED%'`;
+  }
+
+  private async findOrderIdsByCodReconciliationFilter(value?: string | null) {
+    const selected = this.normalizeCodReconciliationFilter(value);
+    if (!selected.length) return null;
+
+    const trueSql = this.trueCodReconciliationStatusSql("s");
+    const conditions: string[] = [];
+
+    for (const item of selected) {
+      if (item === "RECONCILED") {
+        conditions.push(`(${trueSql})`);
+        continue;
+      }
+
+      if (item === "NOT_RECONCILED") {
+        // MATCHED/MATCHED_BY_PARTIAL_DELIVERY chỉ là trạng thái khớp nháp khi chạy đối soát,
+        // chưa phải trạng thái đã chốt. Vì vậy chỉ loại các trạng thái thật sự đã xác nhận/thanh toán.
+        conditions.push(`NOT (${trueSql})`);
+        continue;
+      }
+
+      if (item === "MISMATCH") {
+        conditions.push(`(
+          UPPER(COALESCE(s."codReconciliationStatus", '')) = 'MISMATCH'
+          OR UPPER(COALESCE(s."codReconciliationIssue", '')) LIKE '%COD_MISMATCH%'
+          OR UPPER(COALESCE(s."codReconciliationIssue", '')) LIKE '%FEE_MISMATCH%'
+          OR UPPER(COALESCE(s."codReconciliationIssue", '')) LIKE '%PARTIAL_DELIVERY_AMOUNT_MISMATCH%'
+        )`);
+        continue;
+      }
+
+      if (item === "NOT_FOUND") {
+        conditions.push(`(
+          UPPER(COALESCE(s."codReconciliationStatus", '')) = 'NOT_FOUND'
+          OR UPPER(COALESCE(s."codReconciliationIssue", '')) LIKE '%NOT_FOUND_INTERNAL_ORDER%'
+        )`);
+        continue;
+      }
+
+      if (item === "SAVED") {
+        conditions.push(`(
+          UPPER(COALESCE(s."codReconciliationStatus", '')) = 'SAVED'
+          OR UPPER(COALESCE(s."codReconciliationIssue", '')) LIKE '%BATCH_SAVED%'
+        )`);
+      }
+    }
+
+    if (!conditions.length) return null;
+
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<Array<{ orderId: string }>>(
+        `
+          SELECT DISTINCT o."id" AS "orderId"
+          FROM "Order" o
+          LEFT JOIN "Shipment" s ON s."orderId" = o."id"
+          WHERE ${conditions.map((condition) => `(${condition})`).join(" OR ")}
+        `,
+      );
+
+      return rows
+        .map((row) => String(row.orderId || "").trim())
+        .filter(Boolean);
+    } catch (error) {
+      // Nếu môi trường nào chưa có cột đối soát COD trên Shipment thì không làm chết danh sách đơn.
+      console.warn(
+        "[ORDERS_COD_RECONCILIATION_FILTER_SKIP]",
+        error instanceof Error ? error.message : error,
+      );
+      return null;
+    }
+  }
+
+  private async attachCodReconciliationFields<T extends any>(orders: T[]): Promise<T[]> {
+    if (!orders.length) return orders;
+
+    const ids = orders
+      .map((order: any) => String(order?.id || "").replace(/'/g, "''"))
+      .filter(Boolean);
+
+    if (!ids.length) return orders;
+
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<
+        Array<{
+          orderId: string;
+          codReconciliationStatus: string | null;
+          codReconciledAt: Date | null;
+          codReconciliationBatchId: string | null;
+          codReconciliationRowId: string | null;
+          codReconciliationIssue: string | null;
+          codReconciliationAmount: Prisma.Decimal | number | string | null;
+        }>
+      >(
+        `
+          SELECT
+            "orderId",
+            "codReconciliationStatus",
+            "codReconciledAt",
+            "codReconciliationBatchId",
+            "codReconciliationRowId",
+            "codReconciliationIssue",
+            "codReconciliationAmount"
+          FROM "Shipment"
+          WHERE "orderId" IN (${ids.map((id) => `'${id}'`).join(",")})
+        `,
+      );
+
+      const map = new Map(rows.map((row) => [String(row.orderId), row]));
+
+      return orders.map((order: any) => {
+        const row = map.get(String(order.id));
+        if (!row) return order;
+
+        return {
+          ...order,
+          shipmentCodReconciliationStatus: row.codReconciliationStatus || null,
+          shipmentCodReconciledAt: row.codReconciledAt || null,
+          shipmentCodReconciliationBatchId: row.codReconciliationBatchId || null,
+          shipmentCodReconciliationRowId: row.codReconciliationRowId || null,
+          shipmentCodReconciliationIssue: row.codReconciliationIssue || null,
+          shipmentCodReconciliationAmount: this.toNumber(row.codReconciliationAmount),
+          shipment: order.shipment
+            ? {
+                ...order.shipment,
+                codReconciliationStatus: row.codReconciliationStatus || null,
+                codReconciledAt: row.codReconciledAt || null,
+                codReconciliationBatchId: row.codReconciliationBatchId || null,
+                codReconciliationRowId: row.codReconciliationRowId || null,
+                codReconciliationIssue: row.codReconciliationIssue || null,
+                codReconciliationAmount: this.toNumber(row.codReconciliationAmount),
+              }
+            : order.shipment,
+        };
+      });
+    } catch (error) {
+      console.warn(
+        "[ORDERS_COD_RECONCILIATION_ATTACH_SKIP]",
+        error instanceof Error ? error.message : error,
+      );
+      return orders;
+    }
+  }
+
   private buildFastOrderListSelect(): Prisma.OrderSelect {
     return {
       id: true,
@@ -2392,6 +2561,7 @@ export class OrderService implements OnModuleInit {
       paymentStatus = "",
       dateFrom = "",
       dateTo = "",
+      codReconciliationStatus = "",
     } = params;
 
     const safePage = Math.max(Number(page || 1), 1);
@@ -2425,6 +2595,18 @@ export class OrderService implements OnModuleInit {
           `${dateTo}T23:59:59.999Z`
         );
       }
+    }
+
+    const codReconciliationOrderIds = await this.findOrderIdsByCodReconciliationFilter(
+      codReconciliationStatus,
+    );
+
+    if (Array.isArray(codReconciliationOrderIds)) {
+      baseWhere.id = {
+        in: codReconciliationOrderIds.length
+          ? codReconciliationOrderIds
+          : ["__NO_COD_RECONCILIATION_MATCH__"],
+      };
     }
 
     let searchWhere: Prisma.OrderWhereInput | null = null;
@@ -2464,7 +2646,8 @@ export class OrderService implements OnModuleInit {
     ]);
 
     const ordersWithAssignedStaff = await this.attachAssignedStaffFields(orders);
-    const data = ordersWithAssignedStaff.map((order) => this.mapOrderListResponse(order));
+    const ordersWithCodReconciliation = await this.attachCodReconciliationFields(ordersWithAssignedStaff);
+    const data = ordersWithCodReconciliation.map((order) => this.mapOrderListResponse(order));
 
     return {
       data,

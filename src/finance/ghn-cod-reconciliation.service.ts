@@ -18,6 +18,318 @@ const PAID_MARKER = "COD_RECONCILIATION_PAID";
 export class GhnCodReconciliationService {
   constructor(private readonly prisma: PrismaService) {}
 
+
+  async listHistory(query: any = {}) {
+    const page = Math.max(1, Number(query?.page || 1));
+    const pageSize = Math.min(50, Math.max(10, Number(query?.pageSize || 20)));
+    const q = String(query?.q || "").trim();
+    const status = String(query?.status || "ALL").trim().toUpperCase();
+    const sourceType = String(query?.sourceType || "ALL").trim().toUpperCase();
+    const resultType = String(query?.resultType || "ALL").trim().toUpperCase();
+    const dateFrom = String(query?.dateFrom || "").trim();
+    const dateTo = String(query?.dateTo || "").trim();
+
+    const where: any = {};
+
+    if (status && status !== "ALL") where.status = status;
+    if (sourceType && sourceType !== "ALL") where.sourceType = sourceType;
+
+    if (dateFrom || dateTo) {
+      where.createdAt = {};
+      if (dateFrom) {
+        const from = new Date(`${dateFrom}T00:00:00.000+07:00`);
+        if (!Number.isNaN(from.getTime())) where.createdAt.gte = from;
+      }
+      if (dateTo) {
+        const to = new Date(`${dateTo}T23:59:59.999+07:00`);
+        if (!Number.isNaN(to.getTime())) where.createdAt.lte = to;
+      }
+      if (!Object.keys(where.createdAt).length) delete where.createdAt;
+    }
+
+    if (q) {
+      where.OR = [
+        { id: { contains: q, mode: "insensitive" } },
+        { fileName: { contains: q, mode: "insensitive" } },
+        { transferCode: { contains: q, mode: "insensitive" } },
+        { note: { contains: q, mode: "insensitive" } },
+      ];
+
+      const matchedRows = await (this.prisma as any).ghnCodReconciliationRow
+        .findMany({
+          where: {
+            OR: [
+              { orderCode: { contains: q, mode: "insensitive" } },
+              { customerOrderCode: { contains: q, mode: "insensitive" } },
+              { ghnCode: { contains: q, mode: "insensitive" } },
+              { inputCode: { contains: q, mode: "insensitive" } },
+            ],
+          },
+          select: { batchId: true },
+          take: 1000,
+        })
+        .catch(() => []);
+
+      const batchIds = Array.from(
+        new Set(
+          (matchedRows || [])
+            .map((row: any) => String(row?.batchId || "").trim())
+            .filter(Boolean),
+        ),
+      );
+
+      if (batchIds.length) {
+        where.OR.push({ id: { in: batchIds } });
+      }
+    }
+
+    const candidateBatches = await (this.prisma as any).ghnCodReconciliationBatch.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      take: 1000,
+    });
+
+    const candidateBatchIds = candidateBatches.map((batch: any) => String(batch.id)).filter(Boolean);
+    const rows = candidateBatchIds.length
+      ? await (this.prisma as any).ghnCodReconciliationRow.findMany({
+          where: { batchId: { in: candidateBatchIds } },
+          select: {
+            id: true,
+            batchId: true,
+            reconciliationStatus: true,
+            actionStatus: true,
+            codAmount: true,
+            serviceFee: true,
+            totalReconcileAmount: true,
+            issues: true,
+            savedAt: true,
+            confirmedAt: true,
+            paidAt: true,
+          },
+        })
+      : [];
+
+    const rowsByBatchId = new Map<string, any[]>();
+    rows.forEach((row: any) => {
+      const key = String(row.batchId || "");
+      rowsByBatchId.set(key, [...(rowsByBatchId.get(key) || []), row]);
+    });
+
+    let items = candidateBatches.map((batch: any) =>
+      this.buildHistoryBatchSummary(batch, rowsByBatchId.get(String(batch.id)) || []),
+    );
+
+    if (resultType && resultType !== "ALL") {
+      items = items.filter((item: any) => {
+        if (resultType === "PAID") return Number(item.paidRows || 0) > 0 || String(item.status || "").toUpperCase() === "PAID";
+        if (resultType === "CONFIRMED") return Number(item.confirmedRows || 0) > 0 || ["CONFIRMED", "PAID"].includes(String(item.status || "").toUpperCase());
+        if (resultType === "PROBLEM") return Number(item.mismatchRows || 0) > 0;
+        if (resultType === "MATCHED") return Number(item.matchedRows || 0) > 0 && Number(item.mismatchRows || 0) === 0;
+        if (resultType === "NOT_FOUND") return Number(item.notFoundRows || 0) > 0;
+        if (resultType === "COD_MISMATCH") return Number(item.codMismatchRows || 0) > 0;
+        if (resultType === "FEE_MISMATCH") return Number(item.feeMismatchRows || 0) > 0;
+        return true;
+      });
+    }
+
+    const total = items.length;
+    const start = (page - 1) * pageSize;
+    const pagedItems = items.slice(start, start + pageSize);
+
+    return {
+      items: pagedItems,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
+    };
+  }
+
+  async getHistoryBatch(batchId: string) {
+    const id = String(batchId || "").trim();
+
+    if (!id) {
+      throw new BadRequestException("Thiếu mã phiên đối soát.");
+    }
+
+    const batch = await (this.prisma as any).ghnCodReconciliationBatch.findUnique({
+      where: { id },
+    });
+
+    if (!batch) {
+      throw new BadRequestException("Không tìm thấy phiên đối soát GHN.");
+    }
+
+    const rows = await (this.prisma as any).ghnCodReconciliationRow.findMany({
+      where: { batchId: id },
+      orderBy: { createdAt: "asc" },
+    });
+
+    return {
+      batch: this.buildHistoryBatchSummary(batch, rows),
+      rows: rows.map((row: any) => this.mapHistoryRow(row)),
+    };
+  }
+
+  private buildHistoryBatchSummary(batch: any, rows: any[] = []) {
+    const totalRows = rows.length || Number(batch?.totalRows || 0);
+    const paidRows = rows.filter((row) => this.isPaidHistoryRow(row)).length;
+    const confirmedRows = rows.filter((row) => this.isConfirmedHistoryRow(row)).length;
+    const savedRows = rows.filter((row) => this.isSavedHistoryRow(row)).length;
+    const notFoundRows = rows.filter((row) => this.rowIssues(row).includes("NOT_FOUND_INTERNAL_ORDER") || String(row?.reconciliationStatus || "").toUpperCase() === "NOT_FOUND").length;
+    const codMismatchRows = rows.filter((row) => this.rowIssues(row).includes("COD_MISMATCH")).length;
+    const feeMismatchRows = rows.filter((row) => this.rowIssues(row).includes("FEE_MISMATCH")).length;
+    const issueSummary = rows.length ? this.buildHistoryIssueSummary(rows) : [];
+
+    return {
+      id: batch.id,
+      fileName: batch.fileName || null,
+      transferCode: batch.transferCode || null,
+      transferDate: batch.transferDate || null,
+      sourceType: batch.sourceType || null,
+      parserMode: batch.parserMode || null,
+      status: batch.status || null,
+      note: batch.note || null,
+      totalRows,
+      matchedRows: Number(batch.matchedRows || 0),
+      mismatchRows: rows.length
+        ? rows.filter((row) => this.hasBlockingHistoryIssue(row)).length
+        : Number(batch.mismatchRows || 0),
+      paidRows,
+      confirmedRows,
+      savedRows,
+      notFoundRows,
+      codMismatchRows,
+      feeMismatchRows,
+      issueSummary,
+      totalCodAmount: rows.length
+        ? rows.reduce((sum, row) => sum + Number(row.codAmount || 0), 0)
+        : Number(batch.totalAmount || 0),
+      totalFeeAmount: rows.length
+        ? rows.reduce((sum, row) => sum + Number(row.serviceFee || 0), 0)
+        : Number(batch.transferFee || 0),
+      totalNetAmount: rows.length
+        ? rows.reduce((sum, row) => sum + Number(row.totalReconcileAmount || 0), 0)
+        : Number(batch.netAmount || 0),
+      createdAt: batch.createdAt || null,
+      savedAt: batch.savedAt || null,
+      confirmedAt: batch.confirmedAt || null,
+      paidAt: batch.paidAt || null,
+    };
+  }
+
+  private mapHistoryRow(row: any) {
+    return {
+      id: row.id,
+      batchId: row.batchId || null,
+      orderId: row.orderId || null,
+      orderCode: row.orderCode || null,
+      shipmentId: row.shipmentId || null,
+      ghnCode: row.ghnCode || null,
+      customerOrderCode: row.customerOrderCode || null,
+      ghnStatus: row.ghnStatus || null,
+      codAmount: Number(row.codAmount || 0),
+      serviceFee: Number(row.serviceFee || 0),
+      totalReconcileAmount: Number(row.totalReconcileAmount || 0),
+      reconciliationStatus: row.reconciliationStatus || null,
+      issues: row.issues || [],
+      actionStatus: row.actionStatus || null,
+      sourceType: row.sourceType || null,
+      savedAt: row.savedAt || null,
+      confirmedAt: row.confirmedAt || null,
+      paidAt: row.paidAt || null,
+      createdAt: row.createdAt || null,
+    };
+  }
+
+  private rowIssues(row: any) {
+    if (Array.isArray(row?.issues)) {
+      return row.issues.map((item: any) => String(item || "").trim()).filter(Boolean);
+    }
+
+    return String(row?.issues || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  private hasBlockingHistoryIssue(row: any) {
+    const status = String(row?.reconciliationStatus || "").toUpperCase();
+    if (status && status !== "MATCHED" && status !== "MATCHED_BY_PARTIAL_DELIVERY") return true;
+
+    return this.rowIssues(row).some(
+      (issue) =>
+        ![
+          "MATCHED_BY_PARTIAL_DELIVERY",
+          "BATCH_SAVED",
+          "USER_CONFIRMED",
+          "COD_RECONCILIATION_PAID",
+        ].includes(issue),
+    );
+  }
+
+  private buildHistoryIssueSummary(rows: any[]) {
+    const actionIssues = new Set([
+      "BATCH_SAVED",
+      "USER_CONFIRMED",
+      "COD_RECONCILIATION_PAID",
+    ]);
+    const labelMap: Record<string, string> = {
+      NOT_FOUND_INTERNAL_ORDER: "Không tìm thấy đơn",
+      PARTIAL_RETURN: "Có mã hoàn _PR",
+      MISSING_PARTIAL_DELIVERY_RECORD: "Thiếu phiếu giao 1 phần",
+      PARTIAL_DELIVERY_AMOUNT_MISMATCH: "Lệch tiền giao 1 phần",
+      MATCHED_BY_PARTIAL_DELIVERY: "Khớp qua giao 1 phần",
+      PARTIAL_RETURN_NOT_RECEIVED: "Chưa nhập kho hoàn",
+      COD_MISMATCH: "Lệch COD",
+      FEE_MISMATCH: "Lệch phí",
+      MISMATCH: "Lệch đối soát",
+      NOT_FOUND: "Không tìm thấy đơn",
+    };
+
+    const counts = new Map<string, number>();
+
+    rows.forEach((row) => {
+      const issueSet = new Set<string>();
+      this.rowIssues(row).forEach((issue) => {
+        const code = String(issue || "").trim();
+        if (!code || actionIssues.has(code)) return;
+        // MATCHED_BY_PARTIAL_DELIVERY là tình huống đã khớp đặc biệt, không tính là lỗi chặn.
+        if (code === "MATCHED_BY_PARTIAL_DELIVERY") return;
+        issueSet.add(code);
+      });
+
+      const status = String(row?.reconciliationStatus || "").toUpperCase();
+      if (status === "NOT_FOUND") issueSet.add("NOT_FOUND_INTERNAL_ORDER");
+      if (status === "MISMATCH" && issueSet.size === 0) issueSet.add("MISMATCH");
+
+      issueSet.forEach((code) => counts.set(code, (counts.get(code) || 0) + 1));
+    });
+
+    return Array.from(counts.entries())
+      .map(([code, count]) => ({
+        code,
+        label: labelMap[code] || code,
+        count,
+      }))
+      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "vi"));
+  }
+
+  private isSavedHistoryRow(row: any) {
+    const status = String(row?.actionStatus || "").toUpperCase();
+    return Boolean(row?.savedAt) || ["SAVED", "CONFIRMED", "PAID"].includes(status);
+  }
+
+  private isConfirmedHistoryRow(row: any) {
+    const status = String(row?.actionStatus || "").toUpperCase();
+    return Boolean(row?.confirmedAt) || ["CONFIRMED", "PAID"].includes(status);
+  }
+
+  private isPaidHistoryRow(row: any) {
+    const status = String(row?.actionStatus || "").toUpperCase();
+    return Boolean(row?.paidAt) || status === "PAID";
+  }
+
   async parseExcel(file: Express.Multer.File, body: any) {
     if (!file?.buffer) {
       throw new BadRequestException("Không nhận được file Excel.");

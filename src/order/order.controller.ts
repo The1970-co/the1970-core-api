@@ -97,7 +97,10 @@ export class OrderController {
     @Query("orderStatus") orderStatus?: string,
     @Query("paymentStatus") paymentStatus?: string,
     @Query("dateFrom") dateFrom?: string,
-    @Query("dateTo") dateTo?: string
+    @Query("dateTo") dateTo?: string,
+    @Query("codReconciliationStatus") codReconciliationStatus?: string,
+    @Query("codReconciliation") codReconciliation?: string,
+    @Query("codReconciliationFilter") codReconciliationFilter?: string
   ) {
     return this.orderService.getOrders(
       {
@@ -109,6 +112,11 @@ export class OrderController {
         paymentStatus: paymentStatus || "",
         dateFrom: dateFrom || "",
         dateTo: dateTo || "",
+        codReconciliationStatus:
+          codReconciliationStatus ||
+          codReconciliation ||
+          codReconciliationFilter ||
+          "",
       },
       req.user
     );
