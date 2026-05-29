@@ -1901,14 +1901,24 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         let applied = false;
 
         if (!dryRun && canApply) {
-          const afterRow = await this.applyGhnTrackingPreviewToShipment(
-            shipment,
-            preview,
-            source.includes("cron") ? "ghn_cron_sync" : "ghn_manual_refresh",
-          );
+          // FIX: dùng lại write path cũ đã ổn định của getShipmentTracking().
+          // Bản safe cron trước đó dùng applyGhnTrackingPreviewToShipment()
+          // làm dry-run vẫn báo sẽ sửa đơn, nhưng write thật fail ở nhóm DELIVERED.
+          // getShipmentTracking(force=true) sẽ tự fetch GHN, ghi cache, shipment,
+          // timeline và order status theo flow cũ đang chạy ổn định.
+          const result: any = await this.getShipmentTracking(shipment.id, true);
+          const afterRow = await this.prisma.shipment.findUnique({
+            where: { id: shipment.id },
+            select: {
+              shippingStatus: true,
+              partnerStatus: true,
+              metadata: true,
+              order: { select: { status: true, fulfillmentStatus: true, paymentStatus: true } },
+            },
+          });
 
-          afterShipmentStatus = String(afterRow?.shippingStatus || "");
-          afterPartnerStatus = String(afterRow?.partnerStatus || "");
+          afterShipmentStatus = String(afterRow?.shippingStatus || result?.shipment?.shippingStatus || "");
+          afterPartnerStatus = String(afterRow?.partnerStatus || result?.shipment?.partnerStatus || "");
           afterOrderStatus = String(afterRow?.order?.status || "");
           afterFulfillmentStatus = String(afterRow?.order?.fulfillmentStatus || "");
           afterPaymentStatus = String(afterRow?.order?.paymentStatus || "");
