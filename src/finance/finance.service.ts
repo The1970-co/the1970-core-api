@@ -169,6 +169,11 @@ export class FinanceService {
             { paidAt: null, createdAt: { gte: from, lte: to } },
           ],
         },
+        {
+          order: {
+            status: { not: OrderStatus.CANCELLED },
+          },
+        },
       ],
     };
 
@@ -283,7 +288,15 @@ export class FinanceService {
         FROM "CashVoucher" v
         LEFT JOIN "PaymentSource" ps ON ps."id" = v."paymentSourceId"
         LEFT JOIN "Branch" b ON b."id" = v."branchId"
+        LEFT JOIN "Order" ref_order
+          ON ref_order."id" = v."refId"
+          AND UPPER(COALESCE(v."refType", '')) = 'ORDER'
         WHERE ${voucherWhere.join(" AND ")}
+          AND NOT (
+            ${this.cashVoucherTypeSql("v")} = 'RECEIPT'
+            AND UPPER(COALESCE(v."refType", '')) = 'ORDER'
+            AND COALESCE(ref_order."status"::text, '') = 'CANCELLED'
+          )
         ORDER BY v."createdAt" DESC
       `,
       ...voucherValues,
@@ -298,6 +311,7 @@ export class FinanceService {
       if (!payment.paymentSourceId) return false;
       if (sourceType === "COD") return false;
       if (paymentStatus !== "PAID" && paymentStatus !== "PARTIAL") return false;
+      if (orderStatus === "CANCELLED") return false;
 
       if (salesChannel === "POS") {
         return orderStatus === "COMPLETED";
@@ -2496,6 +2510,7 @@ export class FinanceService {
       `p."status" IN ('PAID', 'PARTIAL')`,
       `COALESCE(ps."type", '') != 'COD'`,
       `(COALESCE(o."salesChannel"::text, '') != 'POS' OR o."status" = 'COMPLETED')`,
+      `COALESCE(o."status"::text, '') != 'CANCELLED'`,
     ];
 
     if (scopedBranchId) {
@@ -2594,17 +2609,27 @@ export class FinanceService {
         FROM "CashVoucher" v
         LEFT JOIN "Branch" b ON b."id" = v."branchId"
         LEFT JOIN "PaymentSource" ps ON ps."id" = v."paymentSourceId"
+        LEFT JOIN "Order" ref_order
+          ON ref_order."id" = v."refId"
+          AND UPPER(COALESCE(v."refType", '')) = 'ORDER'
         WHERE ${voucherWhere.join(" AND ")}
+          AND NOT (
+            ${this.cashVoucherTypeSql("v")} = 'RECEIPT'
+            AND UPPER(COALESCE(v."refType", '')) = 'ORDER'
+            AND COALESCE(ref_order."status"::text, '') = 'CANCELLED'
+          )
           AND NOT (
             ${this.cashVoucherTypeSql("v")} = 'RECEIPT'
             AND UPPER(COALESCE(v."refType", '')) = 'ORDER'
             AND EXISTS (
               SELECT 1
               FROM "Payment" p2
+              JOIN "Order" po ON po."id" = p2."orderId"
               WHERE p2."orderId" = v."refId"
                 AND p2."paymentSourceId" = v."paymentSourceId"
                 AND ROUND((p2."amount")::numeric, 0) = ROUND((v."amount")::numeric, 0)
                 AND p2."status" IN ('PAID', 'PARTIAL')
+                AND COALESCE(po."status"::text, '') != 'CANCELLED'
             )
           )
       `,
