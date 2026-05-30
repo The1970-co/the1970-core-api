@@ -1694,6 +1694,12 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException("GHN chưa báo đơn đã hoàn hàng, chưa thể xác nhận đã nhận hoàn.");
     }
 
+    const branchId = String((order as any).branchId || "").trim();
+    if (!branchId) {
+      throw new BadRequestException("Đơn chưa có chi nhánh, không thể nhập lại tồn hàng hoàn.");
+    }
+
+    const actorId = user?.id || user?.sub || null;
     const actorName = user?.name || user?.fullName || user?.username || user?.email || "system";
     const receivedAt = new Date();
     const currentMetadata = shipment.metadata && typeof shipment.metadata === "object" && !Array.isArray(shipment.metadata)
@@ -1703,45 +1709,183 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     const nextMetadata = {
       ...currentMetadata,
       returnReceiveStatus: "RECEIVED",
-      returnReceivedAt: receivedAt.toISOString(),
-      returnReceivedById: user?.id || user?.sub || null,
-      returnReceivedByName: actorName,
+      returnReceivedAt: currentMetadata.returnReceivedAt || receivedAt.toISOString(),
+      returnReceivedById: currentMetadata.returnReceivedById || actorId,
+      returnReceivedByName: currentMetadata.returnReceivedByName || actorName,
     };
 
-    const [updatedShipment, updatedOrder] = await this.prisma.$transaction([
-      this.prisma.shipment.update({
-        where: { id: shipment.id },
-        data: { metadata: nextMetadata as any },
-      }),
-      this.prisma.order.update({
-        where: { id: order.id },
-        data: { fulfillmentStatus: "RETURNED" as any },
-      }),
-    ]);
+    const result = await this.prisma.$transaction(
+      async (tx) => {
+        const orderWithItems = await tx.order.findUnique({
+          where: { id: order.id },
+          include: { items: true, shipment: true },
+        });
 
-    await this.appendShipmentTimelineEvent(this.prisma, {
-      shipmentId: shipment.id,
-      orderId: order.id,
-      carrier: shipment.carrier,
-      trackingCode: shipment.trackingCode || "",
-      status: "RETURNED",
-      partnerStatus: shipment.partnerStatus || null,
-      title: "Đã xác nhận nhận hàng hoàn",
-      description: `Nhân viên ${actorName} đã xác nhận shop nhận hàng hoàn.`,
-      raw: nextMetadata,
-      source: "return_receive_confirm",
-      eventTime: receivedAt,
-    });
+        if (!orderWithItems?.shipment) {
+          throw new BadRequestException("Đơn chưa có vận đơn để xác nhận hàng hoàn.");
+        }
+
+        const lockedShipment = orderWithItems.shipment as any;
+        const lockedMetadata = lockedShipment.metadata && typeof lockedShipment.metadata === "object" && !Array.isArray(lockedShipment.metadata)
+          ? lockedShipment.metadata
+          : {};
+
+        const lockedNextMetadata = {
+          ...lockedMetadata,
+          returnReceiveStatus: "RECEIVED",
+          returnReceivedAt: lockedMetadata.returnReceivedAt || receivedAt.toISOString(),
+          returnReceivedById: lockedMetadata.returnReceivedById || actorId,
+          returnReceivedByName: lockedMetadata.returnReceivedByName || actorName,
+        };
+
+        const existingReturnMovements = await (tx as any).inventoryMovement.findMany({
+          where: {
+            refType: "GHN_RETURN_RECEIVED",
+            refId: order.id,
+          },
+          select: { id: true },
+          take: 1,
+        });
+
+        const inventoryAlreadyApplied = existingReturnMovements.length > 0;
+        const restoredItems: Array<{ sku: string; qty: number; beforeQty: number; afterQty: number }> = [];
+
+        if (!inventoryAlreadyApplied) {
+          const items = Array.isArray(orderWithItems.items) ? orderWithItems.items : [];
+          if (!items.length) {
+            throw new BadRequestException("Đơn không có sản phẩm để nhập lại tồn hàng hoàn.");
+          }
+
+          for (const item of items as any[]) {
+            const qty = Math.max(0, Math.trunc(Number(item?.qty || item?.quantity || 0)));
+            if (!qty) continue;
+
+            let variantId = String(item?.variantId || "").trim();
+            if (!variantId && item?.sku) {
+              const variant = await (tx as any).productVariant.findFirst({
+                where: { sku: String(item.sku).trim() },
+                select: { id: true },
+              });
+              variantId = String(variant?.id || "").trim();
+            }
+
+            if (!variantId) {
+              throw new BadRequestException(`Không tìm thấy variant cho SKU ${item?.sku || item?.productName || item?.id}.`);
+            }
+
+            const inventoryItem = await (tx as any).inventoryItem.findUnique({
+              where: {
+                variantId_branchId: {
+                  variantId,
+                  branchId,
+                },
+              },
+            });
+
+            const beforeQty = Number(inventoryItem?.availableQty || 0);
+            const afterQty = beforeQty + qty;
+
+            if (inventoryItem) {
+              await (tx as any).inventoryItem.update({
+                where: { id: inventoryItem.id },
+                data: { availableQty: afterQty },
+              });
+            } else {
+              await (tx as any).inventoryItem.create({
+                data: {
+                  variantId,
+                  branchId,
+                  availableQty: afterQty,
+                  reservedQty: 0,
+                  incomingQty: 0,
+                },
+              });
+            }
+
+            await (tx as any).inventoryMovement.create({
+              data: {
+                variantId,
+                branchId,
+                type: "RETURN",
+                qty,
+                beforeQty,
+                afterQty,
+                note: `Nhập lại hàng hoàn GHN từ đơn ${order.orderCode}${shipment.trackingCode ? ` - MVD ${shipment.trackingCode}` : ""}`,
+                refType: "GHN_RETURN_RECEIVED",
+                refId: order.id,
+                createdById: actorId,
+                createdAt: receivedAt,
+              },
+            });
+
+            restoredItems.push({
+              sku: String(item?.sku || ""),
+              qty,
+              beforeQty,
+              afterQty,
+            });
+          }
+        }
+
+        const [updatedShipment, updatedOrder] = await Promise.all([
+          tx.shipment.update({
+            where: { id: lockedShipment.id },
+            data: { metadata: lockedNextMetadata as any },
+          }),
+          tx.order.update({
+            where: { id: orderWithItems.id },
+            data: { fulfillmentStatus: "RETURNED" as any },
+          }),
+        ]);
+
+        await this.appendShipmentTimelineEvent(tx, {
+          shipmentId: lockedShipment.id,
+          orderId: orderWithItems.id,
+          carrier: lockedShipment.carrier,
+          trackingCode: lockedShipment.trackingCode || "",
+          status: "RETURNED",
+          partnerStatus: lockedShipment.partnerStatus || null,
+          title: inventoryAlreadyApplied ? "Đã xác nhận nhận hàng hoàn" : "Đã xác nhận nhận hàng hoàn và nhập lại kho",
+          description: inventoryAlreadyApplied
+            ? `Nhân viên ${actorName} đã xác nhận shop nhận hàng hoàn. Kho đã được ghi nhận trước đó, không cộng lại lần 2.`
+            : `Nhân viên ${actorName} đã xác nhận shop nhận hàng hoàn và nhập lại ${restoredItems.reduce((sum, item) => sum + item.qty, 0)} sản phẩm vào kho.`,
+          raw: {
+            ...lockedNextMetadata,
+            inventoryAlreadyApplied,
+            restoredItems,
+          },
+          source: "return_receive_confirm",
+          eventTime: receivedAt,
+        });
+
+        return {
+          updatedShipment,
+          updatedOrder,
+          inventoryAlreadyApplied,
+          restoredItems,
+        };
+      },
+      {
+        maxWait: Number(process.env.PRISMA_TRANSACTION_MAX_WAIT_MS || 10000),
+        timeout: Number(process.env.PRISMA_TRANSACTION_TIMEOUT_MS || 30000),
+      },
+    );
+
+    const totalRestoredQty = result.restoredItems.reduce((sum, item) => sum + item.qty, 0);
 
     return {
       ok: true,
-      message: "Đã xác nhận shop nhận hàng hoàn.",
+      message: result.inventoryAlreadyApplied
+        ? "Đã xác nhận shop nhận hàng hoàn. Kho đã được ghi nhận trước đó, không cộng lại lần 2."
+        : `Đã xác nhận shop nhận hàng hoàn và nhập lại ${totalRestoredQty} sản phẩm vào kho.`,
       returnReceiveStatus: "RECEIVED",
       returnReceiveLabel: "Đã nhận hàng hoàn",
-      returnReceivedAt: receivedAt,
-      returnReceivedByName: actorName,
-      shipment: updatedShipment,
-      order: updatedOrder,
+      returnReceivedAt: nextMetadata.returnReceivedAt,
+      returnReceivedByName: nextMetadata.returnReceivedByName,
+      inventoryRestored: !result.inventoryAlreadyApplied,
+      restoredItems: result.restoredItems,
+      shipment: result.updatedShipment,
+      order: result.updatedOrder,
     };
   }
 
