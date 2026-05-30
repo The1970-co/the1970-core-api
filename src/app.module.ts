@@ -32,6 +32,7 @@ import { PromotionsModule } from './promotions/promotions.module';
 import { SupplierPaymentsModule } from './supplier-payments/supplier-payments.module';
 import { RbacSnapshotsModule } from "./rbac-snapshots/rbac-snapshots.module";
 import { PayrollModule } from "./payroll/payroll.module";
+import { OmniInboxModule } from "./omni-inbox/omni-inbox.module";
 @Module({
   imports: [
     PrismaModule,
@@ -67,6 +68,7 @@ import { PayrollModule } from "./payroll/payroll.module";
     SupplierPaymentsModule,
     RbacSnapshotsModule,
     PayrollModule,
+    OmniInboxModule,
   ],
 })
 export class AppModule {}

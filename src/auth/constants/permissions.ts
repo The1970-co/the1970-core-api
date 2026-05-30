@@ -101,4 +101,17 @@ export const PERMISSIONS = {
   MENU_STAFF_TRANSFER: "menu.staff_transfer",
   STAFF_TRANSFER_BRANCH_VIEW: "staff.transfer_branch.view",
   STAFF_TRANSFER_BRANCH: "staff.transfer_branch",
+
+  MENU_OMNI_INBOX: "menu.omni_inbox",
+  MENU_OMNI_MESSAGES: "menu.omni_messages",
+  MENU_OMNI_COMMENTS: "menu.omni_comments",
+  MENU_OMNI_LIVESTREAM: "menu.omni_livestream",
+
+  OMNI_MESSAGES_VIEW: "omni_messages.view",
+  OMNI_MESSAGES_REPLY: "omni_messages.reply",
+  OMNI_MESSAGES_ASSIGN: "omni_messages.assign",
+  OMNI_MESSAGES_MANAGE: "omni_messages.manage",
+  OMNI_MESSAGES_TAGS: "omni_messages.tags",
+  OMNI_MESSAGES_NOTES: "omni_messages.notes",
+  OMNI_MESSAGES_CREATE_ORDER: "omni_messages.create_order",
 } as const;

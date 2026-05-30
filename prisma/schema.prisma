@@ -2065,8 +2065,8 @@ model PayrollBranchConfigTemplate {
 // =========================
 
 model MetaAdAccount {
-  id            String   @id @default(cuid())
-  metaAccountId String   @unique
+  id            String    @id @default(cuid())
+  metaAccountId String    @unique
   accountId     String?
   name          String?
   currency      String?
@@ -2076,8 +2076,8 @@ model MetaAdAccount {
   businessName  String?
   rawJson       Json?
   lastSyncedAt  DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   campaigns MetaCampaign[]
   adSets    MetaAdSet[]
@@ -2089,24 +2089,24 @@ model MetaAdAccount {
 }
 
 model MetaCampaign {
-  id            String   @id @default(cuid())
-  metaAccountId String
-  metaCampaignId String  @unique
-  name          String?
-  status        String?
+  id              String    @id @default(cuid())
+  metaAccountId   String
+  metaCampaignId  String    @unique
+  name            String?
+  status          String?
   effectiveStatus String?
-  objective     String?
-  buyingType    String?
-  dailyBudget   Decimal? @db.Decimal(18, 2)
-  lifetimeBudget Decimal? @db.Decimal(18, 2)
-  startTime     DateTime?
-  stopTime      DateTime?
-  rawJson       Json?
-  lastSyncedAt  DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  objective       String?
+  buyingType      String?
+  dailyBudget     Decimal?  @db.Decimal(18, 2)
+  lifetimeBudget  Decimal?  @db.Decimal(18, 2)
+  startTime       DateTime?
+  stopTime        DateTime?
+  rawJson         Json?
+  lastSyncedAt    DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
-  account  MetaAdAccount @relation(fields: [metaAccountId], references: [metaAccountId], onDelete: Cascade)
+  account  MetaAdAccount        @relation(fields: [metaAccountId], references: [metaAccountId], onDelete: Cascade)
   adSets   MetaAdSet[]
   ads      MetaAd[]
   insights MetaAdInsightDaily[]
@@ -2118,28 +2118,28 @@ model MetaCampaign {
 }
 
 model MetaAdSet {
-  id            String   @id @default(cuid())
-  metaAccountId String
-  metaCampaignId String?
-  metaAdSetId   String   @unique
-  name          String?
-  status        String?
-  effectiveStatus String?
+  id               String    @id @default(cuid())
+  metaAccountId    String
+  metaCampaignId   String?
+  metaAdSetId      String    @unique
+  name             String?
+  status           String?
+  effectiveStatus  String?
   optimizationGoal String?
-  billingEvent  String?
-  bidStrategy   String?
-  dailyBudget   Decimal? @db.Decimal(18, 2)
-  lifetimeBudget Decimal? @db.Decimal(18, 2)
-  startTime     DateTime?
-  endTime       DateTime?
-  targetingJson Json?
-  rawJson       Json?
-  lastSyncedAt  DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  billingEvent     String?
+  bidStrategy      String?
+  dailyBudget      Decimal?  @db.Decimal(18, 2)
+  lifetimeBudget   Decimal?  @db.Decimal(18, 2)
+  startTime        DateTime?
+  endTime          DateTime?
+  targetingJson    Json?
+  rawJson          Json?
+  lastSyncedAt     DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
-  account  MetaAdAccount @relation(fields: [metaAccountId], references: [metaAccountId], onDelete: Cascade)
-  campaign MetaCampaign? @relation(fields: [metaCampaignId], references: [metaCampaignId], onDelete: SetNull)
+  account  MetaAdAccount        @relation(fields: [metaAccountId], references: [metaAccountId], onDelete: Cascade)
+  campaign MetaCampaign?        @relation(fields: [metaCampaignId], references: [metaCampaignId], onDelete: SetNull)
   ads      MetaAd[]
   insights MetaAdInsightDaily[]
 
@@ -2151,31 +2151,31 @@ model MetaAdSet {
 }
 
 model MetaAd {
-  id              String   @id @default(cuid())
-  metaAccountId   String
-  metaCampaignId  String?
-  metaAdSetId     String?
-  metaAdId        String   @unique
-  metaCreativeId  String?
-  name            String?
-  status          String?
-  effectiveStatus String?
+  id                   String    @id @default(cuid())
+  metaAccountId        String
+  metaCampaignId       String?
+  metaAdSetId          String?
+  metaAdId             String    @unique
+  metaCreativeId       String?
+  name                 String?
+  status               String?
+  effectiveStatus      String?
   previewShareableLink String?
-  thumbnailUrl    String?
-  imageUrl        String?
-  videoId         String?
-  postId          String?
-  pageId          String?
-  callToActionType String?
-  creativeJson    Json?
-  rawJson         Json?
-  lastSyncedAt    DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  thumbnailUrl         String?
+  imageUrl             String?
+  videoId              String?
+  postId               String?
+  pageId               String?
+  callToActionType     String?
+  creativeJson         Json?
+  rawJson              Json?
+  lastSyncedAt         DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 
-  account  MetaAdAccount @relation(fields: [metaAccountId], references: [metaAccountId], onDelete: Cascade)
-  campaign MetaCampaign? @relation(fields: [metaCampaignId], references: [metaCampaignId], onDelete: SetNull)
-  adSet    MetaAdSet?    @relation(fields: [metaAdSetId], references: [metaAdSetId], onDelete: SetNull)
+  account  MetaAdAccount        @relation(fields: [metaAccountId], references: [metaAccountId], onDelete: Cascade)
+  campaign MetaCampaign?        @relation(fields: [metaCampaignId], references: [metaCampaignId], onDelete: SetNull)
+  adSet    MetaAdSet?           @relation(fields: [metaAdSetId], references: [metaAdSetId], onDelete: SetNull)
   insights MetaAdInsightDaily[]
 
   @@index([metaAccountId])
@@ -2188,35 +2188,35 @@ model MetaAd {
 }
 
 model MetaAdInsightDaily {
-  id             String   @id @default(cuid())
-  metaAccountId  String
-  level          String
-  dateStart      DateTime
-  dateStop       DateTime
-  metaCampaignId String?
-  metaAdSetId    String?
-  metaAdId       String?
-  campaignName   String?
-  adSetName      String?
-  adName         String?
-  spend          Decimal  @default(0) @db.Decimal(18, 2)
-  impressions    Int      @default(0)
-  reach          Int      @default(0)
-  clicks         Int      @default(0)
-  inlineLinkClicks Int    @default(0)
-  cpc            Decimal  @default(0) @db.Decimal(18, 4)
-  cpm            Decimal  @default(0) @db.Decimal(18, 4)
-  ctr            Decimal  @default(0) @db.Decimal(18, 4)
-  purchases      Int      @default(0)
-  purchaseValue  Decimal  @default(0) @db.Decimal(18, 2)
-  costPerPurchase Decimal @default(0) @db.Decimal(18, 4)
-  roas           Decimal  @default(0) @db.Decimal(18, 4)
-  actionsJson    Json?
+  id               String   @id @default(cuid())
+  metaAccountId    String
+  level            String
+  dateStart        DateTime
+  dateStop         DateTime
+  metaCampaignId   String?
+  metaAdSetId      String?
+  metaAdId         String?
+  campaignName     String?
+  adSetName        String?
+  adName           String?
+  spend            Decimal  @default(0) @db.Decimal(18, 2)
+  impressions      Int      @default(0)
+  reach            Int      @default(0)
+  clicks           Int      @default(0)
+  inlineLinkClicks Int      @default(0)
+  cpc              Decimal  @default(0) @db.Decimal(18, 4)
+  cpm              Decimal  @default(0) @db.Decimal(18, 4)
+  ctr              Decimal  @default(0) @db.Decimal(18, 4)
+  purchases        Int      @default(0)
+  purchaseValue    Decimal  @default(0) @db.Decimal(18, 2)
+  costPerPurchase  Decimal  @default(0) @db.Decimal(18, 4)
+  roas             Decimal  @default(0) @db.Decimal(18, 4)
+  actionsJson      Json?
   actionValuesJson Json?
-  rawJson        Json?
-  syncedAt       DateTime @default(now())
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  rawJson          Json?
+  syncedAt         DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   account  MetaAdAccount @relation(fields: [metaAccountId], references: [metaAccountId], onDelete: Cascade)
   campaign MetaCampaign? @relation(fields: [metaCampaignId], references: [metaCampaignId], onDelete: SetNull)
@@ -2231,19 +2231,19 @@ model MetaAdInsightDaily {
 }
 
 model MetaSyncLog {
-  id            String   @id @default(cuid())
+  id            String    @id @default(cuid())
   metaAccountId String?
   syncType      String
   status        String
   range         String?
   fromDate      DateTime?
   toDate        DateTime?
-  startedAt     DateTime @default(now())
+  startedAt     DateTime  @default(now())
   finishedAt    DateTime?
   durationMs    Int?
-  scanned       Int      @default(0)
-  upserted      Int      @default(0)
-  failed        Int      @default(0)
+  scanned       Int       @default(0)
+  upserted      Int       @default(0)
+  failed        Int       @default(0)
   message       String?
   errorJson     Json?
   createdById   String?
@@ -2253,4 +2253,184 @@ model MetaSyncLog {
   @@index([syncType])
   @@index([status])
   @@index([startedAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Omni Inbox / Meta Messaging
+// Event-driven inbox: Meta webhook -> DB -> SSE realtime.
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum OmniChannel {
+  FACEBOOK
+  INSTAGRAM
+  SYSTEM
+}
+
+enum OmniConversationStatus {
+  OPEN
+  PENDING
+  PROCESSING
+  CLOSED
+  SPAM
+}
+
+enum OmniMessageDirection {
+  IN
+  OUT
+  SYSTEM
+}
+
+enum OmniMessageType {
+  TEXT
+  IMAGE
+  FILE
+  STICKER
+  UNKNOWN
+}
+
+model OmniInboxPage {
+  id             String      @id @default(cuid())
+  channel        OmniChannel
+  providerPageId String      @unique
+  pageName       String
+  accessTokenEnc String?
+  isActive       Boolean     @default(true)
+  lastWebhookAt  DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  conversations OmniConversation[]
+
+  @@index([channel, isActive])
+}
+
+model OmniCustomer {
+  id             String   @id @default(cuid())
+  providerUserId String?  @unique
+  name           String
+  avatarUrl      String?
+  phone          String?
+  address        String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  conversations OmniConversation[]
+
+  @@index([phone])
+  @@index([name])
+}
+
+model OmniConversation {
+  id               String      @id @default(cuid())
+  channel          OmniChannel
+  providerThreadId String      @unique
+
+  pageId String?
+  page   OmniInboxPage? @relation(fields: [pageId], references: [id])
+
+  customerId String?
+  customer   OmniCustomer? @relation(fields: [customerId], references: [id])
+
+  status          OmniConversationStatus @default(OPEN)
+  assigneeId      String?
+  assigneeName    String?
+  branchId        String?
+  lastMessageText String?
+  lastMessageAt   DateTime?
+  unreadCount     Int                    @default(0)
+
+  lockedById String?
+  lockedAt   DateTime?
+  closedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages OmniMessage[]
+  tags     OmniConversationTag[]
+  notes    OmniConversationNote[]
+
+  @@index([status, updatedAt])
+  @@index([assigneeId, status])
+  @@index([branchId, status])
+  @@index([lastMessageAt])
+}
+
+model OmniMessage {
+  id String @id @default(cuid())
+
+  conversationId String
+  conversation   OmniConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  providerMessageId String?              @unique
+  direction         OmniMessageDirection
+  type              OmniMessageType      @default(TEXT)
+  text              String?
+  attachmentUrl     String?
+  senderId          String?
+  senderName        String?
+  sentAt            DateTime
+  createdAt         DateTime             @default(now())
+
+  @@index([conversationId, sentAt])
+  @@index([direction, sentAt])
+}
+
+model OmniConversationTag {
+  id String @id @default(cuid())
+
+  conversationId String
+  conversation   OmniConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  tag String
+
+  @@unique([conversationId, tag])
+  @@index([tag])
+}
+
+model OmniConversationNote {
+  id String @id @default(cuid())
+
+  conversationId String
+  conversation   OmniConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  staffId   String?
+  staffName String?
+  note      String
+  createdAt DateTime @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+model LocalDeliveryReconciliation {
+  id              String    @id
+  code            String?   @unique
+  orderId         String
+  shipmentId      String?
+  branchId        String?
+  carrier         String?
+  trackingCode    String?
+  status          String    @default("DRAFT")
+  codAmount       Decimal   @default(0) @db.Decimal(18, 2)
+  shippingFee     Decimal   @default(0) @db.Decimal(18, 2)
+  paidAmount      Decimal   @default(0) @db.Decimal(18, 2)
+  paymentRows     Json?
+  note            String?
+  createdById     String?
+  createdByName   String?
+  confirmedById   String?
+  confirmedByName String?
+  paidById        String?
+  paidByName      String?
+  cancelledById   String?
+  cancelledByName String?
+  createdAt       DateTime  @default(now()) @db.Timestamp(6)
+  updatedAt       DateTime  @default(now()) @db.Timestamp(6)
+  confirmedAt     DateTime? @db.Timestamp(6)
+  paidAt          DateTime? @db.Timestamp(6)
+  cancelledAt     DateTime? @db.Timestamp(6)
+
+  @@index([branchId, createdAt], map: "LocalDeliveryReconciliation_branch_createdAt_idx")
+  @@index([orderId, status, createdAt], map: "LocalDeliveryReconciliation_order_status_idx")
+  @@index([shipmentId, status, createdAt], map: "LocalDeliveryReconciliation_shipment_status_idx")
 }
