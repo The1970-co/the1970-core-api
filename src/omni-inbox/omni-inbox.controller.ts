@@ -25,7 +25,6 @@ import {
   UpdateTagsDto,
 } from "./dto/omni-inbox-actions.dto";
 
-@UseGuards(JwtGuard, PermissionGuard)
 @Controller("omni-inbox")
 export class OmniInboxController {
   constructor(
@@ -33,48 +32,56 @@ export class OmniInboxController {
     private readonly realtime: OmniInboxRealtimeService,
   ) {}
 
+  @UseGuards(JwtGuard, PermissionGuard)
   @Get("conversations")
   @RequireAnyPermissions(PERMISSIONS.OMNI_MESSAGES_VIEW, PERMISSIONS.MENU_OMNI_MESSAGES)
   listConversations(@Query() query: ListConversationsDto) {
     return this.service.listConversations(query);
   }
 
+  @UseGuards(JwtGuard, PermissionGuard)
   @Get("conversations/:id")
   @RequireAnyPermissions(PERMISSIONS.OMNI_MESSAGES_VIEW, PERMISSIONS.MENU_OMNI_MESSAGES)
   getConversation(@Param("id") id: string) {
     return this.service.getConversation(id);
   }
 
+  @UseGuards(JwtGuard, PermissionGuard)
   @Post("conversations/:id/messages")
   @RequirePermissions(PERMISSIONS.OMNI_MESSAGES_REPLY)
   sendMessage(@Param("id") id: string, @Body() dto: SendMessageDto, @Request() req: any) {
     return this.service.sendMessage(id, dto, req.user);
   }
 
+  @UseGuards(JwtGuard, PermissionGuard)
   @Patch("conversations/:id/assign")
   @RequirePermissions(PERMISSIONS.OMNI_MESSAGES_ASSIGN)
   assign(@Param("id") id: string, @Body() dto: AssignConversationDto) {
     return this.service.assignConversation(id, dto);
   }
 
+  @UseGuards(JwtGuard, PermissionGuard)
   @Patch("conversations/:id/status")
   @RequirePermissions(PERMISSIONS.OMNI_MESSAGES_MANAGE)
   updateStatus(@Param("id") id: string, @Body() dto: UpdateConversationStatusDto) {
     return this.service.updateStatus(id, dto.status);
   }
 
+  @UseGuards(JwtGuard, PermissionGuard)
   @Patch("conversations/:id/tags")
   @RequirePermissions(PERMISSIONS.OMNI_MESSAGES_TAGS)
   updateTags(@Param("id") id: string, @Body() dto: UpdateTagsDto) {
     return this.service.updateTags(id, dto.tags);
   }
 
+  @UseGuards(JwtGuard, PermissionGuard)
   @Post("conversations/:id/notes")
   @RequirePermissions(PERMISSIONS.OMNI_MESSAGES_NOTES)
   createNote(@Param("id") id: string, @Body() dto: CreateNoteDto, @Request() req: any) {
     return this.service.createNote(id, dto, req.user);
   }
 
+  @UseGuards(JwtGuard, PermissionGuard)
   @Patch("conversations/:id/read")
   @RequireAnyPermissions(PERMISSIONS.OMNI_MESSAGES_VIEW, PERMISSIONS.MENU_OMNI_MESSAGES)
   markRead(@Param("id") id: string) {
@@ -86,7 +93,6 @@ export class OmniInboxController {
    * Không poll liên tục → giảm request và egress Railway.
    */
   @Sse("events")
-  @RequireAnyPermissions(PERMISSIONS.OMNI_MESSAGES_VIEW, PERMISSIONS.MENU_OMNI_MESSAGES)
   events() {
     return this.realtime.stream();
   }
