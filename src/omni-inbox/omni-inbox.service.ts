@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { OmniInboxRealtimeService } from "./omni-inbox.realtime";
 import { ListConversationsDto } from "./dto/list-conversations.dto";
@@ -7,12 +7,112 @@ function safeText(value: any) {
   return String(value || "").trim();
 }
 
+function last6(value: string) {
+  return safeText(value).slice(-6) || "unknown";
+}
+
+type MetaProfile = {
+  id?: string;
+  name?: string;
+  first_name?: string;
+  last_name?: string;
+  profile_pic?: string;
+};
+
 @Injectable()
 export class OmniInboxService {
+  private readonly logger = new Logger(OmniInboxService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly realtime: OmniInboxRealtimeService,
   ) {}
+
+  private get pageAccessToken() {
+    return safeText(process.env.META_INBOX_PAGE_ACCESS_TOKEN);
+  }
+
+  private get configuredPageId() {
+    return safeText(process.env.META_INBOX_PAGE_ID);
+  }
+
+  private get graphVersion() {
+    return safeText(process.env.META_GRAPH_VERSION) || "v25.0";
+  }
+
+  private async metaFetch<T = any>(path: string, params: Record<string, string> = {}): Promise<T> {
+    const token = this.pageAccessToken;
+    if (!token) throw new BadRequestException("Thiếu META_INBOX_PAGE_ACCESS_TOKEN.");
+
+    const url = new URL(`https://graph.facebook.com/${this.graphVersion}/${path.replace(/^\/+/, "")}`);
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null) url.searchParams.set(key, value);
+    }
+    url.searchParams.set("access_token", token);
+
+    const res = await fetch(url.toString(), { method: "GET" });
+    const json = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      const message = json?.error?.message || `Meta Graph API lỗi ${res.status}`;
+      this.logger.warn(`[META_GRAPH_GET_FAILED] ${path} | ${message}`);
+      throw new BadRequestException(message);
+    }
+
+    return json as T;
+  }
+
+  private async metaPost<T = any>(path: string, body: Record<string, any> = {}): Promise<T> {
+    const token = this.pageAccessToken;
+    if (!token) throw new BadRequestException("Thiếu META_INBOX_PAGE_ACCESS_TOKEN.");
+
+    const url = new URL(`https://graph.facebook.com/${this.graphVersion}/${path.replace(/^\/+/, "")}`);
+    url.searchParams.set("access_token", token);
+
+    const res = await fetch(url.toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      const message = json?.error?.message || `Meta Graph API lỗi ${res.status}`;
+      this.logger.warn(`[META_GRAPH_POST_FAILED] ${path} | ${message}`);
+      throw new BadRequestException(message);
+    }
+
+    return json as T;
+  }
+
+  private async getMessengerProfile(psid: string): Promise<{ name: string; avatarUrl?: string | null }> {
+    const fallbackName = `Khách ${last6(psid)}`;
+
+    if (!this.pageAccessToken) {
+      this.logger.warn(`[META_PROFILE_SKIP] missing page access token | psid=${last6(psid)}`);
+      return { name: fallbackName, avatarUrl: null };
+    }
+
+    try {
+      const profile = await this.metaFetch<MetaProfile>(psid, {
+        fields: "name,first_name,last_name,profile_pic",
+      });
+
+      const fullName =
+        safeText(profile.name) ||
+        [safeText(profile.first_name), safeText(profile.last_name)].filter(Boolean).join(" ").trim();
+
+      return {
+        name: fullName || fallbackName,
+        avatarUrl: safeText(profile.profile_pic) || null,
+      };
+    } catch (error: any) {
+      // Không để lỗi gọi profile làm rơi webhook. Khi app chưa được duyệt quyền,
+      // Meta có thể chưa cho đọc profile; hệ thống vẫn lưu hội thoại bằng tên tạm.
+      this.logger.warn(`[META_PROFILE_FALLBACK] psid=${last6(psid)} | ${error?.message || error}`);
+      return { name: fallbackName, avatarUrl: null };
+    }
+  }
 
   async listConversations(query: ListConversationsDto) {
     const page = Number(query.page || 1);
@@ -150,18 +250,29 @@ export class OmniInboxService {
     return item;
   }
 
-  /**
-   * Chưa gọi Meta API thật ở Phase 1.
-   * Khi nối Meta thật, hàm này sẽ gửi Graph API bằng Page token rồi lưu OUT message.
-   */
   async sendMessage(id: string, dto: { text: string; attachmentUrl?: string }, staff?: any) {
-    const conversation = await this.prisma.omniConversation.findUnique({ where: { id } });
+    const conversation = await this.prisma.omniConversation.findUnique({
+      where: { id },
+      include: { customer: true },
+    });
     if (!conversation) throw new NotFoundException("Không tìm thấy hội thoại.");
 
     const text = safeText(dto.text);
     if (!text && !dto.attachmentUrl) throw new BadRequestException("Tin nhắn trống.");
 
     const now = new Date();
+    const recipientPsid = safeText(conversation.customer?.providerUserId);
+
+    if (conversation.channel === "FACEBOOK") {
+      if (!recipientPsid) throw new BadRequestException("Hội thoại chưa có PSID khách Facebook.");
+      if (!text) throw new BadRequestException("Hiện tại Messenger chỉ hỗ trợ gửi text trong màn này.");
+
+      await this.metaPost("me/messages", {
+        recipient: { id: recipientPsid },
+        messaging_type: "RESPONSE",
+        message: { text },
+      });
+    }
 
     const message = await this.prisma.omniMessage.create({
       data: {
@@ -198,17 +309,47 @@ export class OmniInboxService {
     const messageId = safeText(event?.message?.mid);
     const text = safeText(event?.message?.text);
     const timestamp = Number(event?.timestamp || Date.now());
+    const attachment = event?.message?.attachments?.[0];
 
-    if (!senderId || !recipientId || (!text && !event?.message?.attachments?.length)) {
-      return { skipped: true };
+    if (!senderId || !recipientId) return { skipped: true, reason: "missing_sender_or_recipient" };
+
+    if (event?.message?.is_echo) {
+      return { skipped: true, reason: "echo_message" };
     }
+
+    if (event?.delivery || event?.read || event?.reaction || event?.postback) {
+      this.logger.debug(`[META_WEBHOOK_EVENT] non-message event | sender=${last6(senderId)} recipient=${last6(recipientId)}`);
+      return { skipped: true, reason: "non_message_event" };
+    }
+
+    if (!text && !event?.message?.attachments?.length) {
+      return { skipped: true, reason: "empty_message" };
+    }
+
+    if (this.configuredPageId && recipientId !== this.configuredPageId) {
+      this.logger.warn(
+        `[META_WEBHOOK_PAGE_MISMATCH] expected=${this.configuredPageId} actual=${recipientId} sender=${last6(senderId)}`,
+      );
+    }
+
+    if (messageId) {
+      const existed = await this.prisma.omniMessage.findUnique({
+        where: { providerMessageId: messageId },
+      });
+      if (existed) return { duplicated: true };
+    }
+
+    const profile = await this.getMessengerProfile(senderId);
 
     const page = await this.prisma.omniInboxPage.upsert({
       where: { providerPageId: recipientId },
-      update: { lastWebhookAt: new Date() },
+      update: {
+        lastWebhookAt: new Date(),
+        pageName: recipientId === this.configuredPageId ? "The 1970" : `Page ${recipientId}`,
+      },
       create: {
         providerPageId: recipientId,
-        pageName: `Page ${recipientId}`,
+        pageName: recipientId === this.configuredPageId ? "The 1970" : `Page ${recipientId}`,
         channel: "FACEBOOK",
         lastWebhookAt: new Date(),
       },
@@ -216,20 +357,27 @@ export class OmniInboxService {
 
     const customer = await this.prisma.omniCustomer.upsert({
       where: { providerUserId: senderId },
-      update: {},
+      update: {
+        name: profile.name,
+        avatarUrl: profile.avatarUrl || undefined,
+      },
       create: {
         providerUserId: senderId,
-        name: `Khách ${senderId.slice(-6)}`,
+        name: profile.name,
+        avatarUrl: profile.avatarUrl || null,
       },
     });
 
     const providerThreadId = `FACEBOOK:${recipientId}:${senderId}`;
     const sentAt = new Date(timestamp);
+    const messageText = text || "[Tệp đính kèm]";
 
     const conversation = await this.prisma.omniConversation.upsert({
       where: { providerThreadId },
       update: {
-        lastMessageText: text || "[Tệp đính kèm]",
+        pageId: page.id,
+        customerId: customer.id,
+        lastMessageText: messageText,
         lastMessageAt: sentAt,
         unreadCount: { increment: 1 },
         status: "OPEN",
@@ -239,7 +387,7 @@ export class OmniInboxService {
         channel: "FACEBOOK",
         pageId: page.id,
         customerId: customer.id,
-        lastMessageText: text || "[Tệp đính kèm]",
+        lastMessageText: messageText,
         lastMessageAt: sentAt,
         unreadCount: 1,
         status: "OPEN",
@@ -247,14 +395,6 @@ export class OmniInboxService {
       include: { customer: true, tags: true },
     });
 
-    if (messageId) {
-      const existed = await this.prisma.omniMessage.findUnique({
-        where: { providerMessageId: messageId },
-      });
-      if (existed) return { duplicated: true };
-    }
-
-    const attachment = event?.message?.attachments?.[0];
     const message = await this.prisma.omniMessage.create({
       data: {
         conversationId: conversation.id,
@@ -268,6 +408,10 @@ export class OmniInboxService {
         sentAt,
       },
     });
+
+    this.logger.log(
+      `[META_WEBHOOK_MESSAGE] page=${recipientId} sender=${last6(senderId)} customer="${customer.name}" text="${messageText.slice(0, 80)}"`,
+    );
 
     this.realtime.emit({ type: "message.created", payload: message });
     this.realtime.emit({ type: "conversation.updated", payload: conversation });
