@@ -267,11 +267,26 @@ export class OmniInboxService {
       if (!recipientPsid) throw new BadRequestException("Hội thoại chưa có PSID khách Facebook.");
       if (!text) throw new BadRequestException("Hiện tại Messenger chỉ hỗ trợ gửi text trong màn này.");
 
-      await this.metaPost("me/messages", {
-        recipient: { id: recipientPsid },
-        messaging_type: "RESPONSE",
-        message: { text },
-      });
+      this.logger.log(
+        `[META_SEND] conversation=${id} psid=${last6(recipientPsid)} text="${text.slice(0, 120)}"`,
+      );
+
+      try {
+        const metaResult = await this.metaPost("me/messages", {
+          recipient: { id: recipientPsid },
+          messaging_type: "RESPONSE",
+          message: { text },
+        });
+
+        this.logger.log(
+          `[META_SEND_OK] conversation=${id} psid=${last6(recipientPsid)} result=${JSON.stringify(metaResult)}`,
+        );
+      } catch (error: any) {
+        this.logger.error(
+          `[META_SEND_FAILED] conversation=${id} psid=${last6(recipientPsid)} error=${error?.message || error}`,
+        );
+        throw error;
+      }
     }
 
     const message = await this.prisma.omniMessage.create({
