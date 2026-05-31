@@ -12,7 +12,10 @@ import {
 } from "@nestjs/common";
 import { JwtGuard } from "../auth/jwt.guard";
 import { PermissionGuard } from "../auth/guards/permission.guard";
-import { RequireAnyPermissions, RequirePermissions } from "../auth/decorators/require-permissions.decorator";
+import {
+  RequireAnyPermissions,
+  RequirePermissions,
+} from "../auth/decorators/require-permissions.decorator";
 import { PERMISSIONS } from "../auth/constants/permissions";
 import { OmniInboxService } from "./omni-inbox.service";
 import { OmniInboxRealtimeService } from "./omni-inbox.realtime";
@@ -34,14 +37,20 @@ export class OmniInboxController {
 
   @UseGuards(JwtGuard, PermissionGuard)
   @Get("conversations")
-  @RequireAnyPermissions(PERMISSIONS.OMNI_MESSAGES_VIEW, PERMISSIONS.MENU_OMNI_MESSAGES)
+  @RequireAnyPermissions(
+    PERMISSIONS.OMNI_MESSAGES_VIEW,
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
   listConversations(@Query() query: ListConversationsDto) {
     return this.service.listConversations(query);
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
   @Get("conversations/:id")
-  @RequireAnyPermissions(PERMISSIONS.OMNI_MESSAGES_VIEW, PERMISSIONS.MENU_OMNI_MESSAGES)
+  @RequireAnyPermissions(
+    PERMISSIONS.OMNI_MESSAGES_VIEW,
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
   getConversation(@Param("id") id: string) {
     return this.service.getConversation(id);
   }
@@ -49,7 +58,11 @@ export class OmniInboxController {
   @UseGuards(JwtGuard, PermissionGuard)
   @Post("conversations/:id/messages")
   @RequirePermissions(PERMISSIONS.OMNI_MESSAGES_REPLY)
-  sendMessage(@Param("id") id: string, @Body() dto: SendMessageDto, @Request() req: any) {
+  sendMessage(
+    @Param("id") id: string,
+    @Body() dto: SendMessageDto,
+    @Request() req: any,
+  ) {
     return this.service.sendMessage(id, dto, req.user);
   }
 
@@ -63,7 +76,10 @@ export class OmniInboxController {
   @UseGuards(JwtGuard, PermissionGuard)
   @Patch("conversations/:id/status")
   @RequirePermissions(PERMISSIONS.OMNI_MESSAGES_MANAGE)
-  updateStatus(@Param("id") id: string, @Body() dto: UpdateConversationStatusDto) {
+  updateStatus(
+    @Param("id") id: string,
+    @Body() dto: UpdateConversationStatusDto,
+  ) {
     return this.service.updateStatus(id, dto.status);
   }
 
@@ -77,15 +93,42 @@ export class OmniInboxController {
   @UseGuards(JwtGuard, PermissionGuard)
   @Post("conversations/:id/notes")
   @RequirePermissions(PERMISSIONS.OMNI_MESSAGES_NOTES)
-  createNote(@Param("id") id: string, @Body() dto: CreateNoteDto, @Request() req: any) {
+  createNote(
+    @Param("id") id: string,
+    @Body() dto: CreateNoteDto,
+    @Request() req: any,
+  ) {
     return this.service.createNote(id, dto, req.user);
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
   @Patch("conversations/:id/read")
-  @RequireAnyPermissions(PERMISSIONS.OMNI_MESSAGES_VIEW, PERMISSIONS.MENU_OMNI_MESSAGES)
+  @RequireAnyPermissions(
+    PERMISSIONS.OMNI_MESSAGES_VIEW,
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
   markRead(@Param("id") id: string) {
     return this.service.markRead(id);
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
+  @Get("meta/connection")
+  @RequireAnyPermissions(
+    PERMISSIONS.OMNI_MESSAGES_VIEW,
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
+  getMetaConnection() {
+    return this.service.getMetaConnectionStatus();
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
+  @Post("meta/subscribe-page")
+  @RequireAnyPermissions(
+    PERMISSIONS.OMNI_MESSAGES_MANAGE,
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
+  subscribeMetaPage() {
+    return this.service.subscribeConfiguredPage();
   }
 
   /**

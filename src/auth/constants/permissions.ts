@@ -107,11 +107,13 @@ export const PERMISSIONS = {
   MENU_OMNI_COMMENTS: "menu.omni_comments",
   MENU_OMNI_LIVESTREAM: "menu.omni_livestream",
 
-  OMNI_MESSAGES_VIEW: "omni_messages.view",
-  OMNI_MESSAGES_REPLY: "omni_messages.reply",
-  OMNI_MESSAGES_ASSIGN: "omni_messages.assign",
-  OMNI_MESSAGES_MANAGE: "omni_messages.manage",
-  OMNI_MESSAGES_TAGS: "omni_messages.tags",
-  OMNI_MESSAGES_NOTES: "omni_messages.notes",
-  OMNI_MESSAGES_CREATE_ORDER: "omni_messages.create_order",
+  // Giữ tên constant OMNI_MESSAGES_* để không phải sửa controller import,
+  // nhưng value phải khớp bộ quyền frontend/Role Template đang lưu trong DB.
+  OMNI_MESSAGES_VIEW: "omni_inbox.view",
+  OMNI_MESSAGES_REPLY: "omni_inbox.reply",
+  OMNI_MESSAGES_ASSIGN: "omni_inbox.assign",
+  OMNI_MESSAGES_MANAGE: "omni_inbox.settings",
+  OMNI_MESSAGES_TAGS: "omni_inbox.tags.manage",
+  OMNI_MESSAGES_NOTES: "omni_inbox.notes.manage",
+  OMNI_MESSAGES_CREATE_ORDER: "omni_inbox.create_order",
 } as const;

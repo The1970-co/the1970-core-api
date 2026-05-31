@@ -37,6 +37,31 @@ const LEGACY_BOOLEAN_TO_PERMISSION_KEYS: Record<string, string[]> = {
   canViewMoney: ["inventory.value.view", "finance.view"],
 };
 
+const PERMISSION_KEY_ALIASES: Record<string, string[]> = {
+  "omni_messages.view": ["omni_messages.view", "omni_inbox.view"],
+  "omni_inbox.view": ["omni_inbox.view", "omni_messages.view"],
+  "omni_messages.reply": ["omni_messages.reply", "omni_inbox.reply"],
+  "omni_inbox.reply": ["omni_inbox.reply", "omni_messages.reply"],
+  "omni_messages.assign": ["omni_messages.assign", "omni_inbox.assign"],
+  "omni_inbox.assign": ["omni_inbox.assign", "omni_messages.assign"],
+  "omni_messages.manage": ["omni_messages.manage", "omni_inbox.settings"],
+  "omni_inbox.settings": ["omni_inbox.settings", "omni_messages.manage"],
+  "omni_messages.tags": ["omni_messages.tags", "omni_inbox.tags.manage"],
+  "omni_inbox.tags.manage": ["omni_inbox.tags.manage", "omni_messages.tags"],
+  "omni_messages.notes": ["omni_messages.notes", "omni_inbox.notes.manage"],
+  "omni_inbox.notes.manage": ["omni_inbox.notes.manage", "omni_messages.notes"],
+  "omni_messages.create_order": ["omni_messages.create_order", "omni_inbox.create_order"],
+  "omni_inbox.create_order": ["omni_inbox.create_order", "omni_messages.create_order"],
+};
+
+function expandPermissionKeys(values: string[]) {
+  return values.flatMap((value) => {
+    const key = normalizeKey(value);
+    if (!key) return [];
+    return PERMISSION_KEY_ALIASES[key] || [key];
+  });
+}
+
 function normalizeRole(value: any) {
   return String(value || "").trim().toLowerCase();
 }
@@ -77,10 +102,11 @@ export class PermissionGuard implements CanActivate {
 
     if (permissions.includes("*")) return true;
 
+    const requiredExpanded = expandPermissionKeys(required);
     const ok =
       mode === "any"
-        ? required.some((permission) => permissions.includes(permission))
-        : required.every((permission) => permissions.includes(permission));
+        ? requiredExpanded.some((permission) => permissions.includes(permission))
+        : requiredExpanded.every((permission) => permissions.includes(permission));
 
     if (!ok) {
       throw new ForbiddenException("Bạn không có quyền thực hiện thao tác này");
@@ -159,7 +185,7 @@ export class PermissionGuard implements CanActivate {
       }
     }
 
-    const deniedSet = new Set(denied);
-    return unique(keys).filter((key) => !deniedSet.has(key));
+    const deniedSet = new Set(expandPermissionKeys(denied));
+    return unique(expandPermissionKeys(keys)).filter((key) => !deniedSet.has(key));
   }
 }
