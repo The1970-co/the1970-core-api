@@ -1700,7 +1700,27 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     }
 
     const actorId = user?.id || user?.sub || null;
-    const actorName = user?.name || user?.fullName || user?.username || user?.email || "system";
+    let actorName = user?.name || user?.fullName || user?.username || user?.email || "";
+    if (actorId) {
+      const [adminActor, staffActor] = await Promise.all([
+        this.prisma.adminUser.findUnique({
+          where: { id: actorId },
+          select: { fullName: true, email: true },
+        }).catch(() => null),
+        this.prisma.staffUser.findUnique({
+          where: { id: actorId },
+          select: { name: true, email: true },
+        }).catch(() => null),
+      ]);
+      actorName =
+        adminActor?.fullName ||
+        adminActor?.email ||
+        staffActor?.name ||
+        staffActor?.email ||
+        actorName ||
+        String(actorId);
+    }
+    if (!actorName) actorName = "system";
     const receivedAt = new Date();
     const currentMetadata = shipment.metadata && typeof shipment.metadata === "object" && !Array.isArray(shipment.metadata)
       ? shipment.metadata
@@ -1749,6 +1769,19 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
 
         const inventoryAlreadyApplied = existingReturnMovements.length > 0;
         const restoredItems: Array<{ sku: string; qty: number; beforeQty: number; afterQty: number }> = [];
+        const returnMovementNote = `Nhập lại hàng hoàn GHN từ đơn ${order.orderCode}${shipment.trackingCode ? ` - MVD ${shipment.trackingCode}` : ""} | Người xác nhận: ${actorName}`;
+
+        if (inventoryAlreadyApplied) {
+          await (tx as any).inventoryMovement.updateMany({
+            where: {
+              refType: "GHN_RETURN_RECEIVED",
+              refId: order.id,
+            },
+            data: {
+              note: returnMovementNote,
+            },
+          });
+        }
 
         if (!inventoryAlreadyApplied) {
           const items = Array.isArray(orderWithItems.items) ? orderWithItems.items : [];
@@ -1810,10 +1843,10 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
                 qty,
                 beforeQty,
                 afterQty,
-                note: `Nhập lại hàng hoàn GHN từ đơn ${order.orderCode}${shipment.trackingCode ? ` - MVD ${shipment.trackingCode}` : ""}`,
+                note: returnMovementNote,
                 refType: "GHN_RETURN_RECEIVED",
                 refId: order.id,
-                createdById: actorId,
+                createdById: null,
                 createdAt: receivedAt,
               },
             });
@@ -1876,8 +1909,8 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     return {
       ok: true,
       message: result.inventoryAlreadyApplied
-        ? "Đã xác nhận shop nhận hàng hoàn. Kho đã được ghi nhận trước đó, không cộng lại lần 2."
-        : `Đã xác nhận shop nhận hàng hoàn và nhập lại ${totalRestoredQty} sản phẩm vào kho.`,
+        ? `Đã xác nhận nhận hàng hoàn. Kho đã được ghi nhận trước đó, không cộng lại lần 2. Người xác nhận: ${nextMetadata.returnReceivedByName}.`
+        : `Đã xác nhận nhận hàng hoàn và nhập lại ${totalRestoredQty} sản phẩm vào kho. Người xác nhận: ${nextMetadata.returnReceivedByName}.`,
       returnReceiveStatus: "RECEIVED",
       returnReceiveLabel: "Đã nhận hàng hoàn",
       returnReceivedAt: nextMetadata.returnReceivedAt,
@@ -2305,7 +2338,138 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     return quotes;
   }
 
-  async createGhnShipment(orderId: string, dto: CreateGhnShipmentDto) {
+
+  private getShipmentActorName(user?: any) {
+    return String(
+      user?.name ||
+        user?.fullName ||
+        user?.username ||
+        user?.email ||
+        user?.code ||
+        "system"
+    ).trim() || "system";
+  }
+
+  private async ensureOrderStockOutForShipment(tx: any, order: any, input?: {
+    trackingCode?: string | null;
+    actorName?: string | null;
+  }) {
+    const orderId = String(order?.id || "").trim();
+    const branchId = String(order?.branchId || "").trim();
+
+    if (!orderId) {
+      throw new BadRequestException("Không tìm thấy order để xuất kho.");
+    }
+
+    if (!branchId) {
+      throw new BadRequestException("Đơn chưa có chi nhánh, không thể xuất kho khi gửi vận chuyển.");
+    }
+
+    const existingSaleMovement = await tx.inventoryMovement.findFirst({
+      where: {
+        refType: "ORDER",
+        refId: orderId,
+        type: "SALE",
+      },
+      select: { id: true },
+    });
+
+    if (existingSaleMovement) {
+      return {
+        stockOutApplied: false,
+        stockOutAlreadyApplied: true,
+        stockOutItems: [] as Array<{ sku: string; qty: number; beforeQty: number; afterQty: number }>,
+      };
+    }
+
+    const items = Array.isArray(order?.items) ? order.items : [];
+    if (!items.length) {
+      throw new BadRequestException("Đơn không có sản phẩm để xuất kho khi gửi vận chuyển.");
+    }
+
+    const actorName = String(input?.actorName || "system").trim() || "system";
+    const trackingCode = String(input?.trackingCode || "").trim();
+    const createdAt = new Date();
+    const stockOutItems: Array<{ sku: string; qty: number; beforeQty: number; afterQty: number }> = [];
+
+    for (const item of items as any[]) {
+      const qty = Math.max(0, Math.trunc(Number(item?.qty || item?.quantity || 0)));
+      if (!qty) continue;
+
+      let variantId = String(item?.variantId || "").trim();
+      if (!variantId && item?.sku) {
+        const variant = await tx.productVariant.findFirst({
+          where: { sku: String(item.sku).trim() },
+          select: { id: true },
+        });
+        variantId = String(variant?.id || "").trim();
+      }
+
+      if (!variantId) {
+        throw new BadRequestException(`Không tìm thấy variant để xuất kho cho SKU ${item?.sku || item?.productName || item?.id}.`);
+      }
+
+      const inventoryItem = await tx.inventoryItem.findUnique({
+        where: {
+          variantId_branchId: {
+            variantId,
+            branchId,
+          },
+        },
+      });
+
+      const beforeQty = Number(inventoryItem?.availableQty || 0);
+      const afterQty = beforeQty - qty;
+
+      if (inventoryItem) {
+        await tx.inventoryItem.update({
+          where: { id: inventoryItem.id },
+          data: { availableQty: afterQty },
+        });
+      } else {
+        await tx.inventoryItem.create({
+          data: {
+            variantId,
+            branchId,
+            availableQty: afterQty,
+            reservedQty: 0,
+            incomingQty: 0,
+          },
+        });
+      }
+
+      await tx.inventoryMovement.create({
+        data: {
+          variantId,
+          branchId,
+          type: "SALE",
+          qty: -qty,
+          beforeQty,
+          afterQty,
+          note: `Trừ kho khi gửi HVC từ đơn ${order.orderCode || orderId}${trackingCode ? ` - MVD ${trackingCode}` : ""} | Người gửi HVC: ${actorName}`,
+          refType: "ORDER",
+          refId: orderId,
+          createdById: null,
+          createdAt,
+        },
+      });
+
+      stockOutItems.push({
+        sku: String(item?.sku || ""),
+        qty,
+        beforeQty,
+        afterQty,
+      });
+    }
+
+    return {
+      stockOutApplied: stockOutItems.length > 0,
+      stockOutAlreadyApplied: false,
+      stockOutItems,
+    };
+  }
+
+  async createGhnShipment(orderId: string, dto: CreateGhnShipmentDto, user?: any) {
     return this.prisma.$transaction(async (tx) => {
       const order = await tx.order.findUnique({
         where: { id: orderId },
@@ -2369,6 +2533,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       const codAmount = Math.min(requestedCodAmount, remainingCodAmount);
       const requiredNote = this.normalizeGhnRequiredNote((dto as any).requiredNote);
       const shipmentNote = String(dto.note || "").trim();
+      const actorName = this.getShipmentActorName(user);
       const created = await this.ghnClient.createOrder({
         payment_type_id: 1,
         note: shipmentNote,
@@ -2452,6 +2617,11 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         },
       });
 
+      const stockOutResult = await this.ensureOrderStockOutForShipment(tx, order, {
+        trackingCode: created.order_code,
+        actorName,
+      });
+
       await tx.order.update({
         where: { id: orderId },
         data: this.withPendingCodPayment(
@@ -2470,6 +2640,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         duplicated: false,
         ghn: created,
         shipment,
+        stockOut: stockOutResult,
       };
     });
   }
@@ -2567,7 +2738,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       })),
     } as CreateGhnShipmentDto;
 
-    return this.createGhnShipment(orderId, dto);
+    return this.createGhnShipment(orderId, dto, user);
   }
 
   async cancelShipmentByOrderId(orderId: string, user: any) {
@@ -2583,6 +2754,28 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     }
 
     const shipment = order.shipment;
+    const actorId = user?.id || user?.sub || null;
+    let actorName = user?.name || user?.fullName || user?.username || user?.email || "";
+    if (actorId) {
+      const [adminActor, staffActor] = await Promise.all([
+        this.prisma.adminUser.findUnique({
+          where: { id: actorId },
+          select: { fullName: true, email: true },
+        }).catch(() => null),
+        this.prisma.staffUser.findUnique({
+          where: { id: actorId },
+          select: { name: true, email: true },
+        }).catch(() => null),
+      ]);
+      actorName =
+        adminActor?.fullName ||
+        adminActor?.email ||
+        staffActor?.name ||
+        staffActor?.email ||
+        actorName ||
+        String(actorId);
+    }
+    if (!actorName) actorName = "system";
 
     if (!shipment?.trackingCode) {
       return this.prisma.order.update({
@@ -2596,21 +2789,119 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
 
     await this.ghnClient.cancelOrder(shipment.trackingCode);
 
-    await this.prisma.shipment.update({
-      where: { id: shipment.id },
-      data: {
-        shippingStatus: "CANCELLED",
-        partnerStatus: "cancel",
-      },
-    });
+    const result = await this.prisma.$transaction(
+      async (tx) => {
+        const existingRestore = await (tx as any).inventoryMovement.findFirst({
+          where: {
+            refType: "GHN_CANCEL_RESTORE",
+            refId: orderId,
+          },
+          select: { id: true },
+        });
 
-    return this.prisma.order.update({
-      where: { id: orderId },
-      data: {
-        status: "CANCELLED",
-        fulfillmentStatus: "UNFULFILLED",
+        const restoredItems: Array<{ variantId: string; qty: number; beforeQty: number; afterQty: number }> = [];
+
+        if (!existingRestore) {
+          const saleMovements = await (tx as any).inventoryMovement.findMany({
+            where: {
+              refType: "ORDER",
+              refId: orderId,
+              type: "SALE",
+            },
+            select: {
+              variantId: true,
+              branchId: true,
+              qty: true,
+            },
+          });
+
+          for (const movement of saleMovements as any[]) {
+            const restoreQty = Math.abs(Math.trunc(Number(movement?.qty || 0)));
+            const variantId = String(movement?.variantId || "").trim();
+            const branchId = String(movement?.branchId || (order as any).branchId || "").trim();
+
+            if (!restoreQty || !variantId || !branchId) continue;
+
+            const inventoryItem = await (tx as any).inventoryItem.findUnique({
+              where: {
+                variantId_branchId: {
+                  variantId,
+                  branchId,
+                },
+              },
+            });
+
+            const beforeQty = Number(inventoryItem?.availableQty || 0);
+            const afterQty = beforeQty + restoreQty;
+
+            if (inventoryItem) {
+              await (tx as any).inventoryItem.update({
+                where: { id: inventoryItem.id },
+                data: { availableQty: afterQty },
+              });
+            } else {
+              await (tx as any).inventoryItem.create({
+                data: {
+                  variantId,
+                  branchId,
+                  availableQty: afterQty,
+                  reservedQty: 0,
+                  incomingQty: 0,
+                },
+              });
+            }
+
+            await (tx as any).inventoryMovement.create({
+              data: {
+                variantId,
+                branchId,
+                type: "CANCEL",
+                qty: restoreQty,
+                beforeQty,
+                afterQty,
+                note: `Hoàn tồn kho do huỷ GHN từ đơn ${order.orderCode}${shipment.trackingCode ? ` - MVD ${shipment.trackingCode}` : ""} | Người huỷ: ${actorName}`,
+                refType: "GHN_CANCEL_RESTORE",
+                refId: orderId,
+                createdById: null,
+                createdAt: new Date(),
+              },
+            });
+
+            restoredItems.push({ variantId, qty: restoreQty, beforeQty, afterQty });
+          }
+        }
+
+        const [updatedShipment, updatedOrder] = await Promise.all([
+          tx.shipment.update({
+            where: { id: shipment.id },
+            data: {
+              shippingStatus: "CANCELLED",
+              partnerStatus: "cancel",
+            },
+          }),
+          tx.order.update({
+            where: { id: orderId },
+            data: {
+              status: "CANCELLED",
+              fulfillmentStatus: "UNFULFILLED",
+            },
+          }),
+        ]);
+
+        return {
+          order: updatedOrder,
+          shipment: updatedShipment,
+          inventoryRestored: !existingRestore,
+          restoredItems,
+        };
       },
-    });
+      {
+        maxWait: Number(process.env.PRISMA_TRANSACTION_MAX_WAIT_MS || 10000),
+        timeout: Number(process.env.PRISMA_TRANSACTION_TIMEOUT_MS || 30000),
+      },
+    );
+
+    return result.order;
   }
 
   async verifyAndUpdateCod(

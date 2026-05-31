@@ -172,9 +172,10 @@ export class ShipmentController {
   @Post(":orderId/ghn/create")
   createGhnShipment(
     @Param("orderId") orderId: string,
-    @Body() dto: CreateGhnShipmentDto
+    @Body() dto: CreateGhnShipmentDto,
+    @Req() req: any
   ) {
-    return this.shipmentService.createGhnShipment(orderId, dto);
+    return this.shipmentService.createGhnShipment(orderId, dto, req.user);
   }
 
   @Post(":orderId/create")
