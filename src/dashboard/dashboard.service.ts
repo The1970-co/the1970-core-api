@@ -133,6 +133,9 @@ export class DashboardService {
     const last7Start = this.addDays(todayStart, -7);
     const last14Start = this.addDays(todayStart, -14);
     const last30Start = this.addDays(todayStart, -30);
+    // Bảng lãi/lỗ trên frontend có các range 7d/10d/30d.
+    // Không được chỉ trả dailyRows từ đầu tháng, vì ngày đầu tháng sẽ mất ads/doanh thu của cuối tháng trước.
+    const dailyReportStart = last30Start;
 
     const activeBranches = await this.prisma.branch.findMany({
       where: { isActive: true },
@@ -300,7 +303,7 @@ export class DashboardService {
       this.prisma.order.findMany({
         where: {
           ...validOrderWhere,
-          soldAt: { gte: monthStart, lt: tomorrowStart },
+          soldAt: { gte: dailyReportStart, lt: tomorrowStart },
         },
         orderBy: { soldAt: "desc" },
         select: {
@@ -631,7 +634,7 @@ export class DashboardService {
     try {
       const liveDailyRows = await this.metaAdsService.getCampaignInsights({
         range: "custom" as any,
-        fromDate: this.dayKey(monthStart),
+        fromDate: this.dayKey(dailyReportStart),
         toDate: this.dayKey(todayStart),
       } as any);
 
@@ -653,7 +656,7 @@ export class DashboardService {
       try {
         const prismaAny = this.prisma as any;
         const baseWhere = {
-          dateStart: { gte: monthStart, lt: tomorrowStart },
+          dateStart: { gte: dailyReportStart, lt: tomorrowStart },
         };
 
         const adDailyRows = await prismaAny.metaAdInsightDaily.findMany({
@@ -728,7 +731,7 @@ export class DashboardService {
       }
     >();
     for (
-      let d = new Date(monthStart);
+      let d = new Date(dailyReportStart);
       d <= todayStart;
       d = this.addDays(d, 1)
     ) {
@@ -818,7 +821,13 @@ export class DashboardService {
       };
     });
 
-    const totalCost = monthOrders.reduce((sum, order) => {
+    const monthStartKey = this.dayKey(monthStart);
+    const monthMetricOrders = monthOrders.filter((order) => {
+      const key = this.dayKey(order.soldAt || order.createdAt);
+      return key >= monthStartKey;
+    });
+
+    const totalCost = monthMetricOrders.reduce((sum, order) => {
       return (
         sum +
         order.items.reduce((itemSum, item) => {
@@ -826,12 +835,12 @@ export class DashboardService {
         }, 0)
       );
     }, 0);
-    const monthRevenue = monthOrders.reduce(
+    const monthRevenue = monthMetricOrders.reduce(
       (sum, order) => sum + this.n(order.finalAmount),
       0,
     );
-    const totalAdsCost = Object.values(adsCostByDatePlain).reduce(
-      (sum, value) => sum + this.n(value),
+    const totalAdsCost = Object.entries(adsCostByDatePlain).reduce(
+      (sum, [key, value]) => (key >= monthStartKey ? sum + this.n(value) : sum),
       0,
     );
     const profit = monthRevenue - totalCost - totalAdsCost;
