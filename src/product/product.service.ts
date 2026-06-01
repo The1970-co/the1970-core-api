@@ -114,16 +114,116 @@ export class ProductService {
       .replace(/-+/g, "-");
   }
 
+  private removeVietnameseTone(value: unknown) {
+    return String(value ?? "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/đ/g, "d")
+      .replace(/Đ/g, "D");
+  }
+
+  private normalizeSkuToken(value: unknown) {
+    return this.removeVietnameseTone(value)
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, "")
+      .trim();
+  }
+
+  private compactColorSkuCode(value: unknown) {
+    const normalized = this.removeVietnameseTone(value)
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (!normalized) return "";
+
+    // Quy tắc SKU/barcode: màu phải ngắn, không dấu, không lấy nguyên chữ dài.
+    // Ví dụ: ĐEN -> D, XÁM -> X, XANH -> XA, BLACK -> BL.
+    const special: Record<string, string> = {
+      DEN: "D",
+      BLACK: "BL",
+      TRANG: "T",
+      WHITE: "WH",
+      KEM: "K",
+      CREAM: "CR",
+      BE: "BE",
+      BEIGE: "BE",
+      VANG: "V",
+      YELLOW: "YL",
+      NAU: "N",
+      BROWN: "BR",
+      REU: "R",
+      OLIVE: "OL",
+      THAN: "TH",
+      GHI: "G",
+      GREY: "G",
+      GRAY: "G",
+      XAM: "X",
+      "XAM NHAT": "XN",
+      "XAM DAM": "XD",
+      XANH: "XA",
+      BLUE: "BU",
+      NAVY: "NV",
+      "XANH NHAT": "XN",
+      "XANH DAM": "XD",
+      "XANH DEN": "XD",
+      "XANH REU": "XR",
+      "XANH LA": "XL",
+      GREEN: "GR",
+      DO: "DO",
+      RED: "RD",
+      CAM: "C",
+      ORANGE: "OR",
+      TIM: "TI",
+      PURPLE: "PR",
+      HONG: "H",
+      PINK: "PK",
+    };
+
+    if (special[normalized]) return special[normalized];
+
+    const tokens = normalized.split(" ").filter(Boolean);
+
+    if (tokens.length === 1) {
+      return tokens[0].slice(0, Math.min(tokens[0].length, 2));
+    }
+
+    return tokens
+      .map((token) => token[0])
+      .join("")
+      .slice(0, 3);
+  }
+
+  private compactSizeSkuCode(value: unknown) {
+    const normalized = this.normalizeSkuToken(value);
+
+    if (!normalized) return "OS";
+    if (/^\d+$/.test(normalized)) return normalized;
+
+    const special: Record<string, string> = {
+      FREESIZE: "FS",
+      FREE: "FS",
+      ONESIZE: "OS",
+      XS: "XS",
+      S: "S",
+      M: "M",
+      L: "L",
+      XL: "X",
+      XXL: "XX",
+      XXXL: "XXX",
+      XXXXL: "XXXX",
+    };
+
+    return special[normalized] || normalized;
+  }
+
   private buildSku(slug: string, color: string, size: string) {
-    const base = this.normalizeSlug(slug).replace(/-/g, "").toUpperCase();
-    const colorPart = String(color || "")
-      .trim()
-      .replace(/\s+/g, "")
-      .toUpperCase();
-    const sizePart = String(size || "")
-      .trim()
-      .toUpperCase();
-    return `${base}-${colorPart}-${sizePart}`;
+    const base = this.normalizeSkuToken(slug) || "SP";
+    const colorPart = this.compactColorSkuCode(color);
+    const sizePart = this.compactSizeSkuCode(size);
+
+    return [base, colorPart, sizePart].filter(Boolean).join("-");
   }
 
   private buildInventoryByBranch(
@@ -1050,6 +1150,7 @@ export class ProductService {
           await tx.productVariant.update({
             where: { id: item.variantId },
             data: {
+              sku: item.sku,
               color: item.color,
               size: item.size,
               ...(data.applyPriceToAllVariants &&
