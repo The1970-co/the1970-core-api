@@ -112,6 +112,26 @@ export class OmniInboxController {
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
+  @Post("conversations/:id/refresh-profile")
+  @RequireAnyPermissions(
+    PERMISSIONS.OMNI_MESSAGES_VIEW,
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
+  refreshConversationProfile(@Param("id") id: string) {
+    return this.service.refreshConversationProfile(id);
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
+  @Post("customers/refresh-profiles")
+  @RequireAnyPermissions(
+    PERMISSIONS.OMNI_MESSAGES_VIEW,
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
+  refreshMissingCustomerProfiles(@Query("limit") limit?: string) {
+    return this.service.refreshMissingCustomerProfiles(Number(limit || 50));
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
   @Get("meta/connection")
   @RequireAnyPermissions(
     PERMISSIONS.OMNI_MESSAGES_VIEW,

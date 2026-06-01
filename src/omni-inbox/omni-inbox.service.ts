@@ -16,6 +16,16 @@ function last6(value: string) {
   return safeText(value).slice(-6) || "unknown";
 }
 
+function isFallbackCustomerName(value?: string | null) {
+  const text = safeText(value);
+  return !text || /^Khách\s+\d{4,}$/i.test(text);
+}
+
+function isUsableProfileName(value?: string | null) {
+  const text = safeText(value);
+  return Boolean(text) && !isFallbackCustomerName(text);
+}
+
 type MetaProfile = {
   id?: string;
   name?: string;
@@ -262,14 +272,14 @@ export class OmniInboxService {
 
   private async getMessengerProfile(
     psid: string,
-  ): Promise<{ name: string; avatarUrl?: string | null }> {
+  ): Promise<{ name: string; avatarUrl?: string | null; isFallback: boolean }> {
     const fallbackName = `Khách ${last6(psid)}`;
 
     if (!this.pageAccessToken) {
       this.logger.warn(
         `[META_PROFILE_SKIP] missing page access token | psid=${last6(psid)}`,
       );
-      return { name: fallbackName, avatarUrl: null };
+      return { name: fallbackName, avatarUrl: null, isFallback: true };
     }
 
     try {
@@ -284,18 +294,85 @@ export class OmniInboxService {
           .join(" ")
           .trim();
 
+      const name = fullName || fallbackName;
+
       return {
-        name: fullName || fallbackName,
+        name,
         avatarUrl: safeText(profile.profile_pic) || null,
+        isFallback: !isUsableProfileName(name),
       };
     } catch (error: any) {
-      // Không để lỗi gọi profile làm rơi webhook. Khi app chưa được duyệt quyền,
-      // Meta có thể chưa cho đọc profile; hệ thống vẫn lưu hội thoại bằng tên tạm.
+      // Không để lỗi gọi profile làm rơi webhook. Khi token Page hết hạn hoặc app
+      // chưa đủ quyền, hệ thống vẫn lưu hội thoại bằng tên tạm và sẽ enrich lại
+      // khi token được thay mới.
       this.logger.warn(
         `[META_PROFILE_FALLBACK] psid=${last6(psid)} | ${error?.message || error}`,
       );
-      return { name: fallbackName, avatarUrl: null };
+      return { name: fallbackName, avatarUrl: null, isFallback: true };
     }
+  }
+
+  private async refreshCustomerProfileIfNeeded(customer?: any | null) {
+    if (!customer?.providerUserId) return customer;
+
+    const needsRefresh =
+      isFallbackCustomerName(customer.name) || !safeText(customer.avatarUrl);
+
+    if (!needsRefresh) return customer;
+
+    const profile = await this.getMessengerProfile(customer.providerUserId);
+    if (profile.isFallback && !profile.avatarUrl) return customer;
+
+    const nextName = profile.isFallback ? customer.name : profile.name;
+    const nextAvatar = profile.avatarUrl || customer.avatarUrl || null;
+
+    if (nextName === customer.name && nextAvatar === customer.avatarUrl) {
+      return customer;
+    }
+
+    const updated = await this.prisma.omniCustomer.update({
+      where: { id: customer.id },
+      data: {
+        name: nextName,
+        avatarUrl: nextAvatar,
+      },
+    });
+
+    this.logger.log(
+      `[META_PROFILE_REFRESHED] psid=${last6(customer.providerUserId)} name="${updated.name}" avatar=${updated.avatarUrl ? "yes" : "no"}`,
+    );
+
+    return updated;
+  }
+
+  private async enrichConversationCustomers<T extends Array<any>>(items: T): Promise<T> {
+    const targets = items
+      .filter((item) => item?.customer?.providerUserId)
+      .filter(
+        (item) =>
+          isFallbackCustomerName(item.customer?.name) ||
+          !safeText(item.customer?.avatarUrl),
+      )
+      .slice(0, 10);
+
+    if (!targets.length) return items;
+
+    await Promise.all(
+      targets.map(async (item) => {
+        try {
+          const updatedCustomer = await this.refreshCustomerProfileIfNeeded(
+            item.customer,
+          );
+          item.customer = updatedCustomer;
+        } catch (error: any) {
+          this.logger.warn(
+            `[META_PROFILE_REFRESH_SKIP] conversation=${item?.id || "-"} | ${error?.message || error}`,
+          );
+        }
+      }),
+    );
+
+    return items;
   }
 
   async listConversations(query: ListConversationsDto) {
@@ -335,6 +412,8 @@ export class OmniInboxService {
       this.prisma.omniConversation.count({ where }),
     ]);
 
+    await this.enrichConversationCustomers(items as any);
+
     return {
       items,
       page,
@@ -357,6 +436,18 @@ export class OmniInboxService {
     });
 
     if (!item) throw new NotFoundException("Không tìm thấy hội thoại.");
+
+    try {
+      const updatedCustomer = await this.refreshCustomerProfileIfNeeded(
+        item.customer,
+      );
+      (item as any).customer = updatedCustomer;
+    } catch (error: any) {
+      this.logger.warn(
+        `[META_PROFILE_REFRESH_SKIP] conversation=${id} | ${error?.message || error}`,
+      );
+    }
+
     return item;
   }
 
@@ -444,6 +535,64 @@ export class OmniInboxService {
 
     this.realtime.emit({ type: "conversation.updated", payload: item });
     return item;
+  }
+
+  async refreshConversationProfile(id: string) {
+    const conversation = await this.prisma.omniConversation.findUnique({
+      where: { id },
+      include: { customer: true, page: true, tags: true },
+    });
+
+    if (!conversation) throw new NotFoundException("Không tìm thấy hội thoại.");
+
+    const customer = await this.refreshCustomerProfileIfNeeded(
+      conversation.customer,
+    );
+
+    const updated = { ...conversation, customer };
+    this.realtime.emit({ type: "conversation.updated", payload: updated });
+    return updated;
+  }
+
+  async refreshMissingCustomerProfiles(limit = 50) {
+    const take = Math.min(Math.max(Number(limit || 50), 1), 100);
+    const customers = await this.prisma.omniCustomer.findMany({
+      where: {
+        providerUserId: { not: null },
+        OR: [
+          { avatarUrl: null },
+          { name: { startsWith: "Khách " } },
+        ],
+      },
+      orderBy: { updatedAt: "desc" },
+      take,
+    });
+
+    let refreshed = 0;
+    let skipped = 0;
+
+    for (const customer of customers) {
+      try {
+        const beforeName = customer.name;
+        const beforeAvatar = customer.avatarUrl;
+        const updated = await this.refreshCustomerProfileIfNeeded(customer);
+        if (
+          updated?.name !== beforeName ||
+          updated?.avatarUrl !== beforeAvatar
+        ) {
+          refreshed += 1;
+        } else {
+          skipped += 1;
+        }
+      } catch (error: any) {
+        skipped += 1;
+        this.logger.warn(
+          `[META_PROFILE_BACKFILL_SKIP] customer=${customer.id} | ${error?.message || error}`,
+        );
+      }
+    }
+
+    return { total: customers.length, refreshed, skipped };
   }
 
   async sendMessage(
@@ -585,16 +734,26 @@ export class OmniInboxService {
       },
     });
 
+    const existingCustomer = await this.prisma.omniCustomer.findUnique({
+      where: { providerUserId: senderId },
+    });
+
+    const nextCustomerName = profile.isFallback
+      ? existingCustomer?.name || profile.name
+      : profile.name;
+    const nextAvatarUrl =
+      profile.avatarUrl || existingCustomer?.avatarUrl || null;
+
     const customer = await this.prisma.omniCustomer.upsert({
       where: { providerUserId: senderId },
       update: {
-        name: profile.name,
-        avatarUrl: profile.avatarUrl || undefined,
+        name: nextCustomerName,
+        avatarUrl: nextAvatarUrl,
       },
       create: {
         providerUserId: senderId,
-        name: profile.name,
-        avatarUrl: profile.avatarUrl || null,
+        name: nextCustomerName,
+        avatarUrl: nextAvatarUrl,
       },
     });
 
