@@ -2531,6 +2531,18 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         Math.round(Number(dto.codAmount || 0))
       );
       const codAmount = Math.min(requestedCodAmount, remainingCodAmount);
+      const requestedCodFailedAmount = Math.max(
+        0,
+        Math.round(
+          Number(
+            (dto as any).cod_failed_amount ??
+            (dto as any).codFailedAmount ??
+            (dto as any).failedDeliveryCodAmount ??
+            0,
+          ),
+        ),
+      );
+      const codFailedAmount = requestedCodFailedAmount > 0 ? requestedCodFailedAmount : 0;
       const requiredNote = this.normalizeGhnRequiredNote((dto as any).requiredNote);
       const shipmentNote = String(dto.note || "").trim();
       const actorName = this.getShipmentActorName(user);
@@ -2538,6 +2550,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         payment_type_id: 1,
         note: shipmentNote,
         required_note: requiredNote,
+        cod_failed_amount: codFailedAmount,
         return_phone: fromPhone,
         return_address: fromAddress,
         return_district_id: fromDistrictId,
@@ -2578,6 +2591,9 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         note: shipmentNote,
         required_note: requiredNote,
         requiredNote,
+        cod_failed_amount: codFailedAmount,
+        codFailedAmount,
+        failedDeliveryCodAmount: codFailedAmount,
       };
 
       const shipment = await tx.shipment.upsert({
@@ -2701,6 +2717,29 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       Math.round(Number(order.finalAmount || 0) - paidAmount)
     );
 
+    const orderShippingSnapshot = (order as any).shippingSnapshot || {};
+    const orderMetadata = (order as any).metadata || {};
+    const orderNoteText = String((order as any).note || "");
+    const inferredCodFailedAmount = Math.max(
+      0,
+      Math.round(
+        Number(
+          orderShippingSnapshot?.cod_failed_amount ??
+          orderShippingSnapshot?.codFailedAmount ??
+          orderShippingSnapshot?.failedDeliveryCodAmount ??
+          orderMetadata?.cod_failed_amount ??
+          orderMetadata?.codFailedAmount ??
+          orderMetadata?.failedDeliveryCodAmount ??
+          (orderNoteText.toLowerCase().includes("giao hàng k thành công thu 30k") ||
+          orderNoteText.toLowerCase().includes("giao hang k thanh cong thu 30k") ||
+          orderNoteText.toLowerCase().includes("giao hàng không thành công thu 30k") ||
+          orderNoteText.toLowerCase().includes("giao hang khong thanh cong thu 30k")
+            ? 30000
+            : 0),
+        ),
+      ),
+    );
+
     const dto: CreateGhnShipmentDto = {
       toName: order.shippingRecipientName || order.customerName || "",
       toPhone: order.shippingPhone || order.customerPhone || "",
@@ -2723,6 +2762,13 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       note: "",
       clientOrderCode: order.orderCode,
       content: `Đơn ${order.orderCode}`,
+      ...(inferredCodFailedAmount > 0
+        ? ({
+            failedDeliveryCodAmount: inferredCodFailedAmount,
+            codFailedAmount: inferredCodFailedAmount,
+            cod_failed_amount: inferredCodFailedAmount,
+          } as any)
+        : {}),
       weight,
       length,
       width,
