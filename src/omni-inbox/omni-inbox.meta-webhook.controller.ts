@@ -7,6 +7,17 @@ export class OmniInboxMetaWebhookController {
 
   constructor(private readonly service: OmniInboxService) {}
 
+  private get verboseMetaLogs() {
+    return (
+      process.env.META_INBOX_VERBOSE_LOGS === "true" ||
+      process.env.NODE_ENV !== "production"
+    );
+  }
+
+  private logMetaDebug(message: string) {
+    if (this.verboseMetaLogs) this.logger.debug(message);
+  }
+
   @Get()
   verifyWebhook(@Query() query: any) {
     const verifyToken = process.env.META_INBOX_WEBHOOK_VERIFY_TOKEN || "";
@@ -32,7 +43,7 @@ export class OmniInboxMetaWebhookController {
     let handled = 0;
     let skipped = 0;
 
-    this.logger.log(`[META_WEBHOOK_RECEIVED] entries=${entries.length}`);
+    this.logMetaDebug(`[META_WEBHOOK_RECEIVED] entries=${entries.length}`);
 
     for (const entry of entries) {
       const messaging = Array.isArray(entry?.messaging) ? entry.messaging : [];

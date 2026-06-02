@@ -55,6 +55,17 @@ export class OmniInboxService {
     return safeText(process.env.META_GRAPH_VERSION) || "v25.0";
   }
 
+  private get verboseMetaLogs() {
+    return (
+      process.env.META_INBOX_VERBOSE_LOGS === "true" ||
+      process.env.NODE_ENV !== "production"
+    );
+  }
+
+  private logMetaDebug(message: string) {
+    if (this.verboseMetaLogs) this.logger.debug(message);
+  }
+
   private get webhookPath() {
     return "/webhooks/meta/inbox";
   }
@@ -92,7 +103,7 @@ export class OmniInboxService {
     if (!res.ok) {
       const message =
         json?.error?.message || `Meta Graph API lỗi ${res.status}`;
-      this.logger.warn(`[META_GRAPH_GET_FAILED] ${path} | ${message}`);
+      this.logMetaDebug(`[META_GRAPH_GET_FAILED] ${path} | ${message}`);
       throw new BadRequestException(message);
     }
 
@@ -276,7 +287,7 @@ export class OmniInboxService {
     const fallbackName = `Khách ${last6(psid)}`;
 
     if (!this.pageAccessToken) {
-      this.logger.warn(
+      this.logMetaDebug(
         `[META_PROFILE_SKIP] missing page access token | psid=${last6(psid)}`,
       );
       return { name: fallbackName, avatarUrl: null, isFallback: true };
@@ -305,7 +316,7 @@ export class OmniInboxService {
       // Không để lỗi gọi profile làm rơi webhook. Khi token Page hết hạn hoặc app
       // chưa đủ quyền, hệ thống vẫn lưu hội thoại bằng tên tạm và sẽ enrich lại
       // khi token được thay mới.
-      this.logger.warn(
+      this.logMetaDebug(
         `[META_PROFILE_FALLBACK] psid=${last6(psid)} | ${error?.message || error}`,
       );
       return { name: fallbackName, avatarUrl: null, isFallback: true };
@@ -689,7 +700,7 @@ export class OmniInboxService {
     }
 
     if (event?.delivery || event?.read || event?.reaction || event?.postback) {
-      this.logger.debug(
+      this.logMetaDebug(
         `[META_WEBHOOK_EVENT] non-message event | sender=${last6(senderId)} recipient=${last6(recipientId)}`,
       );
       return { skipped: true, reason: "non_message_event" };
@@ -798,7 +809,7 @@ export class OmniInboxService {
       },
     });
 
-    this.logger.log(
+    this.logMetaDebug(
       `[META_WEBHOOK_MESSAGE] page=${recipientId} sender=${last6(senderId)} customer="${customer.name}" text="${messageText.slice(0, 80)}"`,
     );
 
