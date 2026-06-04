@@ -404,6 +404,81 @@ export class CustomerService {
     });
   }
 
+  async searchCustomersLite(input: { q?: string; phone?: string; limit?: number }) {
+    const rawKeyword = this.normalizeString(input.q) || this.normalizeString(input.phone) || "";
+    const normalizedPhone = this.normalizePhone(input.phone || input.q);
+    const take = Math.min(Math.max(Number(input.limit || 20), 1), 50);
+
+    if (!rawKeyword && !normalizedPhone) return [];
+
+    const orConditions: any[] = [];
+
+    if (normalizedPhone) {
+      orConditions.push({ phone: { contains: normalizedPhone } });
+    }
+
+    if (rawKeyword) {
+      orConditions.push({ fullName: { contains: rawKeyword, mode: "insensitive" } });
+      orConditions.push({ email: { contains: rawKeyword, mode: "insensitive" } });
+    }
+
+    const rows = await this.prisma.customer.findMany({
+      where: { OR: orConditions },
+      orderBy: { updatedAt: "desc" },
+      take,
+      select: {
+        id: true,
+        legacyCode: true,
+        fullName: true,
+        phone: true,
+        email: true,
+        defaultDiscountPercent: true,
+        pricePolicyName: true,
+        customerNote: true,
+        addresses: {
+          orderBy: [{ isDefault: "desc" }, { updatedAt: "desc" }],
+          take: 3,
+          select: {
+            id: true,
+            label: true,
+            recipientName: true,
+            phone: true,
+            email: true,
+            addressLine1: true,
+            addressLine2: true,
+            ward: true,
+            district: true,
+            city: true,
+            province: true,
+            country: true,
+            postalCode: true,
+            isDefault: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        },
+      },
+    });
+
+    return rows.map((item: any) => ({
+      id: item.id,
+      legacyCode: item.legacyCode,
+      fullName: item.fullName,
+      phone: item.phone,
+      email: item.email,
+      defaultDiscountPercent:
+        item.defaultDiscountPercent !== null &&
+        item.defaultDiscountPercent !== undefined
+          ? Number(item.defaultDiscountPercent)
+          : null,
+      pricePolicyName: item.pricePolicyName,
+      customerNote: item.customerNote,
+      addresses: Array.isArray(item.addresses)
+        ? item.addresses.map((address: any) => this.serializeAddress(address))
+        : [],
+    }));
+  }
+
   async findAll() {
     const rows = await this.prisma.customer.findMany({
       orderBy: { updatedAt: "desc" },

@@ -19,8 +19,16 @@ export class CustomerController {
   }
 
   @Get("search")
-  search(@Query("phone") phone: string) {
-    return this.customerService.findByPhone(phone);
+  search(
+    @Query("q") q?: string,
+    @Query("phone") phone?: string,
+    @Query("limit") limit?: string,
+  ) {
+    return this.customerService.searchCustomersLite({
+      q,
+      phone,
+      limit: Number(limit || 20),
+    });
   }
 
   @Get(":id")
