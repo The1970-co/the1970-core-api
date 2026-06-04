@@ -650,12 +650,76 @@ export class ProductService {
     return clean || fallback;
   }
 
+  private mapProductListProduct(product: any) {
+    const variants = Array.isArray(product?.variants) ? product.variants : [];
+
+    const colorImages = this.buildColorImagesFromVariants(variants as any);
+
+    return {
+      id: product.id,
+      name: product.name,
+      slug: product.slug,
+      categoryId: product.categoryId || null,
+      category: product.categoryRel?.name || product.category,
+      brand: product.brand || null,
+      weight: product.weight || 0,
+      imageUrl: product.imageUrl || null,
+      description: product.description || null,
+      defaultPrice: Number(variants[0]?.price || 0),
+      defaultCostPrice: Number(variants[0]?.costPrice || 0),
+      status: product.status,
+      createdAt: product.createdAt,
+      updatedAt: product.updatedAt,
+      colorImages,
+      imagesByColor: colorImages,
+      variants: variants.map((variant: any) => {
+        const inventoryItems = Array.isArray(variant.inventoryItems)
+          ? variant.inventoryItems
+          : [];
+        const inventoryByBranch = this.buildInventoryByBranch(
+          inventoryItems.map((item: any) => ({
+            branchId: item.branchId,
+            availableQty: Number(item.availableQty || 0),
+            reservedQty: Number(item.reservedQty || 0),
+            incomingQty: Number(item.incomingQty || 0),
+          })),
+        );
+
+        const stock = inventoryItems.reduce(
+          (sum: number, item: any) => sum + Number(item.availableQty || 0),
+          0,
+        );
+
+        const price = Number(variant.price || 0);
+        const costPrice = Number(variant.costPrice || 0);
+
+        return {
+          id: variant.id,
+          productId: variant.productId,
+          sku: variant.sku,
+          color: variant.color,
+          size: variant.size,
+          price,
+          costPrice,
+          status: variant.status,
+          imageUrl: variant.imageUrl || null,
+          createdAt: variant.createdAt,
+          stock,
+          inventoryByBranch,
+          inventorySaleValue: price * stock,
+          inventoryCostValue: costPrice * stock,
+        };
+      }),
+    };
+  }
+
   async getProducts(params?: {
     page?: number;
     limit?: number;
     q?: string;
     category?: string;
     status?: string;
+    branchId?: string;
   }) {
     const page = Math.max(1, Number(params?.page || 1));
     const limit = Math.min(1000, Math.max(20, Number(params?.limit || 20)));
@@ -718,10 +782,41 @@ export class ProductService {
         skip,
         take: limit,
         orderBy: { createdAt: "desc" },
-        include: {
-          categoryRel: true,
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          category: true,
+          categoryId: true,
+          brand: true,
+          weight: true,
+          imageUrl: true,
+          description: true,
+          status: true,
+          createdAt: true,
+          updatedAt: true,
+          categoryRel: { select: { id: true, name: true } },
           variants: {
-            include: { inventoryItems: true },
+            select: {
+              id: true,
+              productId: true,
+              sku: true,
+              color: true,
+              size: true,
+              price: true,
+              costPrice: true,
+              status: true,
+              imageUrl: true,
+              createdAt: true,
+              inventoryItems: {
+                select: {
+                  branchId: true,
+                  availableQty: true,
+                  reservedQty: true,
+                  incomingQty: true,
+                },
+              },
+            },
             orderBy: { createdAt: "asc" },
           },
         },
@@ -730,47 +825,13 @@ export class ProductService {
     ]);
 
     return {
-      data: products.map((product) => ({
-        ...product,
-        category: product.categoryRel?.name || product.category,
-        colorImages: this.buildColorImagesFromVariants(product.variants as any),
-        imagesByColor: this.buildColorImagesFromVariants(
-          product.variants as any,
-        ),
-        variants: product.variants.map((variant) => {
-          const inventoryByBranch = this.buildInventoryByBranch(
-            variant.inventoryItems.map((item) => ({
-              branchId: item.branchId,
-              availableQty: Number(item.availableQty || 0),
-              reservedQty: Number(item.reservedQty || 0),
-              incomingQty: Number(item.incomingQty || 0),
-            })),
-          );
-
-          const stock = variant.inventoryItems.reduce(
-            (sum, item) => sum + Number(item.availableQty || 0),
-            0,
-          );
-
-          const price = Number(variant.price || 0);
-          const costPrice = Number(variant.costPrice || 0);
-
-          return {
-            ...variant,
-            price,
-            costPrice,
-            stock,
-            inventoryByBranch,
-            inventorySaleValue: price * stock,
-            inventoryCostValue: costPrice * stock,
-          };
-        }),
-      })),
+      data: products.map((product) => this.mapProductListProduct(product)),
       total,
       page,
       limit,
     };
   }
+
 
   async getProductById(id: string) {
     const product = await this.prisma.product.findUnique({

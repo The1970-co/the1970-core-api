@@ -34,6 +34,7 @@ export class ProductController {
     @Query("q") q?: string,
     @Query("category") category?: string,
     @Query("status") status?: string,
+    @Query("branchId") branchId?: string,
   ) {
     return this.productService.getProducts({
       page: Number(page || 1),
@@ -41,6 +42,7 @@ export class ProductController {
       q,
       category,
       status,
+      branchId,
     });
   }
 
