@@ -41,6 +41,7 @@ type GetOrdersParams = {
    * Có thể truyền nhiều giá trị dạng comma-separated.
    */
   codReconciliationStatus?: string;
+  quickStatus?: string;
 };
 
 @Injectable()
@@ -2551,25 +2552,9 @@ export class OrderService implements OnModuleInit {
     };
   }
 
-  async getOrders(params: GetOrdersParams = {}, user?: any) {
-    const {
-      page = 1,
-      pageSize = 50,
-      q = "",
-      branchId = "",
-      orderStatus = "",
-      paymentStatus = "",
-      dateFrom = "",
-      dateTo = "",
-      codReconciliationStatus = "",
-    } = params;
-
-    const safePage = Math.max(Number(page || 1), 1);
-    const safePageSize = Math.min(Math.max(Number(pageSize || 50), 1), 100);
-    const skip = (safePage - 1) * safePageSize;
-    const keyword = this.normalizeOrderKeyword(q);
-
+  private buildOrderBaseWhereForList(params: Pick<GetOrdersParams, "branchId" | "orderStatus" | "paymentStatus" | "dateFrom" | "dateTo">) {
     const baseWhere: Prisma.OrderWhereInput = {};
+    const { branchId = "", orderStatus = "", paymentStatus = "", dateFrom = "", dateTo = "" } = params;
 
     if (branchId && branchId !== "ALL") {
       baseWhere.branchId = branchId;
@@ -2586,16 +2571,190 @@ export class OrderService implements OnModuleInit {
     if (dateFrom || dateTo) {
       baseWhere.createdAt = {};
       if (dateFrom) {
-        (baseWhere.createdAt as Prisma.DateTimeFilter).gte = new Date(
-          `${dateFrom}T00:00:00.000Z`
-        );
+        (baseWhere.createdAt as Prisma.DateTimeFilter).gte = new Date(`${dateFrom}T00:00:00.000Z`);
       }
       if (dateTo) {
-        (baseWhere.createdAt as Prisma.DateTimeFilter).lte = new Date(
-          `${dateTo}T23:59:59.999Z`
-        );
+        (baseWhere.createdAt as Prisma.DateTimeFilter).lte = new Date(`${dateTo}T23:59:59.999Z`);
       }
     }
+
+    return baseWhere;
+  }
+
+  private shipmentStatusTextWhere(words: string[]): Prisma.OrderWhereInput {
+    return {
+      shipment: {
+        is: {
+          OR: words.flatMap((word) => [
+            { shippingStatus: { contains: word, mode: "insensitive" } },
+            { partnerStatus: { contains: word, mode: "insensitive" } },
+            { note: { contains: word, mode: "insensitive" } },
+          ]),
+        },
+      },
+    };
+  }
+
+  private buildQuickStatusWhere(quickStatus?: string | null): Prisma.OrderWhereInput | null {
+    const status = String(quickStatus || "").trim().toUpperCase();
+    if (!status || status === "ALL") return null;
+
+    const forwardWords = [
+      "CREATED",
+      "READY_TO_PICK",
+      "WAITING_TO_PICK",
+      "PICKING",
+      "PICKED",
+      "STORING",
+      "SORTING",
+      "TRANSPORT",
+      "IN_TRANSIT",
+      "DELIVERING",
+      "READY_TO_DELIVER",
+      "WAITING_TO_DELIVER",
+      "IN_PROCESS",
+    ];
+
+    if (status === "WAITING_APPROVE") return { status: OrderStatus.NEW };
+    if (status === "WAITING_PAYMENT") {
+      return { paymentStatus: { in: [PaymentStatus.UNPAID, PaymentStatus.PARTIAL, PaymentStatus.PENDING_COD] } };
+    }
+    if (status === "WAITING_PACKING") return { status: OrderStatus.PACKING };
+    if (status === "WAITING_SHIP") return { status: { in: [OrderStatus.APPROVED, OrderStatus.PACKING] } };
+    if (status === "DELIVERING") {
+      return {
+        OR: [
+          { status: OrderStatus.SHIPPED },
+          this.shipmentStatusTextWhere(forwardWords),
+        ],
+      };
+    }
+    if (status === "SOON_DELIVERY") {
+      return this.shipmentStatusTextWhere(["DELIVERING", "READY_TO_DELIVER", "WAITING_TO_DELIVER", "DANG GIAO", "DANG PHAT"]);
+    }
+    if (status === "FAIL") {
+      return {
+        AND: [
+          { status: { not: OrderStatus.CANCELLED } },
+          {
+            OR: [
+              { paymentStatus: PaymentStatus.FAILED },
+              this.shipmentStatusTextWhere(["FAIL", "FAILED", "EXCEPTION", "LOST", "DAMAGE", "KHONG THANH CONG", "THAT BAI"]),
+            ],
+          },
+        ],
+      };
+    }
+    if (status === "REDELIVERY") {
+      return {
+        AND: [
+          { status: { not: OrderStatus.CANCELLED } },
+          {
+            OR: [
+              this.shipmentStatusTextWhere(["REDELIVERY", "GIAO LAI", "FAIL", "RETURN", "WAITING_TO_RETURN"]),
+              { note: { contains: "giao lại", mode: "insensitive" } },
+              { note: { contains: "redelivery", mode: "insensitive" } },
+            ],
+          },
+        ],
+      };
+    }
+    if (status === "LOCAL_DELIVERY") {
+      return {
+        shipment: {
+          is: {
+            OR: ["AHAMOVE", "GRAB", "SHIPPER", "INTERNAL"].map((carrier) => ({
+              carrier: { contains: carrier, mode: "insensitive" },
+            })),
+          },
+        },
+      };
+    }
+
+    return null;
+  }
+
+  async getQuickStatusCounts(
+    params: Pick<GetOrdersParams, "branchId" | "dateFrom" | "dateTo"> = {},
+    user?: any,
+  ) {
+    const baseWhere = this.buildOrderBaseWhereForList({
+      branchId: params.branchId || "",
+      dateFrom: params.dateFrom || "",
+      dateTo: params.dateTo || "",
+    });
+
+    const scopedBaseWhere = this.buildOrderWhereByUser(user, baseWhere);
+
+    const countFor = async (quickStatus: string) => {
+      const quickWhere = this.buildQuickStatusWhere(quickStatus);
+      const where = quickWhere
+        ? ({ AND: [scopedBaseWhere, quickWhere] } as Prisma.OrderWhereInput)
+        : scopedBaseWhere;
+      return this.prisma.order.count({ where });
+    };
+
+    const [
+      waitingApprove,
+      waitingPayment,
+      waitingPacking,
+      waitingShip,
+      delivering,
+      soonDelivery,
+      failed,
+      redelivery,
+      localDelivery,
+    ] = await Promise.all([
+      countFor("WAITING_APPROVE"),
+      countFor("WAITING_PAYMENT"),
+      countFor("WAITING_PACKING"),
+      countFor("WAITING_SHIP"),
+      countFor("DELIVERING"),
+      countFor("SOON_DELIVERY"),
+      countFor("FAIL"),
+      countFor("REDELIVERY"),
+      countFor("LOCAL_DELIVERY"),
+    ]);
+
+    return {
+      waitingApprove,
+      waitingPayment,
+      waitingPacking,
+      waitingShip,
+      delivering,
+      soonDelivery,
+      failed,
+      redelivery,
+      localDelivery,
+    };
+  }
+
+  async getOrders(params: GetOrdersParams = {}, user?: any) {
+    const {
+      page = 1,
+      pageSize = 50,
+      q = "",
+      branchId = "",
+      orderStatus = "",
+      paymentStatus = "",
+      dateFrom = "",
+      dateTo = "",
+      codReconciliationStatus = "",
+      quickStatus = "",
+    } = params;
+
+    const safePage = Math.max(Number(page || 1), 1);
+    const safePageSize = Math.min(Math.max(Number(pageSize || 50), 1), 100);
+    const skip = (safePage - 1) * safePageSize;
+    const keyword = this.normalizeOrderKeyword(q);
+
+    const baseWhere = this.buildOrderBaseWhereForList({
+      branchId,
+      orderStatus,
+      paymentStatus,
+      dateFrom,
+      dateTo,
+    });
 
     const codReconciliationOrderIds = await this.findOrderIdsByCodReconciliationFilter(
       codReconciliationStatus,
@@ -2627,11 +2786,14 @@ export class OrderService implements OnModuleInit {
       }
     }
 
+    const quickStatusWhere = this.buildQuickStatusWhere(quickStatus);
+    const filterParts = [baseWhere, searchWhere, quickStatusWhere].filter(Boolean) as Prisma.OrderWhereInput[];
+
     const scopedWhere = this.buildOrderWhereByUser(
       user,
-      searchWhere
-        ? ({ AND: [baseWhere, searchWhere] } as Prisma.OrderWhereInput)
-        : baseWhere,
+      filterParts.length > 1
+        ? ({ AND: filterParts } as Prisma.OrderWhereInput)
+        : filterParts[0] || {},
     );
 
     const [orders, total] = await Promise.all([

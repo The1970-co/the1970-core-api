@@ -100,7 +100,8 @@ export class OrderController {
     @Query("dateTo") dateTo?: string,
     @Query("codReconciliationStatus") codReconciliationStatus?: string,
     @Query("codReconciliation") codReconciliation?: string,
-    @Query("codReconciliationFilter") codReconciliationFilter?: string
+    @Query("codReconciliationFilter") codReconciliationFilter?: string,
+    @Query("quickStatus") quickStatus?: string
   ) {
     return this.orderService.getOrders(
       {
@@ -117,6 +118,24 @@ export class OrderController {
           codReconciliation ||
           codReconciliationFilter ||
           "",
+        quickStatus: quickStatus || "",
+      },
+      req.user
+    );
+  }
+
+  @Get("quick-status-counts")
+  async getQuickStatusCounts(
+    @Req() req: Request & { user?: any },
+    @Query("branchId") branchId?: string,
+    @Query("dateFrom") dateFrom?: string,
+    @Query("dateTo") dateTo?: string
+  ) {
+    return this.orderService.getQuickStatusCounts(
+      {
+        branchId: branchId || "",
+        dateFrom: dateFrom || "",
+        dateTo: dateTo || "",
       },
       req.user
     );
