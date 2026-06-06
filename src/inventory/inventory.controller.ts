@@ -62,8 +62,9 @@ export class InventoryController {
   async getInventory(
     @Req() req: Request & { user?: any },
     @Query("branchId") branchId?: string,
+    @Query("productId") productId?: string,
   ) {
-    return this.inventoryService.getInventory(req.user, branchId);
+    return this.inventoryService.getInventory(req.user, branchId, productId);
   }
 
   @Post("adjust")

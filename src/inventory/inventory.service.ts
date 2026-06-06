@@ -225,8 +225,9 @@ export class InventoryService {
     return rows;
   }
 
-  async getInventory(user?: any, branchId?: string) {
+  async getInventory(user?: any, branchId?: string, productId?: string) {
     const requestedBranchId = branchId?.trim() || null;
+    const requestedProductId = productId?.trim() || null;
 
     if (requestedBranchId) {
       this.ensureBranchAccess(user, requestedBranchId);
@@ -236,12 +237,41 @@ export class InventoryService {
       ? requestedBranchId
       : this.resolveBranchIdFromUser(user);
 
+    const where: Prisma.InventoryItemWhereInput = {
+      ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+      ...(requestedProductId
+        ? {
+            variant: {
+              productId: requestedProductId,
+            },
+          }
+        : {}),
+    };
+
     const rows = await this.prisma.inventoryItem.findMany({
-      where: effectiveBranchId ? { branchId: effectiveBranchId } : {},
-      include: {
+      where,
+      select: {
+        id: true,
+        branchId: true,
+        availableQty: true,
+        reservedQty: true,
+        incomingQty: true,
+        updatedAt: true,
+        variantId: true,
         variant: {
-          include: {
-            product: true,
+          select: {
+            sku: true,
+            color: true,
+            size: true,
+            price: true,
+            costPrice: true,
+            product: {
+              select: {
+                name: true,
+                slug: true,
+                category: true,
+              },
+            },
           },
         },
       },
