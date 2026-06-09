@@ -728,6 +728,14 @@ export class ProductService {
     const skip = (page - 1) * limit;
 
     const q = String(params?.q || "").trim();
+    const searchTokens = Array.from(
+      new Set(
+        q
+          .split(/[;,\uFF0C\n]+/)
+          .map((item) => item.trim())
+          .filter(Boolean),
+      ),
+    ).slice(0, 30);
     const category = String(params?.category || "ALL").trim();
     const status = String(params?.status || "ALL").trim();
     const sortBy = String(params?.sortBy || "").trim();
@@ -740,18 +748,18 @@ export class ProductService {
       ...(status === "ALL"
         ? { status: { not: ProductStatus.INACTIVE } }
         : { status: status as ProductStatus }),
-      ...(q
+      ...(searchTokens.length
         ? {
-            OR: [
-              { name: { contains: q, mode: "insensitive" } },
-              { slug: { contains: q, mode: "insensitive" } },
-              { category: { contains: q, mode: "insensitive" } },
+            OR: searchTokens.flatMap((token) => [
+              { name: { contains: token, mode: "insensitive" } },
+              { slug: { contains: token, mode: "insensitive" } },
+              { category: { contains: token, mode: "insensitive" } },
               {
                 variants: {
-                  some: { sku: { contains: q, mode: "insensitive" } },
+                  some: { sku: { contains: token, mode: "insensitive" } },
                 },
               },
-            ],
+            ]),
           }
         : {}),
     };
