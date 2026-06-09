@@ -145,6 +145,29 @@ export class RbacSnapshotsService {
     });
   }
 
+
+  async deleteSnapshot(id: string) {
+    const snapshot = await this.prisma.rbacSnapshot.findUnique({
+      where: { id },
+      select: { id: true, name: true },
+    });
+
+    if (!snapshot) {
+      throw new NotFoundException("Không tìm thấy bản đóng băng phân quyền.");
+    }
+
+    await this.prisma.rbacSnapshot.delete({
+      where: { id },
+    });
+
+    return {
+      success: true,
+      message: "Đã xoá snapshot rollback.",
+      snapshotId: snapshot.id,
+      name: snapshot.name,
+    };
+  }
+
   async restoreSnapshot(id: string, user?: any) {
     const snapshot = await this.prisma.rbacSnapshot.findUnique({ where: { id } });
 

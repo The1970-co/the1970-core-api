@@ -35,6 +35,8 @@ export class ProductController {
     @Query("category") category?: string,
     @Query("status") status?: string,
     @Query("branchId") branchId?: string,
+    @Query("sortBy") sortBy?: string,
+    @Query("sortOrder") sortOrder?: string,
   ) {
     return this.productService.getProducts({
       page: Number(page || 1),
@@ -43,6 +45,8 @@ export class ProductController {
       category,
       status,
       branchId,
+      sortBy,
+      sortOrder,
     });
   }
 

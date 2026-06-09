@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Post,
@@ -37,6 +38,14 @@ export class RbacSnapshotsController {
     @Req() req: Request & { user?: any },
   ) {
     return this.service.createSnapshot(body, req.user);
+  }
+
+
+
+  @Delete(":id")
+  @RequirePermissions("permissions.manage")
+  remove(@Param("id") id: string) {
+    return this.service.deleteSnapshot(id);
   }
 
   @Post(":id/restore")

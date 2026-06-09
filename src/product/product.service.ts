@@ -720,6 +720,8 @@ export class ProductService {
     category?: string;
     status?: string;
     branchId?: string;
+    sortBy?: string;
+    sortOrder?: string;
   }) {
     const page = Math.max(1, Number(params?.page || 1));
     const limit = Math.min(1000, Math.max(20, Number(params?.limit || 20)));
@@ -728,6 +730,11 @@ export class ProductService {
     const q = String(params?.q || "").trim();
     const category = String(params?.category || "ALL").trim();
     const status = String(params?.status || "ALL").trim();
+    const sortBy = String(params?.sortBy || "").trim();
+    const sortOrder =
+      String(params?.sortOrder || "desc").toLowerCase() === "asc"
+        ? "asc"
+        : "desc";
 
     const where: Prisma.ProductWhereInput = {
       ...(status === "ALL"
@@ -776,50 +783,150 @@ export class ProductService {
       where.category = { in: matchedCategories };
     }
 
+    const productListSelect = {
+      id: true,
+      name: true,
+      slug: true,
+      category: true,
+      categoryId: true,
+      brand: true,
+      weight: true,
+      imageUrl: true,
+      description: true,
+      status: true,
+      createdAt: true,
+      updatedAt: true,
+      categoryRel: { select: { id: true, name: true } },
+      variants: {
+        select: {
+          id: true,
+          productId: true,
+          sku: true,
+          color: true,
+          size: true,
+          price: true,
+          costPrice: true,
+          status: true,
+          imageUrl: true,
+          createdAt: true,
+          inventoryItems: {
+            select: {
+              branchId: true,
+              availableQty: true,
+              reservedQty: true,
+              incomingQty: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "asc" as const },
+      },
+    };
+
+    const normalizedSortBy = sortBy.toLowerCase();
+    const isStockSort = [
+      "stock",
+      "stocktotal",
+      "totalstock",
+      "inventory",
+      "inventorytotal",
+    ].includes(normalizedSortBy);
+
+    if (isStockSort) {
+      // Sort theo tồn phải làm ở backend trước khi phân trang.
+      // Không fetch toàn bộ sản phẩm về frontend, nên không làm tăng egress khi mở trang.
+      const matchedProducts = await this.prisma.product.findMany({
+        where,
+        select: { id: true, createdAt: true },
+        orderBy: { createdAt: "desc" },
+      });
+
+      const total = matchedProducts.length;
+      if (!total) {
+        return { data: [], total: 0, page, limit };
+      }
+
+      const matchedProductIds = matchedProducts.map((product) => product.id);
+
+      const variants = await this.prisma.productVariant.findMany({
+        where: { productId: { in: matchedProductIds } },
+        select: { id: true, productId: true },
+      });
+
+      const variantToProductId = new Map(
+        variants.map((variant) => [variant.id, variant.productId]),
+      );
+      const stockByProductId = new Map<string, number>();
+
+      matchedProductIds.forEach((productId) => stockByProductId.set(productId, 0));
+
+      const variantIds = variants.map((variant) => variant.id);
+      if (variantIds.length > 0) {
+        const stockGroups = await this.prisma.inventoryItem.groupBy({
+          by: ["variantId"],
+          where: { variantId: { in: variantIds } },
+          _sum: { availableQty: true },
+        });
+
+        stockGroups.forEach((group) => {
+          const productId = variantToProductId.get(group.variantId);
+          if (!productId) return;
+
+          const current = stockByProductId.get(productId) || 0;
+          stockByProductId.set(
+            productId,
+            current + Number(group._sum.availableQty || 0),
+          );
+        });
+      }
+
+      const createdAtByProductId = new Map(
+        matchedProducts.map((product) => [
+          product.id,
+          new Date(product.createdAt).getTime(),
+        ]),
+      );
+
+      const sortedProductIds = [...matchedProductIds].sort((a, b) => {
+        const stockA = stockByProductId.get(a) || 0;
+        const stockB = stockByProductId.get(b) || 0;
+        const stockDiff = sortOrder === "asc" ? stockA - stockB : stockB - stockA;
+
+        if (stockDiff !== 0) return stockDiff;
+
+        // Nếu tồn bằng nhau, giữ sản phẩm mới hơn lên trước giống sort mặc định.
+        return (
+          (createdAtByProductId.get(b) || 0) -
+          (createdAtByProductId.get(a) || 0)
+        );
+      });
+
+      const pageProductIds = sortedProductIds.slice(skip, skip + limit);
+
+      const products = await this.prisma.product.findMany({
+        where: { id: { in: pageProductIds } },
+        select: productListSelect,
+      });
+
+      const productMap = new Map(products.map((product) => [product.id, product]));
+
+      return {
+        data: pageProductIds
+          .map((id) => productMap.get(id))
+          .filter(Boolean)
+          .map((product) => this.mapProductListProduct(product)),
+        total,
+        page,
+        limit,
+      };
+    }
+
     const [products, total] = await Promise.all([
       this.prisma.product.findMany({
         where,
         skip,
         take: limit,
         orderBy: { createdAt: "desc" },
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-          category: true,
-          categoryId: true,
-          brand: true,
-          weight: true,
-          imageUrl: true,
-          description: true,
-          status: true,
-          createdAt: true,
-          updatedAt: true,
-          categoryRel: { select: { id: true, name: true } },
-          variants: {
-            select: {
-              id: true,
-              productId: true,
-              sku: true,
-              color: true,
-              size: true,
-              price: true,
-              costPrice: true,
-              status: true,
-              imageUrl: true,
-              createdAt: true,
-              inventoryItems: {
-                select: {
-                  branchId: true,
-                  availableQty: true,
-                  reservedQty: true,
-                  incomingQty: true,
-                },
-              },
-            },
-            orderBy: { createdAt: "asc" },
-          },
-        },
+        select: productListSelect,
       }),
       this.prisma.product.count({ where }),
     ]);
@@ -831,7 +938,6 @@ export class ProductService {
       limit,
     };
   }
-
 
   async getProductById(id: string) {
     const product = await this.prisma.product.findUnique({
