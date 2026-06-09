@@ -90,6 +90,13 @@ export const PERMISSIONS = {
   PROMOTIONS_PAUSE: "promotions.pause",
   PROMOTIONS_CANCEL: "promotions.cancel",
   PROMOTIONS_DELETE: "promotions.delete",
+  PROMOTIONS_PRICE_POLICY_NONE: "promotions.price_policy.none",
+  PROMOTIONS_PRICE_POLICY_ONLINE_DISCOUNT_ONLY: "promotions.price_policy.online_discount_only",
+  PROMOTIONS_PRICE_POLICY_ONLINE_DISCOUNT_PRICE: "promotions.price_policy.online_discount_price",
+  PROMOTIONS_PRICE_POLICY_POS_DISCOUNT_ONLY: "promotions.price_policy.pos_discount_only",
+  PROMOTIONS_PRICE_POLICY_POS_DISCOUNT_PRICE: "promotions.price_policy.pos_discount_price",
+  PROMOTIONS_PRICE_POLICY_ALL_CHANNELS_DISCOUNT_ONLY: "promotions.price_policy.all_channels_discount_only",
+  PROMOTIONS_PRICE_POLICY_ALL_CHANNELS_DISCOUNT_PRICE: "promotions.price_policy.all_channels_discount_price",
 
   FINANCE_VIEW: "finance.view",
   FINANCE_LOCAL_DELIVERY_VIEW: "finance.local_delivery.view",
