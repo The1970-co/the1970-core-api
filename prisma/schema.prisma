@@ -2434,3 +2434,10 @@ model LocalDeliveryReconciliation {
   @@index([orderId, status, createdAt], map: "LocalDeliveryReconciliation_order_status_idx")
   @@index([shipmentId, status, createdAt], map: "LocalDeliveryReconciliation_shipment_status_idx")
 }
+model SystemSetting {
+  key       String   @id
+  value     Json
+  note      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

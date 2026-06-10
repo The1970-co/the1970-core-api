@@ -8,6 +8,22 @@ import { CreateGhnShipmentDto } from "./dto/create-ghn-shipment.dto";
 import { TrackShipmentDto } from "./dto/track-shipment.dto";
 import { AuthTotpService } from "../auth-totp/auth-totp.service";
 
+const SHIPMENT_PICKUP_LOCATION_SETTINGS_KEY = "SHIPMENT_PICKUP_LOCATION_SETTINGS";
+
+type AhamovePaymentMethod = "BALANCE" | "CASH" | "CASH_BY_RECIPIENT";
+
+type CarrierPickupMappingValue = {
+  ghn?: string;
+  viettelpost?: string;
+  ahamove?: string;
+};
+
+type PickupLocationSettingsValue = {
+  carrierPickupMapping: Record<string, CarrierPickupMappingValue>;
+  customAhamovePickups: any[];
+  ahamovePaymentMethod: AhamovePaymentMethod;
+};
+
 @Injectable()
 export class ShipmentService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ShipmentService.name);
@@ -3902,6 +3918,205 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  private normalizeAhamovePaymentMethod(value?: string | null): AhamovePaymentMethod {
+    const normalized = String(value || "").trim().toUpperCase();
+    if (
+      normalized === "CASH" ||
+      normalized === "CASH_BY_RECIPIENT" ||
+      normalized === "BALANCE"
+    ) {
+      return normalized as AhamovePaymentMethod;
+    }
+    return "BALANCE";
+  }
+
+  private getDefaultPickupLocationSettings(): PickupLocationSettingsValue {
+    return {
+      carrierPickupMapping: {},
+      customAhamovePickups: [],
+      ahamovePaymentMethod: this.normalizeAhamovePaymentMethod(
+        process.env.AHAMOVE_PAYMENT_METHOD || "BALANCE"
+      ),
+    };
+  }
+
+  private normalizeCarrierPickupMapping(input: any): Record<string, CarrierPickupMappingValue> {
+    if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+
+    const output: Record<string, CarrierPickupMappingValue> = {};
+
+    for (const [warehouseIdRaw, valueRaw] of Object.entries(input)) {
+      const warehouseId = String(warehouseIdRaw || "").trim();
+      if (!warehouseId || !valueRaw || typeof valueRaw !== "object" || Array.isArray(valueRaw)) continue;
+
+      const row = valueRaw as any;
+      const next: CarrierPickupMappingValue = {};
+
+      const ghn = String(row.ghn || "").trim();
+      const viettelpost = String(row.viettelpost || "").trim();
+      const ahamove = String(row.ahamove || "").trim();
+
+      if (ghn) next.ghn = ghn;
+      if (viettelpost) next.viettelpost = viettelpost;
+      if (ahamove) next.ahamove = ahamove;
+
+      output[warehouseId] = next;
+    }
+
+    return output;
+  }
+
+  private normalizeCustomAhamovePickups(input: any): any[] {
+    if (!Array.isArray(input)) return [];
+
+    return input
+      .map((item: any, index: number) => {
+        const id = String(item?.id || `ahamove-custom-${index}`).trim();
+        const name = String(item?.name || item?.label || "").trim();
+        const phone = String(item?.phone || "").trim();
+        const address = String(item?.address || "").trim();
+        const note = String(item?.note || "").trim();
+
+        if (!name && !phone && !address) return null;
+
+        return {
+          id,
+          carrier: "ahamove",
+          label: String(item?.label || name || address || id).trim(),
+          name: name || address || "Điểm lấy hàng AhaMove",
+          phone,
+          address,
+          note,
+          isCustom: true,
+        };
+      })
+      .filter(Boolean);
+  }
+
+  private normalizePickupLocationSettings(input: any): PickupLocationSettingsValue {
+    const defaults = this.getDefaultPickupLocationSettings();
+    const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+
+    return {
+      carrierPickupMapping: this.normalizeCarrierPickupMapping(source.carrierPickupMapping),
+      customAhamovePickups: this.normalizeCustomAhamovePickups(source.customAhamovePickups),
+      ahamovePaymentMethod: this.normalizeAhamovePaymentMethod(
+        source.ahamovePaymentMethod || defaults.ahamovePaymentMethod
+      ),
+    };
+  }
+
+  private async getPickupLocationSettingsValue(): Promise<PickupLocationSettingsValue> {
+    const settingClient = (this.prisma as any).systemSetting;
+    if (!settingClient) return this.getDefaultPickupLocationSettings();
+
+    const row = await settingClient.findUnique({
+      where: { key: SHIPMENT_PICKUP_LOCATION_SETTINGS_KEY },
+    });
+
+    return this.normalizePickupLocationSettings(row?.value || null);
+  }
+
+  async getPickupLocationSettings() {
+    const settingClient = (this.prisma as any).systemSetting;
+    const row = settingClient
+      ? await settingClient.findUnique({
+          where: { key: SHIPMENT_PICKUP_LOCATION_SETTINGS_KEY },
+        })
+      : null;
+
+    return {
+      ...this.normalizePickupLocationSettings(row?.value || null),
+      key: SHIPMENT_PICKUP_LOCATION_SETTINGS_KEY,
+      source: row ? "database" : "default",
+      updatedAt: row?.updatedAt || null,
+    };
+  }
+
+  async savePickupLocationSettings(body: any) {
+    const settingClient = (this.prisma as any).systemSetting;
+    if (!settingClient) {
+      throw new BadRequestException(
+        "Thiếu model SystemSetting trong Prisma. Hãy migrate schema.prisma trước khi lưu cấu hình kho lấy hàng."
+      );
+    }
+
+    const value = this.normalizePickupLocationSettings(body);
+
+    const row = await settingClient.upsert({
+      where: { key: SHIPMENT_PICKUP_LOCATION_SETTINGS_KEY },
+      create: {
+        key: SHIPMENT_PICKUP_LOCATION_SETTINGS_KEY,
+        value,
+        note: "Cấu hình map kho lấy hàng theo chi nhánh cho GHN/ViettelPost/AhaMove.",
+      },
+      update: {
+        value,
+        note: "Cấu hình map kho lấy hàng theo chi nhánh cho GHN/ViettelPost/AhaMove.",
+      },
+    });
+
+    return {
+      ...this.normalizePickupLocationSettings(row.value),
+      key: SHIPMENT_PICKUP_LOCATION_SETTINGS_KEY,
+      source: "database",
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  private getAhamovePickupFromSettings(
+    settings: PickupLocationSettingsValue,
+    branchId?: string | null,
+  ) {
+    const safeBranchId = String(branchId || "").trim();
+    if (!safeBranchId) return null;
+
+    const pickupId = String(settings.carrierPickupMapping?.[safeBranchId]?.ahamove || "").trim();
+    if (!pickupId) return null;
+
+    return settings.customAhamovePickups.find(
+      (item: any) => String(item?.id || "") === pickupId,
+    ) || null;
+  }
+
+  private async getAhamoveSenderConfig(input: any = {}) {
+    const settings = await this.getPickupLocationSettingsValue().catch(() => this.getDefaultPickupLocationSettings());
+    const branchId =
+      input?.branchId ||
+      input?.warehouseId ||
+      input?.fromWarehouseId ||
+      input?.sourceWarehouseId ||
+      null;
+    const mappedPickup = this.getAhamovePickupFromSettings(settings, branchId);
+
+    return {
+      fromName:
+        input?.fromName ||
+        mappedPickup?.name ||
+        mappedPickup?.label ||
+        process.env.AHAMOVE_FROM_NAME ||
+        this.returnName,
+      fromPhone:
+        input?.fromPhone ||
+        mappedPickup?.phone ||
+        process.env.AHAMOVE_FROM_PHONE ||
+        this.returnPhone,
+      fromAddress:
+        input?.fromAddress ||
+        mappedPickup?.address ||
+        process.env.AHAMOVE_FROM_ADDRESS ||
+        this.returnAddress,
+      paymentMethod: this.normalizeAhamovePaymentMethod(
+        input?.payment_method ||
+          input?.paymentMethod ||
+          settings.ahamovePaymentMethod ||
+          process.env.AHAMOVE_PAYMENT_METHOD ||
+          "BALANCE",
+      ),
+      pickupLocationId: mappedPickup?.id || null,
+    };
+  }
+
   async getPickupLocations() {
     const locations: any[] = [];
 
@@ -3939,6 +4154,24 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         phone: ahamovePhone,
         address: ahamoveAddress,
       });
+    }
+
+    try {
+      const settings = await this.getPickupLocationSettingsValue();
+      for (const item of settings.customAhamovePickups) {
+        locations.push({
+          ...item,
+          id: String(item.id),
+          carrier: "ahamove",
+          isCustom: true,
+        });
+      }
+    } catch (error) {
+      this.logger.warn(
+        `[PICKUP_LOCATIONS] Không tải được cấu hình AhaMove trong DB: ${
+          error instanceof Error ? error.message : error
+        }`,
+      );
     }
 
     try {
@@ -4838,13 +5071,10 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
   }
 
   async quoteAhamove(body: any) {
-    const fromName = body?.fromName || process.env.AHAMOVE_FROM_NAME || this.returnName;
-    const fromPhone =
-      body?.fromPhone || process.env.AHAMOVE_FROM_PHONE || this.returnPhone;
-    const fromAddress =
-      body?.fromAddress ||
-      process.env.AHAMOVE_FROM_ADDRESS ||
-      this.returnAddress;
+    const ahamoveSender = await this.getAhamoveSenderConfig(body);
+    const fromName = ahamoveSender.fromName;
+    const fromPhone = ahamoveSender.fromPhone;
+    const fromAddress = ahamoveSender.fromAddress;
 
     if (!fromPhone || !fromAddress) {
       throw new BadRequestException("Thiếu cấu hình AhaMove đầu gửi");
@@ -4882,11 +5112,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     const heightCm = Math.max(1, Number(body?.heightCm || body?.height || 10));
 
     const buildPayload = (serviceId: string) => ({
-      payment_method:
-        body?.payment_method ||
-        body?.paymentMethod ||
-        process.env.AHAMOVE_PAYMENT_METHOD ||
-        "BALANCE",
+      payment_method: ahamoveSender.paymentMethod,
       order_time: Number(body?.order_time ?? body?.orderTime ?? 0),
       path: [
         {
@@ -5015,13 +5241,13 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         };
       }
 
-      const fromName = dto?.fromName || process.env.AHAMOVE_FROM_NAME || this.returnName;
-      const fromPhone =
-        dto?.fromPhone || process.env.AHAMOVE_FROM_PHONE || this.returnPhone;
-      const fromAddress =
-        dto?.fromAddress ||
-        process.env.AHAMOVE_FROM_ADDRESS ||
-        this.returnAddress;
+      const ahamoveSender = await this.getAhamoveSenderConfig({
+        ...dto,
+        branchId: dto?.branchId || order.branchId,
+      });
+      const fromName = ahamoveSender.fromName;
+      const fromPhone = ahamoveSender.fromPhone;
+      const fromAddress = ahamoveSender.fromAddress;
 
       const serviceId = String(
         dto?.serviceId || process.env.AHAMOVE_DEFAULT_SERVICE_ID || "HAN-BIKE"
@@ -5055,11 +5281,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       const payload = {
         service_id: serviceId,
         requests: Array.isArray(dto?.requests) ? dto.requests : [],
-        payment_method:
-          dto?.payment_method ||
-          dto?.paymentMethod ||
-          process.env.AHAMOVE_PAYMENT_METHOD ||
-          "BALANCE",
+        payment_method: ahamoveSender.paymentMethod,
         order_time: Number(dto?.order_time ?? dto?.orderTime ?? 0),
         path: [
           {

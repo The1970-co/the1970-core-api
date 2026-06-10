@@ -5,6 +5,7 @@ import {
   Get,
   Param,
   Post,
+  Put,
   Query,
   Req,
   UseGuards,
@@ -37,6 +38,16 @@ export class ShipmentController {
   @Get("pickup-locations")
   getPickupLocations() {
     return this.shipmentService.getPickupLocations();
+  }
+
+  @Get("pickup-location-settings")
+  getPickupLocationSettings() {
+    return this.shipmentService.getPickupLocationSettings();
+  }
+
+  @Put("pickup-location-settings")
+  savePickupLocationSettings(@Body() body: any) {
+    return this.shipmentService.savePickupLocationSettings(body);
   }
 
   @Get("order/:orderId/tracking")
