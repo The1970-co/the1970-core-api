@@ -42,6 +42,7 @@ type GetOrdersParams = {
    */
   codReconciliationStatus?: string;
   quickStatus?: string;
+  exportMode?: boolean;
 };
 
 @Injectable()
@@ -2741,10 +2742,12 @@ export class OrderService implements OnModuleInit {
       dateTo = "",
       codReconciliationStatus = "",
       quickStatus = "",
+      exportMode = false,
     } = params;
 
     const safePage = Math.max(Number(page || 1), 1);
-    const safePageSize = Math.min(Math.max(Number(pageSize || 50), 1), 100);
+    const maxPageSize = exportMode ? 1000 : 100;
+    const safePageSize = Math.min(Math.max(Number(pageSize || 50), 1), maxPageSize);
     const skip = (safePage - 1) * safePageSize;
     const keyword = this.normalizeOrderKeyword(q);
 

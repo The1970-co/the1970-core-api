@@ -55,7 +55,7 @@ export class StocktakeSessionController {
         to,
         page: page ? Number(page) : undefined,
         limit: limit ? Number(limit) : undefined,
-        productQuery: productQuery || productQ || sku || q || query,
+        productQuery: productQuery || productQ || sku,
         productQ,
         sku,
         q,
@@ -79,7 +79,7 @@ export class StocktakeSessionController {
     @Query("query") query?: string,
     @Req() req?: any,
   ) {
-    return this.service.getSessionsOverview(branchId, { status, from, to, productQuery: productQuery || productQ || sku || q || query, productQ, sku, q, query }, req?.user);
+    return this.service.getSessionsOverview(branchId, { status, from, to, productQuery: productQuery || productQ || sku, productQ, sku, q, query }, req?.user);
   }
 
   @Get("active/current")

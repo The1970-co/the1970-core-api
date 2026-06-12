@@ -101,7 +101,8 @@ export class OrderController {
     @Query("codReconciliationStatus") codReconciliationStatus?: string,
     @Query("codReconciliation") codReconciliation?: string,
     @Query("codReconciliationFilter") codReconciliationFilter?: string,
-    @Query("quickStatus") quickStatus?: string
+    @Query("quickStatus") quickStatus?: string,
+    @Query("exportMode") exportMode?: string
   ) {
     return this.orderService.getOrders(
       {
@@ -119,6 +120,7 @@ export class OrderController {
           codReconciliationFilter ||
           "",
         quickStatus: quickStatus || "",
+        exportMode: ["1", "true", "yes"].includes(String(exportMode || "").toLowerCase()),
       },
       req.user
     );

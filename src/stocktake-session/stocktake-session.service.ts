@@ -247,6 +247,42 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
       }
     }
 
+    // Tìm phiên kiểm kho ở backend, không chỉ lọc trên 50 dòng đã tải ở UI.
+    // query/q dành cho phiên: id CUID, mã hiển thị dạng KK-TH-ABC123, tên phiên, ghi chú, nhân viên/máy scan.
+    const rawSessionQuery = this.normalizeSearchText(filters?.query || filters?.q);
+    if (rawSessionQuery) {
+      const compact = rawSessionQuery.replace(/[^a-zA-Z0-9]+/g, "");
+      const dashParts = rawSessionQuery.split("-").map((part) => part.trim()).filter(Boolean);
+      const lastPart = dashParts[dashParts.length - 1] || "";
+      const searchTerms = Array.from(
+        new Set([rawSessionQuery, compact, lastPart].map((term) => this.normalizeSearchText(term)).filter(Boolean)),
+      );
+
+      where.AND = [
+        ...(Array.isArray(where.AND) ? where.AND : []),
+        {
+          OR: searchTerms.flatMap((term) => [
+            { id: { contains: term, mode: "insensitive" } },
+            { name: { contains: term, mode: "insensitive" } },
+            { note: { contains: term, mode: "insensitive" } },
+            { createdById: { contains: term, mode: "insensitive" } },
+            {
+              workers: {
+                some: {
+                  OR: [
+                    { name: { contains: term, mode: "insensitive" } },
+                    { userId: { contains: term, mode: "insensitive" } },
+                    { deviceName: { contains: term, mode: "insensitive" } },
+                    { zone: { contains: term, mode: "insensitive" } },
+                  ],
+                },
+              },
+            },
+          ]),
+        },
+      ];
+    }
+
     return where;
   }
 
@@ -568,7 +604,7 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
   ) {
     const where = this.buildSessionListWhere(branchId, filters, user);
     const productQuery =
-      filters?.productQuery || filters?.productQ || filters?.sku || filters?.q || filters?.query || "";
+      filters?.productQuery || filters?.productQ || filters?.sku || "";
 
     const productSearch = await this.findSessionIdsByProductQuery(productQuery);
     if (productSearch) {
@@ -622,7 +658,7 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
   ) {
     const where = this.buildSessionListWhere(branchId, filters, user);
     const productQuery =
-      filters?.productQuery || filters?.productQ || filters?.sku || filters?.q || filters?.query || "";
+      filters?.productQuery || filters?.productQ || filters?.sku || "";
 
     const productSearch = await this.findSessionIdsByProductQuery(productQuery);
     if (productSearch) {
