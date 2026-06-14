@@ -9,3 +9,16 @@ export const AHAMOVE_STATUS_LABELS: Record<string, string> = {
   CANCELLED: "Đã hủy",
   FAILED: "Giao thất bại",
 };
+
+
+export const SPX_STATUS_LABELS: Record<string, string> = {
+  CREATED: "Đã tạo vận đơn",
+  PICKING: "Đang lấy hàng",
+  IN_TRANSIT: "Đang trung chuyển",
+  DELIVERING: "Đang giao",
+  DELIVERED: "Đã giao thành công",
+  FAILED: "Giao thất bại",
+  RETURNING: "Đang hoàn hàng",
+  RETURNED: "Đã hoàn hàng",
+  CANCELLED: "Đã hủy",
+};

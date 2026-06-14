@@ -3,6 +3,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { GhnClient } from "./ghn.client";
 import { AhamoveClient } from "./ahamove.client";
 import { ViettelPostClient } from "./viettelpost.client";
+import { SpxService } from "./spx.service";
 import { QuoteShipmentDto } from "./dto/quote-shipment.dto";
 import { CreateGhnShipmentDto } from "./dto/create-ghn-shipment.dto";
 import { TrackShipmentDto } from "./dto/track-shipment.dto";
@@ -16,6 +17,7 @@ type CarrierPickupMappingValue = {
   ghn?: string;
   viettelpost?: string;
   ahamove?: string;
+  spx?: string;
 };
 
 type PickupLocationSettingsValue = {
@@ -144,6 +146,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     private readonly ghnClient: GhnClient,
     private readonly ahamoveClient: AhamoveClient,
     private readonly viettelPostClient: ViettelPostClient,
+    private readonly spxService: SpxService,
     private readonly authTotpService: AuthTotpService
   ) { }
 
@@ -6233,4 +6236,21 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
   async ghnWards(districtId: number) {
     return this.ghnClient.getWards(districtId);
   }
+
+  async quoteSpx(body: any) {
+    return this.spxService.quoteSpx(body);
+  }
+
+  async createSpxShipment(orderId: string, dto: any) {
+    return this.spxService.createSpxShipment(orderId, dto);
+  }
+
+  async trackSpxByShipmentId(id: string) {
+    return this.spxService.trackSpxByShipmentId(id);
+  }
+
+  async cancelSpxShipmentByOrderId(orderId: string, user: any) {
+    return this.spxService.cancelSpxShipmentByOrderId(orderId, user);
+  }
+
 }

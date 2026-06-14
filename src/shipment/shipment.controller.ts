@@ -15,6 +15,8 @@ import { ShipmentService } from "./shipment.service";
 import { QuoteShipmentDto } from "./dto/quote-shipment.dto";
 import { CreateGhnShipmentDto } from "./dto/create-ghn-shipment.dto";
 import { TrackShipmentDto } from "./dto/track-shipment.dto";
+import { QuoteSpxDto } from "./dto/quote-spx.dto";
+import { CreateSpxShipmentDto } from "./dto/create-spx-shipment.dto";
 
 @Controller("shipments")
 @UseGuards(JwtGuard)
@@ -319,6 +321,33 @@ export class ShipmentController {
   @Get(":id/ahamove/tracking")
   trackAhamoveByShipmentId(@Param("id") id: string) {
     return this.shipmentService.trackAhamoveByShipmentId(id);
+  }
+
+
+  @Post("spx/quote")
+  quoteSpx(@Body() body: QuoteSpxDto) {
+    return this.shipmentService.quoteSpx(body);
+  }
+
+  @Post(":orderId/spx/create")
+  createSpxShipment(
+    @Param("orderId") orderId: string,
+    @Body() body: CreateSpxShipmentDto
+  ) {
+    return this.shipmentService.createSpxShipment(orderId, body);
+  }
+
+  @Post(":orderId/spx/cancel")
+  cancelSpxShipmentByOrderId(
+    @Param("orderId") orderId: string,
+    @Req() req: any
+  ) {
+    return this.shipmentService.cancelSpxShipmentByOrderId(orderId, req.user);
+  }
+
+  @Get(":id/spx/tracking")
+  trackSpxByShipmentId(@Param("id") id: string) {
+    return this.shipmentService.trackSpxByShipmentId(id);
   }
 
 }
