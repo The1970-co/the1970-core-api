@@ -105,9 +105,95 @@ function pickLineRevenue(item: AnyRow, quantity: number): number {
   return unit > 0 ? unit * Math.max(1, quantity) : 0;
 }
 
+function pickProductIdFromItem(item: AnyRow): string {
+  return String(
+    item?.productId ||
+      item?.product?.id ||
+      item?.product?.productId ||
+      item?.variant?.productId ||
+      item?.variant?.product?.id ||
+      item?.productVariant?.productId ||
+      item?.productVariant?.product?.id ||
+      '',
+  ).trim();
+}
+
+function pickSkuFromItem(item: AnyRow): string {
+  return String(item?.sku || item?.variantSku || item?.productSku || item?.barcode || '').trim();
+}
+
 @Injectable()
 export class MetaAdsOrderAttributionService {
   constructor(private readonly prisma: PrismaService) {}
+
+  private async buildProductIdLookupBySkuFamily(items: AnyRow[]) {
+    const map = new Map<string, string>();
+
+    for (const item of items) {
+      const directProductId = pickProductIdFromItem(item);
+      const sku = pickSkuFromItem(item);
+      const family = skuFamily(sku);
+
+      if (directProductId) {
+        if (sku) map.set(String(sku).toUpperCase(), directProductId);
+        if (family) map.set(family, directProductId);
+      }
+    }
+
+    const wantedFamilies = unique(
+      items
+        .flatMap((item) => {
+          const sku = pickSkuFromItem(item);
+          return [skuFamily(sku), ...extractSkuFamiliesFromText(item?.productName || item?.title || '')];
+        })
+        .filter(Boolean),
+    );
+
+    if (!wantedFamilies.length) return map;
+
+    try {
+      const products = await (this.prisma as any).product.findMany({
+        select: {
+          id: true,
+          slug: true,
+          name: true,
+          variants: {
+            select: {
+              sku: true,
+            },
+          },
+        },
+        take: 10000,
+      });
+
+      for (const product of products || []) {
+        const productId = String(product?.id || '').trim();
+        if (!productId) continue;
+
+        const keys = [
+          product?.slug,
+          ...(Array.isArray(product?.variants)
+            ? product.variants.map((variant: AnyRow) => variant?.sku)
+            : []),
+        ];
+
+        for (const key of keys) {
+          const normalizedKey = String(key || '').trim().toUpperCase();
+          const family = skuFamily(normalizedKey);
+          if (!family || !wantedFamilies.includes(family)) continue;
+
+          map.set(family, productId);
+          if (normalizedKey) map.set(normalizedKey, productId);
+        }
+      }
+    } catch {
+      // Nếu schema product/variants khác tên field thì bỏ qua lookup.
+      // Endpoint vẫn trả dữ liệu cũ; frontend có fallback lookup riêng theo SKU.
+    }
+
+    return map;
+  }
+
 
   async getProductPerformance(params: {
     since: Date;
@@ -163,6 +249,8 @@ export class MetaAdsOrderAttributionService {
       if (orderId) orderLineCount.set(orderId, (orderLineCount.get(orderId) || 0) + 1);
     }
 
+    const productIdBySkuFamily = await this.buildProductIdLookupBySkuFamily(items);
+
     const productMap = new Map<string, AnyRow>();
     const validOrderRevenueById = new Map<string, number>();
     const cancelledOrderRevenueById = new Map<string, number>();
@@ -170,8 +258,13 @@ export class MetaAdsOrderAttributionService {
     for (const item of items) {
       const order = item.order || {};
       const orderId = String(order.id || item.orderId || '');
-      const sku = String(item.sku || item.variantSku || item.productSku || '').trim();
+      const sku = pickSkuFromItem(item);
       const family = skuFamily(sku);
+      const productId =
+        pickProductIdFromItem(item) ||
+        productIdBySkuFamily.get(String(sku || '').trim().toUpperCase()) ||
+        productIdBySkuFamily.get(family) ||
+        '';
       const productName = String(item.productName || item.title || 'Sản phẩm chưa rõ').trim();
       const key = family || normalizeText(productName);
       const quantity = Math.max(1, toNumber(item.quantity || item.qty || 1));
@@ -191,6 +284,8 @@ export class MetaAdsOrderAttributionService {
 
       const existed = productMap.get(key) || {
         key,
+        productId: productId || '',
+        productIds: new Set<string>(),
         familySku: family,
         skuSamples: new Set<string>(),
         productName,
@@ -211,6 +306,10 @@ export class MetaAdsOrderAttributionService {
       };
 
       if (sku) existed.skuSamples.add(sku);
+      if (productId) {
+        existed.productIds.add(productId);
+        if (!existed.productId) existed.productId = productId;
+      }
 
       const cancelled = isCancelledOrReturned(order);
       const orderRevenueForSample = toNumber(order.finalAmount || order.totalAmount || lineRevenue);
@@ -275,6 +374,8 @@ export class MetaAdsOrderAttributionService {
     const allRows = Array.from(productMap.values())
       .map((row) => ({
         key: row.key,
+        productId: row.productId || Array.from(row.productIds || [])[0] || null,
+        productIds: Array.from(row.productIds || []).slice(0, 20),
         sku: row.familySku || row.key,
         familySku: row.familySku || row.key,
         skuSamples: Array.from(row.skuSamples).slice(0, 20),
@@ -318,7 +419,7 @@ export class MetaAdsOrderAttributionService {
       totalCancelledRevenue: allRows.reduce((sum: number, row: any) => sum + toNumber(row.cancelledRevenue), 0),
       totalCancelledOrderRevenue: uniqueCancelledOrderRevenue,
       rows,
-      note: 'V17: SKU family + source filter + bỏ đơn huỷ + totalOrderRevenue unique theo order, không cộng trùng nhiều SKU/ads.',
+      note: 'V18: SKU family + productId UUID cho link chi tiết sản phẩm + source filter + bỏ đơn huỷ + totalOrderRevenue unique theo order.',
     };
   }
 
@@ -386,6 +487,8 @@ export class MetaAdsOrderAttributionService {
                   ? 'Match SKU family chắc'
                   : 'Match SKU family tham khảo',
               confidence,
+              productId: best.productId || null,
+              productIds: best.productIds || [],
               sku: best.familySku || best.sku,
               familySku: best.familySku || best.sku,
               skuSamples: best.skuSamples || [],
@@ -424,6 +527,8 @@ export class MetaAdsOrderAttributionService {
               allocationMode: 'none',
               label: 'Chưa match SKU family',
               confidence: 0,
+              productId: null,
+              productIds: [],
               sku: null,
               familySku: null,
               skuSamples: [],
