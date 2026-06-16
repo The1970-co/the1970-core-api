@@ -155,10 +155,14 @@ export class AhamoveClient {
       const message =
         json?.message ||
         json?.description ||
+        json?.error ||
+        json?.code ||
+        json?.raw ||
+        (json ? JSON.stringify(json) : rawText) ||
         `Ahamove request failed: ${path}`;
 
       throw new BadRequestException(
-        `${message} | baseUrl=${this.baseUrl} | phone=${this.maskPhone(this.accountPhone)}`
+        `${message} | status=${res.status} | path=${path} | baseUrl=${this.baseUrl} | phone=${this.maskPhone(this.accountPhone)}`
       );
     }
 
@@ -186,6 +190,12 @@ export class AhamoveClient {
       throw new BadRequestException("Thiếu ahamoveOrderId");
     }
 
-    return this.request("DELETE", `/v3/orders/${orderId}`);
+    const comment = String(
+      process.env.AHAMOVE_CANCEL_COMMENT || "Khách hàng muốn hủy đơn"
+    ).trim();
+
+    return this.request("DELETE", `/v3/orders/${orderId}`, {
+      comment,
+    });
   }
 }

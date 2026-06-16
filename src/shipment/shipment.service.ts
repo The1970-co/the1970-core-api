@@ -317,6 +317,91 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     return "KHONGCHOXEMHANG";
   }
 
+  private normalizeAhamoveSpecialRequests(input: any) {
+    const source = input?.ahamoveSpecialRequests || input?.specialRequests || {};
+    const rawList = Array.isArray(input?.requests) ? input.requests : [];
+    const rawIds = new Set<string>(
+      rawList
+        .map((item: any) => String(item?._id || item?.id || item || "").toUpperCase())
+        .filter(Boolean),
+    );
+
+    const hasRaw = (key: string) =>
+      Array.from(rawIds).some((id) => id === key || id.endsWith(`-${key}`));
+
+    return {
+      returnToPickup: Boolean(
+        source?.returnToPickup || source?.roundTrip || source?.round_trip || hasRaw("ROUND-TRIP"),
+      ),
+      thermalBag: Boolean(source?.thermalBag || source?.thermal_bag),
+      insurance: Boolean(source?.insurance || source?.insured || hasRaw("INSURANCE")),
+      bulky: Boolean(source?.bulky || source?.isBulky || hasRaw("BULKY")),
+      fragile: Boolean(source?.fragile || source?.isFragile || hasRaw("FRAGILE")),
+    };
+  }
+
+  private getAhamoveRequestId(serviceId: string, groupId: string) {
+    const normalizedServiceId = String(serviceId || "").trim().toUpperCase();
+    const normalizedGroupId = String(groupId || "").trim().toUpperCase();
+    if (!normalizedServiceId || !normalizedGroupId) return "";
+
+    // AhaMove docs: request _id = service_id + group request, e.g. HAN-BIKE-FRAGILE.
+    // Với service SAAS/VNM-PARTNER, API có thể dùng trực tiếp group id riêng.
+    if (normalizedServiceId.startsWith("VNM-PARTNER-")) {
+      return normalizedGroupId.startsWith("VNM-PARTNER-")
+        ? normalizedGroupId
+        : `${normalizedServiceId}-${normalizedGroupId}`;
+    }
+
+    return `${normalizedServiceId}-${normalizedGroupId}`;
+  }
+
+  private buildAhamoveRequestPayloads(serviceId: string, input: any) {
+    const selected = this.normalizeAhamoveSpecialRequests(input);
+    const requests: any[] = [];
+
+    if (selected.returnToPickup) {
+      requests.push({ _id: this.getAhamoveRequestId(serviceId, "ROUND-TRIP") });
+    }
+
+    if (selected.insurance) {
+      requests.push({ _id: this.getAhamoveRequestId(serviceId, "INSURANCE") });
+    }
+
+    if (selected.bulky) {
+      requests.push({
+        _id: this.getAhamoveRequestId(serviceId, "BULKY"),
+        tier_code: String(input?.bulkyTierCode || input?.tier_code || "TIER_2"),
+      });
+    }
+
+    if (selected.fragile) {
+      requests.push({ _id: this.getAhamoveRequestId(serviceId, "FRAGILE") });
+    }
+
+    // Giữ lại request hợp lệ do frontend/cấu hình truyền thẳng, tránh mất các option AhaMove mới.
+    if (Array.isArray(input?.requests)) {
+      for (const item of input.requests) {
+        const requestId = String(item?._id || item?.id || item || "").trim();
+        if (!requestId) continue;
+        if (requests.some((row) => String(row._id) === requestId)) continue;
+        requests.push(typeof item === "object" ? { ...item, _id: requestId } : { _id: requestId });
+      }
+    }
+
+    return requests.filter((item) => item._id);
+  }
+
+  private buildAhamoveRemarks(baseRemark: any, input: any) {
+    const selected = this.normalizeAhamoveSpecialRequests(input);
+    const parts = [String(baseRemark || "").trim()];
+
+    // AhaMove public docs chưa có request code riêng cho túi giữ nhiệt; remarks là field hợp lệ của API.
+    if (selected.thermalBag) parts.push("Yêu cầu túi giữ nhiệt nếu dịch vụ hỗ trợ");
+
+    return parts.filter(Boolean).join(" | ");
+  }
+
   private normalizeTimelineStatus(status?: string | null) {
     const s = String(status || "").toUpperCase();
 
@@ -2308,6 +2393,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
           service_id: serviceId,
           service_type_id: serviceTypeId,
           insurance_value: dto.insuranceValue || 0,
+          coupon: String((dto as any).coupon || (dto as any).couponCode || "").trim() || undefined,
           from_district_id: fromDistrictId,
           from_ward_code: fromWardCode,
           to_district_id: dto.toDistrictId,
@@ -2586,6 +2672,8 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         to_ward_code: dto.toWardCode,
         to_district_id: dto.toDistrictId,
         cod_amount: codAmount,
+        insurance_value: Math.min(5000000, Math.max(0, Math.round(Number(dto.insuranceValue || 0)))),
+        coupon: String((dto as any).coupon || (dto as any).couponCode || "").trim() || undefined,
         content: `Đơn ${dto.clientOrderCode}`,
         weight: dto.weight,
         length: dto.length,
@@ -2613,6 +2701,8 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         cod_failed_amount: codFailedAmount,
         codFailedAmount,
         failedDeliveryCodAmount: codFailedAmount,
+        insurance_value: Math.min(5000000, Math.max(0, Math.round(Number(dto.insuranceValue || 0)))),
+        coupon: String((dto as any).coupon || (dto as any).couponCode || "").trim() || null,
       };
 
       const shipment = await tx.shipment.upsert({
@@ -4806,8 +4896,11 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       const trackingUrl = this.buildViettelPostTrackingUrl(orderNumber);
 
       const shipmentMetadata = {
-        ...(created || {}),
-        note: String(dto?.note || "").trim(),
+        carrier: "VIETTELPOST",
+        trackingUrl,
+        serviceCode,
+        payload,
+        response: created,
       };
 
       const shipment = await tx.shipment.upsert({
@@ -5108,13 +5201,21 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     ) as string[];
 
     const codAmount = Math.max(0, Math.round(Number(body?.codAmount || 0)));
-    const itemValue = Math.max(0, Math.round(Number(body?.itemValue || codAmount || 0)));
+    const itemValue = Math.max(
+      0,
+      Math.round(Number(body?.itemValue || body?.insuranceValue || body?.productPrice || codAmount || 0)),
+    );
+    const promoCode = String(body?.promoCode || body?.promo_code || body?.coupon || body?.couponCode || "").trim();
     const weightGram = Math.max(100, Number(body?.weightGram || body?.weight || 200));
     const lengthCm = Math.max(1, Number(body?.lengthCm || body?.length || 10));
     const widthCm = Math.max(1, Number(body?.widthCm || body?.width || 10));
     const heightCm = Math.max(1, Number(body?.heightCm || body?.height || 10));
 
-    const buildPayload = (serviceId: string) => ({
+    const buildPayload = (serviceId: string) => {
+      const remarks = this.buildAhamoveRemarks(body?.note || "", body);
+      const requests = this.buildAhamoveRequestPayloads(serviceId, body);
+
+      return {
       payment_method: ahamoveSender.paymentMethod,
       order_time: Number(body?.order_time ?? body?.orderTime ?? 0),
       path: [
@@ -5131,16 +5232,17 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
           cod: codAmount,
           item_value: itemValue,
           tracking_number: body?.clientOrderCode || body?.orderCode || "",
-          remarks: body?.note || "",
+          remarks,
         },
       ],
       services: [
         {
           _id: serviceId,
-          requests: Array.isArray(body?.requests) ? body.requests : [],
+          requests,
         },
       ],
-      remarks: body?.note || "",
+      ...(promoCode ? { promo_code: promoCode } : {}),
+      remarks,
       items: Array.isArray(body?.items)
         ? body.items.map((item: any, index: number) => ({
           _id: String(item?._id || item?.id || index + 1),
@@ -5158,7 +5260,8 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
           description: "Thời trang",
         },
       ],
-    });
+      };
+    };
 
     const rows: any[] = [];
 
@@ -5265,6 +5368,12 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       }
 
       const codAmount = Math.max(0, Math.round(Number(dto?.codAmount || 0)));
+      const itemValue = Math.max(
+        0,
+        Math.round(Number(dto?.itemValue || dto?.insuranceValue || dto?.productPrice || order.finalAmount || 0)),
+      );
+      const promoCode = String(dto?.promoCode || dto?.promo_code || dto?.coupon || dto?.couponCode || "").trim();
+      const ahamoveRemarks = this.buildAhamoveRemarks(dto?.note || `Đơn ${order.orderCode}`, dto);
 
       const items =
         Array.isArray(dto?.items) && dto.items.length
@@ -5283,7 +5392,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
 
       const payload = {
         service_id: serviceId,
-        requests: Array.isArray(dto?.requests) ? dto.requests : [],
+        requests: this.buildAhamoveRequestPayloads(serviceId, dto),
         payment_method: ahamoveSender.paymentMethod,
         order_time: Number(dto?.order_time ?? dto?.orderTime ?? 0),
         path: [
@@ -5297,9 +5406,13 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
             name: dto.toName,
             mobile: dto.toPhone,
             cod: codAmount,
+            item_value: itemValue,
+            tracking_number: dto?.clientOrderCode || dto?.orderCode || order.orderCode,
+            remarks: ahamoveRemarks,
           },
         ],
-        remarks: dto?.note || `Đơn ${order.orderCode}`,
+        ...(promoCode ? { promo_code: promoCode } : {}),
+        remarks: ahamoveRemarks,
         items,
       };
 
@@ -5314,7 +5427,11 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
 
       const shipmentMetadata = {
         ...(created || {}),
-        note: String(dto?.note || "").trim(),
+        note: ahamoveRemarks,
+        promo_code: promoCode || null,
+        item_value: itemValue,
+        requests: this.buildAhamoveRequestPayloads(serviceId, dto),
+        ahamoveSpecialRequests: this.normalizeAhamoveSpecialRequests(dto),
       };
 
       const shipment = await tx.shipment.upsert({
@@ -5496,38 +5613,132 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
 
     const shipment = order.shipment;
 
-    if (!shipment?.ahamoveOrderId && !shipment?.trackingCode) {
+    const updateLocalCancelled = async (raw: any, source = "cancel") => {
+      if (shipment?.id) {
+        await this.prisma.shipment.update({
+          where: { id: shipment.id },
+          data: {
+            shippingStatus: "CANCELLED",
+            partnerStatus: "CANCELLED",
+            ahamoveStatus: "CANCELLED",
+            ahamoveRaw: raw,
+            metadata: {
+              ...((shipment.metadata as any) || {}),
+              ...(raw && typeof raw === "object" ? raw : { raw }),
+              cancelSource: source,
+              cancelledAt: new Date().toISOString(),
+            },
+            lastSyncedAt: new Date(),
+          },
+        });
+
+        await this.appendShipmentTimelineEvent(this.prisma, {
+          shipmentId: shipment.id,
+          orderId,
+          carrier: "AHAMOVE",
+          trackingCode: shipment.ahamoveOrderId || shipment.trackingCode || null,
+          status: "CANCELLED",
+          partnerStatus: "CANCELLED",
+          title: "Đã huỷ vận đơn",
+          raw,
+          source,
+        });
+      }
+
       return this.prisma.order.update({
         where: { id: orderId },
         data: {
           status: "CANCELLED",
           fulfillmentStatus: "UNFULFILLED",
         },
+        include: {
+          items: true,
+          shipment: true,
+          customer: true,
+          payments: {
+            include: { paymentSource: true },
+          },
+          partialDeliveries: {
+            include: {
+              items: true,
+              returnOrder: {
+                include: {
+                  shipment: true,
+                },
+              },
+            },
+            orderBy: { createdAt: "desc" },
+          },
+        },
       });
+    };
+
+    if (!shipment?.ahamoveOrderId && !shipment?.trackingCode) {
+      return updateLocalCancelled(
+        { ok: true, skippedCarrierCancel: true, reason: "missing_ahamove_order_id" },
+        "cancel:local-only",
+      );
+    }
+
+    const currentStatusText = [
+      shipment.shippingStatus,
+      shipment.partnerStatus,
+      shipment.ahamoveStatus,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toUpperCase();
+
+    if (currentStatusText.includes("CANCEL")) {
+      return updateLocalCancelled(
+        { ok: true, alreadyCancelled: true, shipmentStatus: currentStatusText },
+        "cancel:already-cancelled",
+      );
     }
 
     const ahamoveOrderId = shipment.ahamoveOrderId || shipment.trackingCode || "";
-    const raw = await this.ahamoveClient.cancelOrder(ahamoveOrderId);
 
-    await this.prisma.shipment.update({
-      where: { id: shipment.id },
-      data: {
-        shippingStatus: "CANCELLED",
-        partnerStatus: "cancel",
-        ahamoveStatus: "CANCELLED",
-        ahamoveRaw: raw,
-        metadata: raw,
-        lastSyncedAt: new Date(),
-      },
-    });
+    try {
+      const raw = await this.ahamoveClient.cancelOrder(ahamoveOrderId);
+      return updateLocalCancelled(raw, "cancel");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const looksLikeAlreadyFinal =
+        message.toLowerCase().includes("order status is not valid") ||
+        message.includes("status=406") ||
+        message.toLowerCase().includes("already") ||
+        message.toLowerCase().includes("cancel");
 
-    return this.prisma.order.update({
-      where: { id: orderId },
-      data: {
-        status: "CANCELLED",
-        fulfillmentStatus: "UNFULFILLED",
-      },
-    });
+      if (!looksLikeAlreadyFinal) {
+        throw error;
+      }
+
+      let detail: any = null;
+      try {
+        detail = await this.ahamoveClient.getOrderDetail(ahamoveOrderId);
+      } catch (detailError) {
+        this.logger.warn(
+          `[AHAMOVE_CANCEL] get detail after cancel error failed order=${ahamoveOrderId}: ${detailError instanceof Error ? detailError.message : String(detailError)}`,
+        );
+      }
+
+      const detailStatus = this.getAhamoveStatus(detail);
+      const normalizedDetailStatus = String(detailStatus || "").toUpperCase();
+
+      if (normalizedDetailStatus.includes("CANCEL")) {
+        return updateLocalCancelled(
+          {
+            ok: true,
+            alreadyCancelled: true,
+            cancelError: message,
+            detail,
+          },
+          "cancel:verified-already-cancelled",
+        );
+      }
+
+      throw error;
+    }
   }
 
 
