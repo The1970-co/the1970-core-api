@@ -1295,6 +1295,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
             ahamoveStatus,
             ahamoveSubStatus: raw?.sub_status || raw?.data?.sub_status || null,
             ahamoveTrackingUrl: trackingUrl,
+            shippingFee: this.getAhamoveShippingFee(raw) || shipment.shippingFee || null,
             ahamoveRaw: raw,
             metadata: raw,
             lastSyncedAt: now,
@@ -1363,14 +1364,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
           shippingStatus,
           partnerStatus: ahamoveStatus,
           codAmount: Number(shipment.codAmount || raw?.cod || raw?.data?.cod || 0),
-          shippingFee: Number(
-            shipment.shippingFee ||
-            raw?.total_fee ||
-            raw?.totalFee ||
-            raw?.data?.total_fee ||
-            raw?.data?.totalFee ||
-            0
-          ),
+          shippingFee: Number(this.getAhamoveShippingFee(raw) || shipment.shippingFee || 0),
           updatedAt:
             raw?.updated_at ||
             raw?.updatedAt ||
@@ -3365,6 +3359,49 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       raw?.order?.shared_link ||
       null
     );
+  }
+
+  private getAhamoveShippingFee(raw: any) {
+    const candidates = [
+      raw?.fee,
+      raw?.total_fee,
+      raw?.totalFee,
+      raw?.total_pay,
+      raw?.totalPay,
+      raw?.subtotal_price,
+      raw?.subtotalPrice,
+      raw?.total_price,
+      raw?.totalPrice,
+      raw?.data?.fee,
+      raw?.data?.total_fee,
+      raw?.data?.totalFee,
+      raw?.data?.total_pay,
+      raw?.data?.totalPay,
+      raw?.data?.subtotal_price,
+      raw?.data?.subtotalPrice,
+      raw?.data?.total_price,
+      raw?.data?.totalPrice,
+      raw?.order?.fee,
+      raw?.order?.total_fee,
+      raw?.order?.totalFee,
+      raw?.order?.total_pay,
+      raw?.order?.totalPay,
+      raw?.order?.subtotal_price,
+      raw?.order?.subtotalPrice,
+      raw?.order?.total_price,
+      raw?.order?.totalPrice,
+      raw?.ahamove?.order?.total_fee,
+      raw?.ahamove?.order?.totalFee,
+      raw?.ahamove?.order?.total_pay,
+      raw?.ahamove?.order?.totalPay,
+    ];
+
+    for (const value of candidates) {
+      const n = Number(value);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+
+    return null;
   }
 
 
@@ -5442,12 +5479,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
           shippingStatus: this.mapAhamoveShippingStatus(ahamoveStatus),
           partnerStatus: ahamoveStatus,
           codAmount,
-          shippingFee:
-            created?.fee ||
-            created?.total_fee ||
-            created?.data?.fee ||
-            created?.data?.total_fee ||
-            null,
+          shippingFee: this.getAhamoveShippingFee(created),
           fromName,
           fromPhone,
           fromAddress,
@@ -5469,12 +5501,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
           shippingStatus: this.mapAhamoveShippingStatus(ahamoveStatus),
           partnerStatus: ahamoveStatus,
           codAmount,
-          shippingFee:
-            created?.fee ||
-            created?.total_fee ||
-            created?.data?.fee ||
-            created?.data?.total_fee ||
-            null,
+          shippingFee: this.getAhamoveShippingFee(created),
           fromName,
           fromPhone,
           fromAddress,
@@ -5556,6 +5583,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         ahamoveStatus,
         ahamoveSubStatus: raw?.sub_status || raw?.data?.sub_status || null,
         ahamoveTrackingUrl: trackingUrl,
+        shippingFee: this.getAhamoveShippingFee(raw) || shipment.shippingFee || null,
         ahamoveRaw: raw,
         metadata: raw,
         lastSyncedAt: new Date(),
