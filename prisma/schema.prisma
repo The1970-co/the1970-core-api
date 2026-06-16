@@ -1106,9 +1106,13 @@ model StocktakeSession {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  appliedAt        DateTime?
+  snapshotPurgedAt DateTime?
+
   workers    StocktakeWorker[]
   scanEvents StocktakeScanEvent[]
   areas      StocktakeArea[]
+  result     StocktakeResult?
 
   @@index([branchId])
   @@index([status])
@@ -1379,6 +1383,80 @@ model StocktakeSnapshot {
   @@index([sessionId])
   @@index([branchId])
   @@index([variantId])
+}
+
+model StocktakeResult {
+  id        String @id @default(cuid())
+  sessionId String @unique
+  branchId  String
+
+  totalRows        Int @default(0)
+  countedSku       Int @default(0)
+  matchedSku       Int @default(0)
+  mismatchSku      Int @default(0)
+  notFoundSku      Int @default(0)
+  totalSnapshotQty Int @default(0)
+  totalCountedQty  Int @default(0)
+  totalDiffQty     Int @default(0)
+  totalDiffValue   Decimal @default(0) @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  session StocktakeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  items   StocktakeResultItem[]
+
+  @@index([branchId])
+  @@index([createdAt])
+}
+
+model StocktakeResultItem {
+  id        String @id @default(cuid())
+  resultId  String
+  sessionId String
+  branchId  String
+
+  variantId   String?
+  sku         String
+  barcode     String?
+  productName String?
+  color       String?
+  size        String?
+
+  snapshotQty    Int @default(0)
+  countedQty     Int @default(0)
+  diffQty        Int @default(0)
+  beforeApplyQty Int?
+  afterApplyQty  Int?
+
+  unitCost  Decimal @default(0) @db.Decimal(14, 2)
+  diffValue Decimal @default(0) @db.Decimal(14, 2)
+
+  status       String @default("MATCH")
+  statusLabel  String?
+  diffType     String?
+  eventCount   Int @default(0)
+  workerId     String?
+  workerName   String?
+  zone         String?
+  areaId       String?
+  rackId       String?
+  rackCode     String?
+  locationCode String?
+  lastScannedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  result StocktakeResult @relation(fields: [resultId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, branchId, sku])
+  @@index([resultId])
+  @@index([sessionId])
+  @@index([branchId])
+  @@index([variantId])
+  @@index([sku])
+  @@index([status])
 }
 
 model StocktakeCount {

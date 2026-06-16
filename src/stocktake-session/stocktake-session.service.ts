@@ -301,7 +301,7 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
 
     const db = this.prisma as any;
 
-    const [snapshotGroups, countRows] = await Promise.all([
+    const [snapshotGroups, countRows, resultRows] = await Promise.all([
       db.stocktakeSnapshot?.groupBy
         ? db.stocktakeSnapshot.groupBy({
             by: ["sessionId"],
@@ -323,6 +323,11 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
             },
           })
         : Promise.resolve([]),
+      db.stocktakeResult?.findMany
+        ? db.stocktakeResult.findMany({
+            where: { sessionId: { in: sessionIds } },
+          })
+        : Promise.resolve([]),
     ]);
 
     const snapshotStatMap = new Map<
@@ -335,6 +340,17 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
         totalSku: Number(row?._count?._all || 0),
         totalSnapshotQty: Number(row?._sum?.snapshotQty || 0),
       });
+    }
+
+    const resultMap = new Map<string, any>();
+    for (const row of resultRows || []) {
+      resultMap.set(String(row.sessionId), row);
+      if (!snapshotStatMap.has(String(row.sessionId))) {
+        snapshotStatMap.set(String(row.sessionId), {
+          totalSku: Number(row.totalRows || 0),
+          totalSnapshotQty: Number(row.totalSnapshotQty || 0),
+        });
+      }
     }
 
     type CountAgg = {
@@ -450,22 +466,35 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
     }
 
     return sessions.map((session) => {
+      const storedResult = resultMap.get(session.id);
       const snapshotStat = snapshotStatMap.get(session.id) || {
         totalSku: 0,
         totalSnapshotQty: 0,
       };
-      const kpi = kpiMap.get(session.id) || {
-        countedSku: 0,
-        notFoundSku: 0,
-        mismatchSku: 0,
-        discrepancySku: 0,
-        matchedSku: 0,
-        totalCountedQty: 0,
-        totalDiffQty: 0,
-      };
+      const kpi = storedResult
+        ? {
+            countedSku: Number(storedResult.countedSku || 0),
+            notFoundSku: Number(storedResult.notFoundSku || 0),
+            mismatchSku: Number(storedResult.mismatchSku || 0),
+            discrepancySku: Number(storedResult.mismatchSku || 0),
+            matchedSku: Number(storedResult.matchedSku || 0),
+            totalCountedQty: Number(storedResult.totalCountedQty || 0),
+            totalDiffQty: Number(storedResult.totalDiffQty || 0),
+            totalDiffValue: Number(storedResult.totalDiffValue || 0),
+          }
+        : kpiMap.get(session.id) || {
+            countedSku: 0,
+            notFoundSku: 0,
+            mismatchSku: 0,
+            discrepancySku: 0,
+            matchedSku: 0,
+            totalCountedQty: 0,
+            totalDiffQty: 0,
+            totalDiffValue: 0,
+          };
 
       const totalSku = snapshotStat.totalSku || kpi.countedSku;
-      const uncountedSku = Math.max(totalSku - kpi.countedSku, 0);
+      const uncountedSku = storedResult ? 0 : Math.max(totalSku - kpi.countedSku, 0);
 
       return {
         ...session,
@@ -482,7 +511,8 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
           totalSnapshotQty: snapshotStat.totalSnapshotQty,
           totalCountedQty: kpi.totalCountedQty,
           totalDiffQty: kpi.totalDiffQty,
-          totalDiffValue: 0,
+          totalDiffValue: Number((kpi as any).totalDiffValue || 0),
+          snapshotPurged: Boolean(storedResult),
           scanEvents: session._count?.scanEvents || 0,
           workerCount: session.workers?.length || 0,
         },
@@ -1326,6 +1356,328 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
     };
   }
 
+
+  private buildDetailFromStoredResult(session: any, result: any, scanEvents: any[] = []) {
+    const rows = (result?.items || []).map((item: any) => {
+      const snapshotQty = Number(item.snapshotQty || 0);
+      const countedQty = Number(item.countedQty || 0);
+      const diff = Number(item.diffQty ?? countedQty - snapshotQty);
+      const unitCost = Number(item.unitCost || 0);
+      const diffValue = Number(item.diffValue || diff * unitCost);
+
+      return {
+        sessionId: item.sessionId || session.id,
+        branchId: item.branchId || session.branchId,
+        variantId: item.variantId || null,
+        sku: item.sku,
+        productName: item.productName || "",
+        color: item.color || null,
+        size: item.size || null,
+        barcode: item.barcode || item.sku,
+        unitCost,
+        costPrice: unitCost,
+        snapshotQty,
+        countedQty,
+        diff,
+        beforeApplyQty: item.beforeApplyQty ?? null,
+        afterApplyQty: item.afterApplyQty ?? null,
+        currentQty: item.afterApplyQty ?? item.beforeApplyQty ?? null,
+        isCounted: true,
+        status: item.status || "MATCH",
+        statusLabel: item.statusLabel || this.normalizeDetailStatus({
+          hasCount: true,
+          countedQty,
+          snapshotQty,
+          variantId: item.variantId,
+          rawStatus: item.status,
+        }).statusLabel,
+        diffType: item.diffType || this.normalizeDetailStatus({
+          hasCount: true,
+          countedQty,
+          snapshotQty,
+          variantId: item.variantId,
+          rawStatus: item.status,
+        }).diffType,
+        diffValue,
+        valueDiff: diffValue,
+        eventCount: Number(item.eventCount || 0),
+        workerId: item.workerId || null,
+        workerName: item.workerName || null,
+        workerCount: item.workerId ? 1 : 0,
+        zone: item.zone || null,
+        areaId: item.areaId || null,
+        rackId: item.rackId || null,
+        rackCode: item.rackCode || null,
+        locationCode: item.locationCode || null,
+        lastScannedAt: item.lastScannedAt || null,
+      };
+    });
+
+    const matchedRows = rows.filter((row: any) => row.status === "MATCH");
+    const notFoundRows = rows.filter((row: any) => row.status === "NOT_FOUND");
+    const discrepancyRows = rows.filter((row: any) => row.status === "MISMATCH" || Number(row.diff || 0) !== 0);
+    const overRows = rows.filter((row: any) => row.diffType === "OVER" || Number(row.diff || 0) > 0);
+    const shortRows = rows.filter((row: any) => row.diffType === "SHORT" || Number(row.diff || 0) < 0);
+
+    const kpi = {
+      totalSnapshotSku: Number(result.totalRows || rows.length),
+      totalSku: Number(result.totalRows || rows.length),
+      totalRows: Number(result.totalRows || rows.length),
+      countedSku: Number(result.countedSku || rows.length),
+      uncountedSku: 0,
+      matchedSku: Number(result.matchedSku || matchedRows.length),
+      mismatchSku: Number(result.mismatchSku || discrepancyRows.length),
+      discrepancySku: Number(result.mismatchSku || discrepancyRows.length),
+      notFoundSku: Number(result.notFoundSku || notFoundRows.length),
+      overSku: overRows.length,
+      shortSku: shortRows.length,
+      totalSnapshotQty: Number(result.totalSnapshotQty || rows.reduce((sum: number, row: any) => sum + Number(row.snapshotQty || 0), 0)),
+      totalCountedQty: Number(result.totalCountedQty || rows.reduce((sum: number, row: any) => sum + Number(row.countedQty || 0), 0)),
+      totalDiffQty: Number(result.totalDiffQty || discrepancyRows.reduce((sum: number, row: any) => sum + Number(row.diff || 0), 0)),
+      totalDiffValue: Number(result.totalDiffValue || discrepancyRows.reduce((sum: number, row: any) => sum + Number(row.diffValue || 0), 0)),
+      scanEvents: session._count?.scanEvents || scanEvents.length,
+      workerCount: session.workers?.length || 0,
+      resultMode: true,
+      snapshotPurged: true,
+    };
+
+    const workerMap = new Map((session.workers || []).map((worker: any) => [worker.id, worker]));
+
+    return {
+      ...session,
+      session,
+      kpi,
+      rows,
+      items: rows,
+      uncountedRows: [],
+      discrepancyRows,
+      logs: scanEvents.map((log: any) => {
+        const worker: any = log.workerId ? workerMap.get(log.workerId) : null;
+        return {
+          ...log,
+          workerName: worker?.name || null,
+        };
+      }),
+      recentLogs: scanEvents,
+      result,
+    };
+  }
+
+  private async persistStocktakeResult(
+    tx: any,
+    session: any,
+    detail: any,
+    beforeAfterMap = new Map<string, { beforeQty: number | null; afterQty: number | null }>(),
+  ) {
+    const rows = Array.isArray(detail?.rows) ? detail.rows : [];
+    const countedRows = rows.filter((row: any) => row.isCounted || Number(row.countedQty || 0) !== 0 || row.lastScannedAt || row.workerId);
+    const matchedRows = countedRows.filter((row: any) => String(row.status || "").toUpperCase() === "MATCH" && Number(row.diff || 0) === 0);
+    const mismatchRows = countedRows.filter((row: any) => Number(row.diff || 0) !== 0 || String(row.status || "").toUpperCase() === "MISMATCH");
+    const notFoundRows = countedRows.filter((row: any) => String(row.status || "").toUpperCase() === "NOT_FOUND" || !row.variantId);
+
+    await tx.stocktakeResultItem.deleteMany({ where: { sessionId: session.id } });
+    await tx.stocktakeResult.deleteMany({ where: { sessionId: session.id } });
+
+    const result = await tx.stocktakeResult.create({
+      data: {
+        sessionId: session.id,
+        branchId: session.branchId,
+        totalRows: countedRows.length,
+        countedSku: countedRows.length,
+        matchedSku: matchedRows.length,
+        mismatchSku: mismatchRows.length,
+        notFoundSku: notFoundRows.length,
+        totalSnapshotQty: countedRows.reduce((sum: number, row: any) => sum + Number(row.snapshotQty || 0), 0),
+        totalCountedQty: countedRows.reduce((sum: number, row: any) => sum + Number(row.countedQty || 0), 0),
+        totalDiffQty: mismatchRows.reduce((sum: number, row: any) => sum + Number(row.diff || 0), 0),
+        totalDiffValue: mismatchRows.reduce((sum: number, row: any) => sum + Number(row.diffValue ?? row.valueDiff ?? 0), 0),
+      },
+    });
+
+    if (countedRows.length) {
+      await tx.stocktakeResultItem.createMany({
+        data: countedRows.map((row: any) => {
+          const variantId = row.variantId ? String(row.variantId) : null;
+          const beforeAfter = variantId ? beforeAfterMap.get(variantId) : null;
+          const snapshotQty = Number(row.snapshotQty || 0);
+          const countedQty = Number(row.countedQty || 0);
+          const diffQty = Number(row.diff ?? countedQty - snapshotQty);
+          const unitCost = Number(row.unitCost ?? row.costPrice ?? 0);
+          const diffValue = Number(row.diffValue ?? row.valueDiff ?? diffQty * unitCost);
+          const beforeApplyQty = beforeAfter?.beforeQty ?? (Number.isFinite(Number(row.currentQty)) ? Number(row.currentQty) : null);
+          const afterApplyQty = beforeAfter?.afterQty ?? (beforeApplyQty === null ? null : beforeApplyQty + diffQty);
+
+          return {
+            resultId: result.id,
+            sessionId: session.id,
+            branchId: row.branchId || session.branchId,
+            variantId,
+            sku: String(row.sku || ""),
+            barcode: row.barcode || null,
+            productName: row.productName || null,
+            color: row.color || null,
+            size: row.size || null,
+            snapshotQty,
+            countedQty,
+            diffQty,
+            beforeApplyQty,
+            afterApplyQty,
+            unitCost,
+            diffValue,
+            status: row.status || (diffQty === 0 ? "MATCH" : "MISMATCH"),
+            statusLabel: row.statusLabel || null,
+            diffType: row.diffType || null,
+            eventCount: Number(row.eventCount || 0),
+            workerId: row.workerId || null,
+            workerName: row.workerName || null,
+            zone: row.zone || null,
+            areaId: row.areaId || null,
+            rackId: row.rackId || null,
+            rackCode: row.rackCode || null,
+            locationCode: row.locationCode || null,
+            lastScannedAt: row.lastScannedAt || null,
+          };
+        }),
+      });
+    }
+
+    return { resultId: result.id, resultItemCount: countedRows.length };
+  }
+
+  private async cleanupAppliedSessionSnapshots(sessionId: string, user?: any) {
+    await this.ensureSessionAccess(sessionId, user);
+    const session = await this.prisma.stocktakeSession.findUnique({
+      where: { id: sessionId },
+      include: {
+        workers: { orderBy: { createdAt: "asc" } },
+        areas: { orderBy: { createdAt: "asc" } },
+        _count: { select: { scanEvents: true } },
+      },
+    });
+
+    if (!session) throw new NotFoundException("Không tìm thấy phiên kiểm kho.");
+    if (this.normalizeStatus(session.status) !== "APPLIED") {
+      throw new BadRequestException("Chỉ dọn snapshot của phiên đã chốt tồn.");
+    }
+
+    const snapshotCount = await this.prisma.stocktakeSnapshot.count({ where: { sessionId } });
+    if (!snapshotCount) {
+      return { ok: true, sessionId, deletedSnapshots: 0, resultItemCount: 0, alreadyCleaned: true };
+    }
+
+    const existingResult = await (this.prisma as any).stocktakeResult?.findUnique?.({
+      where: { sessionId },
+      select: { id: true },
+    });
+
+    const detail = existingResult ? null : await this.buildSessionDetail(sessionId);
+
+    return this.prisma.$transaction(
+      async (tx: any) => {
+        let resultItemCount = 0;
+        if (!existingResult && detail) {
+          const stored = await this.persistStocktakeResult(tx, session, detail);
+          resultItemCount = stored.resultItemCount;
+        }
+
+        const deleted = await tx.stocktakeSnapshot.deleteMany({ where: { sessionId } });
+        await tx.stocktakeSession.update({
+          where: { id: sessionId },
+          data: { snapshotPurgedAt: new Date() },
+        });
+
+        return {
+          ok: true,
+          sessionId,
+          deletedSnapshots: deleted.count,
+          resultItemCount,
+          alreadyHadResult: Boolean(existingResult),
+        };
+      },
+      { maxWait: 10000, timeout: 30000 },
+    );
+  }
+
+  async cleanupSessionSnapshots(sessionId: string, user?: any) {
+    return this.cleanupAppliedSessionSnapshots(sessionId, user);
+  }
+
+  async cleanupAppliedSnapshots(body: { sessionIds?: string[] } = {}, user?: any) {
+    if (!this.isOwner(user)) {
+      throw new ForbiddenException("Chỉ Admin/Owner được dọn snapshot kiểm kho hàng loạt.");
+    }
+
+    const sessionIds = Array.from(
+      new Set(
+        (Array.isArray(body?.sessionIds) ? body.sessionIds : [])
+          .map((id) => String(id || "").trim())
+          .filter(Boolean),
+      ),
+    );
+
+    if (!sessionIds.length) {
+      throw new BadRequestException("Chưa chọn phiên kiểm kho để dọn snapshot.");
+    }
+
+    if (sessionIds.length > 100) {
+      throw new BadRequestException("Mỗi lần chỉ dọn tối đa 100 phiên đã chọn.");
+    }
+
+    const sessions = await this.prisma.stocktakeSession.findMany({
+      where: { id: { in: sessionIds } },
+      select: { id: true, status: true, snapshotPurgedAt: true } as any,
+    });
+
+    const sessionMap = new Map(sessions.map((session) => [String(session.id), session]));
+
+    let processedSessions = 0;
+    let deletedSnapshots = 0;
+    let resultItemCount = 0;
+    let failed = 0;
+    let skipped = 0;
+
+    for (const sessionId of sessionIds) {
+      const session = sessionMap.get(sessionId) as any;
+      if (!session || this.normalizeStatus(session.status) !== "APPLIED" || session.snapshotPurgedAt) {
+        skipped += 1;
+        continue;
+      }
+
+      const snapshotCount = await this.prisma.stocktakeSnapshot.count({
+        where: { sessionId },
+      });
+
+      if (!snapshotCount) {
+        await this.prisma.stocktakeSession.update({
+          where: { id: sessionId },
+          data: { snapshotPurgedAt: new Date() } as any,
+        });
+        skipped += 1;
+        continue;
+      }
+
+      try {
+        const result = await this.cleanupAppliedSessionSnapshots(sessionId, user);
+        processedSessions += 1;
+        deletedSnapshots += Number(result.deletedSnapshots || 0);
+        resultItemCount += Number(result.resultItemCount || 0);
+      } catch {
+        failed += 1;
+      }
+    }
+
+    return {
+      ok: true,
+      processedSessions,
+      deletedSnapshots,
+      resultItemCount,
+      failed,
+      skipped,
+      selectedSessions: sessionIds.length,
+    };
+  }
+
+
   private async buildSessionDetail(sessionId: string, ensureSnapshot = true) {
     const session = await this.prisma.stocktakeSession.findUnique({
       where: { id: sessionId },
@@ -1347,6 +1699,20 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
     // Biến ensureSnapshot giữ lại để không phá chữ ký hàm cũ, nhưng detail không tự tạo snapshot
     // vì createSnapshotForSession có thể quét toàn kho và làm chậm khi mở chi tiết.
     void ensureSnapshot;
+
+    const storedResult = await (this.prisma as any).stocktakeResult?.findUnique?.({
+      where: { sessionId },
+      include: { items: { orderBy: { createdAt: "asc" } } },
+    });
+
+    if (storedResult) {
+      const scanEvents = await this.prisma.stocktakeScanEvent.findMany({
+        where: { sessionId, branchId: session.branchId },
+        orderBy: { createdAt: "desc" },
+        take: 1000,
+      });
+      return this.buildDetailFromStoredResult(session, storedResult, scanEvents);
+    }
 
     const [countRows, scanEvents] = await Promise.all([
       this.prisma.stocktakeCount.findMany({
@@ -1768,6 +2134,7 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
       async (tx) => {
         let adjustedCount = 0;
         let totalDelta = 0;
+        const beforeAfterMap = new Map<string, { beforeQty: number | null; afterQty: number | null }>();
 
         for (const row of rowsToApply) {
           const variantId = String(row.variantId || "");
@@ -1787,6 +2154,7 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
 
           const beforeQty = Number(inventoryItem.availableQty || 0);
           const afterQty = beforeQty + diff;
+          beforeAfterMap.set(variantId, { beforeQty, afterQty });
 
           await tx.inventoryItem.update({
             where: {
@@ -1827,11 +2195,19 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
           totalDelta += diff;
         }
 
+        const storedResult = await this.persistStocktakeResult(tx, session, detail, beforeAfterMap);
+        const deletedSnapshots = await tx.stocktakeSnapshot.deleteMany({
+          where: { sessionId: session.id },
+        });
+
+        const appliedAt = new Date();
         const updatedSession = await tx.stocktakeSession.update({
           where: { id: session.id },
           data: {
             status: "APPLIED",
-            finishedAt: session.finishedAt || new Date(),
+            finishedAt: session.finishedAt || appliedAt,
+            appliedAt,
+            snapshotPurgedAt: appliedAt,
           },
         });
 
@@ -1842,6 +2218,8 @@ const inventoryItems = await this.prisma.inventoryItem.findMany({
           totalDelta,
           skippedUncounted: detail.uncountedRows.length,
           discrepancySku: detail.kpi.discrepancySku,
+          resultItemCount: storedResult.resultItemCount,
+          deletedSnapshots: deletedSnapshots.count,
         };
       },
       { maxWait: 10000, timeout: 30000 },

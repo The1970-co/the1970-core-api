@@ -89,6 +89,18 @@ export class StocktakeSessionController {
   }
 
 
+  @Post("cleanup-snapshots")
+  @RequirePermissions("stocktake.apply")
+  cleanupAppliedSnapshots(@Body() body: any, @Req() req: any) {
+    return this.service.cleanupAppliedSnapshots(body || {}, req.user);
+  }
+
+  @Post(":id/cleanup-snapshots")
+  @RequirePermissions("stocktake.apply")
+  cleanupSessionSnapshots(@Param("id") id: string, @Req() req: any) {
+    return this.service.cleanupSessionSnapshots(id, req.user);
+  }
+
   @Patch(":id")
   updateSessionNote(@Param("id") id: string, @Body() body: any, @Req() req: any) {
     return this.service.updateSessionNote(id, body || {}, req.user);
