@@ -1390,20 +1390,20 @@ model StocktakeResult {
   sessionId String @unique
   branchId  String
 
-  totalRows        Int @default(0)
-  countedSku       Int @default(0)
-  matchedSku       Int @default(0)
-  mismatchSku      Int @default(0)
-  notFoundSku      Int @default(0)
-  totalSnapshotQty Int @default(0)
-  totalCountedQty  Int @default(0)
-  totalDiffQty     Int @default(0)
+  totalRows        Int     @default(0)
+  countedSku       Int     @default(0)
+  matchedSku       Int     @default(0)
+  mismatchSku      Int     @default(0)
+  notFoundSku      Int     @default(0)
+  totalSnapshotQty Int     @default(0)
+  totalCountedQty  Int     @default(0)
+  totalDiffQty     Int     @default(0)
   totalDiffValue   Decimal @default(0) @db.Decimal(14, 2)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  session StocktakeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session StocktakeSession      @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   items   StocktakeResultItem[]
 
   @@index([branchId])
@@ -1423,26 +1423,26 @@ model StocktakeResultItem {
   color       String?
   size        String?
 
-  snapshotQty    Int @default(0)
-  countedQty     Int @default(0)
-  diffQty        Int @default(0)
+  snapshotQty    Int  @default(0)
+  countedQty     Int  @default(0)
+  diffQty        Int  @default(0)
   beforeApplyQty Int?
   afterApplyQty  Int?
 
   unitCost  Decimal @default(0) @db.Decimal(14, 2)
   diffValue Decimal @default(0) @db.Decimal(14, 2)
 
-  status       String @default("MATCH")
-  statusLabel  String?
-  diffType     String?
-  eventCount   Int @default(0)
-  workerId     String?
-  workerName   String?
-  zone         String?
-  areaId       String?
-  rackId       String?
-  rackCode     String?
-  locationCode String?
+  status        String    @default("MATCH")
+  statusLabel   String?
+  diffType      String?
+  eventCount    Int       @default(0)
+  workerId      String?
+  workerName    String?
+  zone          String?
+  areaId        String?
+  rackId        String?
+  rackCode      String?
+  locationCode  String?
   lastScannedAt DateTime?
 
   createdAt DateTime @default(now())
@@ -2512,10 +2512,34 @@ model LocalDeliveryReconciliation {
   @@index([orderId, status, createdAt], map: "LocalDeliveryReconciliation_order_status_idx")
   @@index([shipmentId, status, createdAt], map: "LocalDeliveryReconciliation_shipment_status_idx")
 }
+
 model SystemSetting {
   key       String   @id
   value     Json
   note      String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+model MobilePushToken {
+  id         String   @id @default(cuid())
+  userId     String?
+  staffId    String?
+  branchId   String?
+  platform   String
+  provider   String
+  token      String   @unique
+  deviceId   String?
+  appVersion String?
+  isActive   Boolean  @default(true)
+  lastSeenAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([userId])
+  @@index([staffId])
+  @@index([branchId])
+  @@index([platform])
+  @@index([provider])
+  @@index([isActive])
 }

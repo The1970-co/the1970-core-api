@@ -18,6 +18,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { ShipmentService } from "../shipment/shipment.service";
 import { PromotionsService } from "../promotions/promotions.service";
 import { PromotionEngineService } from "../promotions/promotion-engine.service";
+import { MobilePushService } from "../mobile-push/mobile-push.service";
 
 type TxClient = Omit<
   PrismaClient,
@@ -53,7 +54,8 @@ export class OrderService implements OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly shipmentService: ShipmentService,
     private readonly promotionsService: PromotionsService,
-    private readonly promotionEngine: PromotionEngineService
+    private readonly promotionEngine: PromotionEngineService,
+    private readonly mobilePushService: MobilePushService
   ) { }
 
   onModuleInit() {
@@ -2196,6 +2198,28 @@ export class OrderService implements OnModuleInit {
       } catch (error) {
         console.error("[POS_CASH_VOUCHER_SYNC_FAILED]", error);
       }
+    }
+
+
+    try {
+      const orderForPush = finalOrder as any;
+
+      void this.mobilePushService.notifyNewOrder({
+        id: String(orderForPush?.id || ""),
+        orderCode: orderForPush?.orderCode || "",
+        finalAmount: Number(orderForPush?.finalAmount || 0),
+        customerName:
+          orderForPush?.customerName ||
+          orderForPush?.shippingRecipientName ||
+          "Khách lẻ",
+        customerPhone:
+          orderForPush?.customerPhone || orderForPush?.shippingPhone || "",
+        branchId: orderForPush?.branchId || null,
+        salesChannel: orderForPush?.salesChannel || "",
+        createdByStaffName: orderForPush?.createdByStaffName || "",
+      });
+    } catch (error) {
+      console.error("[MOBILE_PUSH_NEW_ORDER_FAILED]", error);
     }
 
     return {

@@ -33,6 +33,7 @@ import { SupplierPaymentsModule } from './supplier-payments/supplier-payments.mo
 import { RbacSnapshotsModule } from "./rbac-snapshots/rbac-snapshots.module";
 import { PayrollModule } from "./payroll/payroll.module";
 import { OmniInboxModule } from "./omni-inbox/omni-inbox.module";
+import { MobilePushModule } from "./mobile-push/mobile-push.module";
 @Module({
   imports: [
     PrismaModule,
@@ -69,6 +70,7 @@ import { OmniInboxModule } from "./omni-inbox/omni-inbox.module";
     RbacSnapshotsModule,
     PayrollModule,
     OmniInboxModule,
+    MobilePushModule,
   ],
 })
 export class AppModule {}
