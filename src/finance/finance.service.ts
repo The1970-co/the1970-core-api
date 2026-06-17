@@ -996,6 +996,11 @@ export class FinanceService {
     id: string,
     body: {
       payments: Array<{ paymentSourceId?: string; amount?: number }>;
+      shippingFeeSettlement?: {
+        payer?: "SHOP" | "CUSTOMER" | string;
+        amount?: number;
+        paymentSourceId?: string;
+      };
       note?: string;
       paidById?: string;
       paidByName?: string;
@@ -1055,7 +1060,9 @@ export class FinanceService {
       throw new NotFoundException("Không tìm thấy đơn nội thành của phiếu đối soát.");
     }
 
-    if (this.isGhnCarrier(order.shipment.carrier)) {
+    const shipment = order.shipment;
+
+    if (this.isGhnCarrier(shipment.carrier)) {
       throw new BadRequestException("Đơn GHN dùng màn đối soát GHN.");
     }
 
@@ -1070,7 +1077,28 @@ export class FinanceService {
       throw new BadRequestException("Tổng tiền thanh toán không được lớn hơn COD cần thu.");
     }
 
-    const sourceIds = Array.from(new Set(paymentRows.map((row) => row.paymentSourceId)));
+    const shippingFeePayer =
+      String(body.shippingFeeSettlement?.payer || "SHOP").toUpperCase() === "CUSTOMER"
+        ? "CUSTOMER"
+        : "SHOP";
+    const shippingFeeAmount = Math.max(
+      0,
+      this.toNumber(
+        body.shippingFeeSettlement?.amount ??
+          current.shippingFee ??
+          shipment.shippingFee ??
+          order.shippingFee ??
+          0,
+      ),
+    );
+    const shippingFeePaymentSourceId = String(
+      body.shippingFeeSettlement?.paymentSourceId || paymentRows[0]?.paymentSourceId || "",
+    ).trim();
+
+    const sourceIds = Array.from(new Set([
+      ...paymentRows.map((row) => row.paymentSourceId),
+      ...(shippingFeePayer === "SHOP" && shippingFeeAmount > 0 ? [shippingFeePaymentSourceId] : []),
+    ].filter(Boolean)));
     const sources = await this.prisma.paymentSource.findMany({
       where: { id: { in: sourceIds } },
     });
@@ -1082,8 +1110,16 @@ export class FinanceService {
       }
     }
 
+    if (shippingFeePayer === "SHOP" && shippingFeeAmount > 0 && !sourceMap.has(shippingFeePaymentSourceId)) {
+      throw new BadRequestException("Chọn nguồn tiền để ghi phiếu chi phí ship.");
+    }
+
     const note = body.note?.trim() || current.note || "Thanh toán đối soát nội thành";
     const now = new Date();
+    const actorId = body.paidById || user?.id || null;
+    const actorName = body.paidByName || user?.name || user?.fullName || null;
+    const partnerName = order.shippingRecipientName || order.customerName || null;
+    const partnerPhone = order.shippingPhone || order.customerPhone || null;
 
     return this.prisma.$transaction(async (tx) => {
       const pendingCodPayments = order.payments.filter((payment) => payment.status === PaymentStatus.PENDING_COD);
@@ -1112,6 +1148,46 @@ export class FinanceService {
             paymentSourceId: source.id,
             note,
           },
+        });
+
+        await this.insertConfirmedCashVoucher(tx, {
+          type: "RECEIPT",
+          branchId: order.branchId || current.branchId || null,
+          paymentSourceId: source.id,
+          amount: row.amount,
+          category: "Thu đối soát nội thành",
+          title: `Thu COD đối soát nội thành ${order.orderCode || ""}`.trim(),
+          partnerName,
+          partnerPhone,
+          refType: "ORDER",
+          refId: order.id,
+          note: `${note} ${current.code ? `· ${current.code}` : ""}`.trim(),
+          createdById: actorId,
+          createdByName: actorName,
+          confirmedById: actorId,
+          confirmedByName: actorName,
+        });
+      }
+
+      let shippingFeePaymentVoucher: any = null;
+      if (shippingFeePayer === "SHOP" && shippingFeeAmount > 0) {
+        const shippingSource = sourceMap.get(shippingFeePaymentSourceId)!;
+        shippingFeePaymentVoucher = await this.insertConfirmedCashVoucher(tx, {
+          type: "PAYMENT",
+          branchId: order.branchId || current.branchId || null,
+          paymentSourceId: shippingSource.id,
+          amount: shippingFeeAmount,
+          category: "Phí ship nội thành",
+          title: `Chi phí ship nội thành ${order.orderCode || ""}`.trim(),
+          partnerName: this.normalizeCarrier(shipment.carrier),
+          partnerPhone: shipment.trackingCode || shipment.ahamoveOrderId || null,
+          refType: "ORDER",
+          refId: order.id,
+          note: `${note} ${current.code ? `· ${current.code}` : ""} · ${shippingFeePayer === "SHOP" ? "Shop trả phí ship" : "Khách trả phí ship"}`.trim(),
+          createdById: actorId,
+          createdByName: actorName,
+          confirmedById: actorId,
+          confirmedByName: actorName,
         });
       }
 
@@ -1162,12 +1238,24 @@ export class FinanceService {
         `,
         id,
         totalPaid,
-        JSON.stringify(paymentRows.map((row) => ({
-          ...row,
-          paymentSourceName: sourceMap.get(row.paymentSourceId)?.name || "",
-        }))),
-        body.paidById || user?.id || null,
-        body.paidByName || user?.name || user?.fullName || null,
+        JSON.stringify({
+          payments: paymentRows.map((row) => ({
+            ...row,
+            paymentSourceName: sourceMap.get(row.paymentSourceId)?.name || "",
+          })),
+          shippingFeeSettlement: {
+            payer: shippingFeePayer,
+            amount: shippingFeeAmount,
+            paymentSourceId: shippingFeePayer === "SHOP" ? shippingFeePaymentSourceId : null,
+            paymentSourceName:
+              shippingFeePayer === "SHOP"
+                ? sourceMap.get(shippingFeePaymentSourceId)?.name || ""
+                : "",
+            paymentVoucherCode: shippingFeePaymentVoucher?.voucherCode || shippingFeePaymentVoucher?.code || null,
+          },
+        }),
+        actorId,
+        actorName,
         note,
       );
 
@@ -1692,7 +1780,10 @@ export class FinanceService {
 
   private async generateCashVoucherCode(type: "RECEIPT" | "PAYMENT") {
     await this.ensureCashVoucherTable();
+    return this.generateCashVoucherCodeWithClient(this.prisma, type);
+  }
 
+  private async generateCashVoucherCodeWithClient(client: any, type: "RECEIPT" | "PAYMENT") {
     const prefix = type === "RECEIPT" ? "PT" : "PC";
     const today = new Date();
     const ymd = [
@@ -1701,13 +1792,96 @@ export class FinanceService {
       String(today.getDate()).padStart(2, "0"),
     ].join("");
 
-    const rows = await this.prisma.$queryRawUnsafe<Array<{ count: bigint | number | string }>>(
+    const rows = await client.$queryRawUnsafe(
       `SELECT COUNT(*)::int AS count FROM "CashVoucher" WHERE COALESCE("voucherCode", "code", '') LIKE $1`,
       `${prefix}${ymd}%`,
     );
 
     const count = Number(rows?.[0]?.count || 0) + 1;
     return `${prefix}${ymd}-${String(count).padStart(4, "0")}`;
+  }
+
+  private async insertConfirmedCashVoucher(
+    client: any,
+    body: {
+      type: "RECEIPT" | "PAYMENT";
+      branchId?: string | null;
+      paymentSourceId?: string | null;
+      amount: number;
+      category: string;
+      title: string;
+      partnerName?: string | null;
+      partnerPhone?: string | null;
+      note?: string | null;
+      refType?: string | null;
+      refId?: string | null;
+      createdById?: string | null;
+      createdByName?: string | null;
+      confirmedById?: string | null;
+      confirmedByName?: string | null;
+    },
+  ) {
+    const type = this.normalizeCashVoucherType(body.type);
+    const amount = this.toNumber(body.amount);
+
+    if (!body.title?.trim()) {
+      throw new BadRequestException("Thiếu nội dung phiếu.");
+    }
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new BadRequestException("Số tiền phiếu phải lớn hơn 0.");
+    }
+
+    const voucherCode = await this.generateCashVoucherCodeWithClient(client, type);
+    const id = `cv_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    const direction = this.cashVoucherDirection(type);
+    const category = body.category?.trim() || (type === "RECEIPT" ? "Thu khác" : "Chi khác");
+    const title = body.title.trim();
+
+    const rows = await client.$queryRawUnsafe(
+      `
+        INSERT INTO "CashVoucher" (
+          "id", "code", "voucherCode", "direction", "voucherType", "type", "status",
+          "branchId", "paymentSourceId", "amount", "category", "title",
+          "partnerName", "partnerPhone", "customerName", "customerPhone",
+          "refType", "refId", "note",
+          "createdById", "createdByName", "staffId", "staffName",
+          "confirmedById", "confirmedByName", "confirmedAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          $1, $2, $2, $3, $4, $5, 'CONFIRMED',
+          $6, $7, $8, $4, $9,
+          $10, $11, $10, $11,
+          $12, $13, $14,
+          $15, $16, $15, $16,
+          $17, $18, NOW(), NOW(), NOW()
+        )
+        RETURNING *,
+          COALESCE("voucherCode", "code") AS "voucherCode",
+          COALESCE("type", $5) AS "type",
+          COALESCE("status", 'CONFIRMED') AS "status"
+      `,
+      id,
+      voucherCode,
+      direction,
+      category,
+      type,
+      body.branchId || null,
+      body.paymentSourceId || null,
+      amount,
+      title,
+      body.partnerName?.trim() || null,
+      body.partnerPhone?.trim() || null,
+      body.refType || null,
+      body.refId || null,
+      body.note?.trim() || null,
+      body.createdById || null,
+      body.createdByName || null,
+      body.confirmedById || body.createdById || null,
+      body.confirmedByName || body.createdByName || null,
+    );
+
+    return rows[0];
   }
 
   private cashVoucherPermissionForCreate(type?: string) {

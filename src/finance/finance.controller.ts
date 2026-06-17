@@ -427,6 +427,11 @@ export class FinanceController {
     @Body()
     body: {
       payments: Array<{ paymentSourceId?: string; amount?: number }>;
+      shippingFeeSettlement?: {
+        payer?: "SHOP" | "CUSTOMER" | string;
+        amount?: number;
+        paymentSourceId?: string;
+      };
       note?: string;
       paidById?: string;
       paidByName?: string;
