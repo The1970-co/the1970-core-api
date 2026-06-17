@@ -18,7 +18,7 @@ type NewOrderPushPayload = {
 export class MobilePushService implements OnModuleDestroy {
   private apnProvider: apn.Provider | null = null;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
 
   private n(value: unknown) {
     const parsed = Number(value || 0);
@@ -159,11 +159,19 @@ export class MobilePushService implements OnModuleDestroy {
 
     const note = new apn.Notification();
     note.topic = process.env.APNS_BUNDLE_ID || "co.the1970.operations";
+
+    // Force APNs to treat this as a visible alert push.
+    // This helps iOS show it on Lock Screen / Notification Center like normal apps.
+    (note as any).pushType = "alert";
+    note.priority = 10;
+    note.expiry = Math.floor(Date.now() / 1000) + 60 * 60;
+
     note.alert = {
       title: "Có đơn mới",
       body: `${order.orderCode || "Đơn mới"} · ${this.formatMoney(order.finalAmount)}`,
     };
     note.sound = "default";
+    note.badge = 1;
     note.payload = {
       type: "new_order",
       orderId: order.id,
