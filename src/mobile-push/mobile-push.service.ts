@@ -18,7 +18,7 @@ type NewOrderPushPayload = {
 export class MobilePushService implements OnModuleDestroy {
   private apnProvider: apn.Provider | null = null;
 
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(private readonly prisma: PrismaService) {}
 
   private n(value: unknown) {
     const parsed = Number(value || 0);
@@ -116,6 +116,27 @@ export class MobilePushService implements OnModuleDestroy {
     return `${new Intl.NumberFormat("vi-VN").format(Math.round(this.n(value)))}đ`;
   }
 
+  private salesChannelLabel(value?: string | null) {
+    const channel = String(value || "").trim().toUpperCase();
+
+    if (!channel) return "Không rõ kênh";
+    if (channel === "POS" || channel.includes("STORE") || channel.includes("OFFLINE")) return "POS / cửa hàng";
+    if (channel.includes("FACEBOOK") || channel === "FB") return "Facebook";
+    if (channel.includes("META")) return "Meta Ads";
+    if (channel.includes("SHOPEE")) return "Shopee";
+    if (channel.includes("TIKTOK")) return "TikTok";
+    if (channel.includes("WEBSITE") || channel.includes("WEB")) return "Website";
+    if (channel.includes("ZALO")) return "Zalo";
+
+    return value || "Không rõ kênh";
+  }
+
+  private compactText(value?: string | null, fallback = "") {
+    return String(value || fallback || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
   async notifyNewOrder(order: NewOrderPushPayload) {
     console.log("[MOBILE_PUSH_NEW_ORDER_START]", {
       orderId: order?.id || null,
@@ -157,27 +178,37 @@ export class MobilePushService implements OnModuleDestroy {
       topic: process.env.APNS_BUNDLE_ID || "co.the1970.operations",
     });
 
-    const note = new apn.Notification();
+    const note: any = new apn.Notification();
+    const orderCode = this.compactText(order.orderCode, "Đơn mới");
+    const customerName = this.compactText(order.customerName, "Khách lẻ");
+    const channelLabel = this.salesChannelLabel(order.salesChannel);
+    const amountText = this.formatMoney(order.finalAmount);
+
     note.topic = process.env.APNS_BUNDLE_ID || "co.the1970.operations";
 
     // Force APNs to treat this as a visible alert push.
     // This helps iOS show it on Lock Screen / Notification Center like normal apps.
-    (note as any).pushType = "alert";
+    note.pushType = "alert";
     note.priority = 10;
     note.expiry = Math.floor(Date.now() / 1000) + 60 * 60;
 
     note.alert = {
       title: "Có đơn mới",
-      body: `${order.orderCode || "Đơn mới"} · ${this.formatMoney(order.finalAmount)}`,
+      subtitle: `${orderCode} · ${channelLabel}`,
+      body: `${amountText} · ${customerName}`,
     };
     note.sound = "default";
     note.badge = 1;
     note.payload = {
       type: "new_order",
       orderId: order.id,
-      orderCode: order.orderCode || "",
+      orderCode,
+      customerName,
+      customerPhone: order.customerPhone || "",
       branchId: order.branchId || "",
       salesChannel: order.salesChannel || "",
+      salesChannelLabel: channelLabel,
+      finalAmount: String(order.finalAmount || 0),
     };
 
     try {
