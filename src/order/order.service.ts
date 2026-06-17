@@ -2204,20 +2204,24 @@ export class OrderService implements OnModuleInit {
     try {
       const orderForPush = finalOrder as any;
 
-      void this.mobilePushService.notifyNewOrder({
-        id: String(orderForPush?.id || ""),
-        orderCode: orderForPush?.orderCode || "",
-        finalAmount: Number(orderForPush?.finalAmount || 0),
-        customerName:
-          orderForPush?.customerName ||
-          orderForPush?.shippingRecipientName ||
-          "Khách lẻ",
-        customerPhone:
-          orderForPush?.customerPhone || orderForPush?.shippingPhone || "",
-        branchId: orderForPush?.branchId || null,
-        salesChannel: orderForPush?.salesChannel || "",
-        createdByStaffName: orderForPush?.createdByStaffName || "",
-      });
+      void this.mobilePushService
+        .notifyNewOrder({
+          id: String(orderForPush?.id || ""),
+          orderCode: orderForPush?.orderCode || "",
+          finalAmount: Number(orderForPush?.finalAmount || 0),
+          customerName:
+            orderForPush?.customerName ||
+            orderForPush?.shippingRecipientName ||
+            "Khách lẻ",
+          customerPhone:
+            orderForPush?.customerPhone || orderForPush?.shippingPhone || "",
+          branchId: orderForPush?.branchId || null,
+          salesChannel: orderForPush?.salesChannel || "",
+          createdByStaffName: orderForPush?.createdByStaffName || "",
+        })
+        .catch((error) => {
+          console.error("[MOBILE_PUSH_NEW_ORDER_ASYNC_FAILED]", error);
+        });
     } catch (error) {
       console.error("[MOBILE_PUSH_NEW_ORDER_FAILED]", error);
     }

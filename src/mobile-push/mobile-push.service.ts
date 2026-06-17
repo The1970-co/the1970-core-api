@@ -117,7 +117,18 @@ export class MobilePushService implements OnModuleDestroy {
   }
 
   async notifyNewOrder(order: NewOrderPushPayload) {
-    if (!order?.id) return { success: false, sent: 0, failed: 0 };
+    console.log("[MOBILE_PUSH_NEW_ORDER_START]", {
+      orderId: order?.id || null,
+      orderCode: order?.orderCode || null,
+      finalAmount: order?.finalAmount || 0,
+      branchId: order?.branchId || null,
+      salesChannel: order?.salesChannel || null,
+    });
+
+    if (!order?.id) {
+      console.warn("[MOBILE_PUSH_NEW_ORDER_SKIPPED] missing order id", order);
+      return { success: false, sent: 0, failed: 0 };
+    }
 
     let tokens: Array<{ id: string; token: string }> = [];
     try {
@@ -135,7 +146,16 @@ export class MobilePushService implements OnModuleDestroy {
       return { success: false, sent: 0, failed: 0 };
     }
 
-    if (!tokens.length) return { success: true, sent: 0, failed: 0 };
+    if (!tokens.length) {
+      console.warn("[MOBILE_PUSH_NO_ACTIVE_TOKENS]");
+      return { success: true, sent: 0, failed: 0 };
+    }
+
+    console.log("[MOBILE_PUSH_TOKENS_FOUND]", {
+      count: tokens.length,
+      production: process.env.APNS_PRODUCTION === "true",
+      topic: process.env.APNS_BUNDLE_ID || "co.the1970.operations",
+    });
 
     const note = new apn.Notification();
     note.topic = process.env.APNS_BUNDLE_ID || "co.the1970.operations";
@@ -157,6 +177,16 @@ export class MobilePushService implements OnModuleDestroy {
         note,
         tokens.map((item) => item.token),
       );
+
+      console.log("[MOBILE_PUSH_APNS_RESULT]", {
+        sent: result.sent.length,
+        failed: result.failed.length,
+        failedReasons: result.failed.map((item: any) => ({
+          status: item?.status || null,
+          reason: item?.response?.reason || null,
+          devicePrefix: item?.device ? String(item.device).slice(0, 12) : null,
+        })),
+      });
 
       const deadTokens = result.failed
         .filter((item: any) => {
