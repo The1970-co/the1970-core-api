@@ -50,6 +50,17 @@ export class AuthController {
     return decodeURIComponent(found.slice(key.length + 1));
   }
 
+  private getRefreshTokenFromRequest(req: Request, body?: any) {
+    return String(
+      body?.refreshToken ||
+        body?.refresh_token ||
+        this.getCookieFromHeader(req, "refreshToken") ||
+        this.getCookieFromHeader(req, "the1970_mobile_refresh_token") ||
+        this.getCookieFromHeader(req, "the1970_refresh_token") ||
+        "",
+    ).trim();
+  }
+
   private getRequestMeta(req: Request) {
     return {
       userAgent: req.headers["user-agent"] || "",
@@ -75,16 +86,16 @@ export class AuthController {
 
     if (data?.refreshToken) {
       res.cookie("refreshToken", data.refreshToken, this.getRefreshCookieOptions());
-      const { refreshToken, ...safeData } = data;
-      return safeData;
     }
 
+    // Mobile app không nên phụ thuộc cookie WebView. Trả refreshToken trong JSON để
+    // app lưu vào Capacitor Preferences và refresh ngầm sau khi access token 15 phút hết hạn.
     return data;
   }
 
   @Post("second-password/verify")
   async verifySecondPassword(
-    @Body() body: { tempToken: string; secondPassword: string },
+    @Body() body: any,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
@@ -96,30 +107,36 @@ export class AuthController {
 
     if (data?.refreshToken) {
       res.cookie("refreshToken", data.refreshToken, this.getRefreshCookieOptions());
-      const { refreshToken, ...safeData } = data;
-      return safeData;
     }
 
     return data;
   }
 
   @Post("refresh")
-  async refresh(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
-    const refreshToken = this.getCookieFromHeader(req, "refreshToken");
+  async refresh(
+    @Body() body: any,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    // Web lấy từ cookie, mobile gửi trong body { refreshToken }.
+    const refreshToken = this.getRefreshTokenFromRequest(req, body);
     const data: any = await this.authService.refresh(refreshToken);
 
     if (data?.refreshToken) {
       res.cookie("refreshToken", data.refreshToken, this.getRefreshCookieOptions());
-      const { refreshToken: _refreshToken, ...safeData } = data;
-      return safeData;
     }
 
+    // Trả refreshToken mới để mobile cập nhật Preferences sau mỗi lần rotate token.
     return data;
   }
 
   @Post("logout")
-  async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
-    const refreshToken = this.getCookieFromHeader(req, "refreshToken");
+  async logout(
+    @Body() body: any,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const refreshToken = this.getRefreshTokenFromRequest(req, body);
     await this.authService.logout(refreshToken);
     res.clearCookie("refreshToken", this.getClearRefreshCookieOptions());
     return { message: "Đăng xuất thành công" };

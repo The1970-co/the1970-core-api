@@ -2218,6 +2218,7 @@ export class OrderService implements OnModuleInit {
           branchId: orderForPush?.branchId || null,
           salesChannel: orderForPush?.salesChannel || "",
           createdByStaffName: orderForPush?.createdByStaffName || "",
+          createdAt: orderForPush?.createdAt || new Date(),
         })
         .catch((error) => {
           console.error("[MOBILE_PUSH_NEW_ORDER_ASYNC_FAILED]", error);

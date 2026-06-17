@@ -10,8 +10,11 @@ type NewOrderPushPayload = {
   customerName?: string | null;
   customerPhone?: string | null;
   branchId?: string | null;
+  branchName?: string | null;
+  branchCode?: string | null;
   salesChannel?: string | null;
   createdByStaffName?: string | null;
+  createdAt?: Date | string | null;
 };
 
 @Injectable()
@@ -131,10 +134,42 @@ export class MobilePushService implements OnModuleDestroy {
     return value || "Không rõ kênh";
   }
 
+
+  private formatCreatedAt(value?: Date | string | null) {
+    const date = value ? new Date(value) : new Date();
+    if (Number.isNaN(date.getTime())) return "";
+
+    return new Intl.DateTimeFormat("vi-VN", {
+      timeZone: "Asia/Ho_Chi_Minh",
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(date);
+  }
+
   private compactText(value?: string | null, fallback = "") {
     return String(value || fallback || "")
       .replace(/\s+/g, " ")
       .trim();
+  }
+
+  private async resolveBranchLabel(order: NewOrderPushPayload) {
+    const direct = this.compactText(order.branchName || order.branchCode || "");
+    if (direct) return direct;
+
+    const branchId = this.compactText(order.branchId || "");
+    if (!branchId) return "Không rõ chi nhánh";
+
+    try {
+      const branch = await (this.prisma as any).branch.findFirst({
+        where: { id: branchId },
+        select: { name: true, code: true },
+      });
+      return this.compactText(branch?.name || branch?.code || branchId, branchId);
+    } catch {
+      return branchId;
+    }
   }
 
   async notifyNewOrder(order: NewOrderPushPayload) {
@@ -182,7 +217,13 @@ export class MobilePushService implements OnModuleDestroy {
     const orderCode = this.compactText(order.orderCode, "Đơn mới");
     const customerName = this.compactText(order.customerName, "Khách lẻ");
     const channelLabel = this.salesChannelLabel(order.salesChannel);
+    const branchLabel = await this.resolveBranchLabel(order);
     const amountText = this.formatMoney(order.finalAmount);
+    const createdByStaffName = this.compactText(order.createdByStaffName, "Không rõ NV");
+    const createdAtText = this.formatCreatedAt(order.createdAt);
+    const staffAndTime = [createdByStaffName ? `NV ${createdByStaffName}` : "", createdAtText]
+      .filter(Boolean)
+      .join(" · ");
 
     note.topic = process.env.APNS_BUNDLE_ID || "co.the1970.operations";
 
@@ -194,8 +235,8 @@ export class MobilePushService implements OnModuleDestroy {
 
     note.alert = {
       title: "Có đơn mới",
-      subtitle: `${orderCode} · ${channelLabel}`,
-      body: `${amountText} · ${customerName}`,
+      subtitle: `${orderCode} · ${branchLabel} · ${channelLabel}`,
+      body: `${amountText} · ${customerName}${staffAndTime ? ` · ${staffAndTime}` : ""}`,
     };
     note.sound = "default";
     note.badge = 1;
@@ -206,9 +247,13 @@ export class MobilePushService implements OnModuleDestroy {
       customerName,
       customerPhone: order.customerPhone || "",
       branchId: order.branchId || "",
+      branchName: branchLabel,
       salesChannel: order.salesChannel || "",
       salesChannelLabel: channelLabel,
       finalAmount: String(order.finalAmount || 0),
+      createdByStaffName,
+      createdAt: order.createdAt ? new Date(order.createdAt).toISOString() : new Date().toISOString(),
+      createdAtText,
     };
 
     try {
