@@ -1008,6 +1008,7 @@ export class FinanceService {
     user?: any
   ) {
     await this.ensureLocalDeliveryReconciliationTable();
+    await this.ensureCashVoucherTable();
 
     const paymentRows = Array.isArray(body.payments)
       ? body.payments
@@ -1138,18 +1139,10 @@ export class FinanceService {
 
       for (const row of paymentRows) {
         const source = sourceMap.get(row.paymentSourceId)!;
-        await tx.payment.create({
-          data: {
-            orderId: order.id,
-            amount: new Prisma.Decimal(row.amount),
-            status: row.amount >= targetAmount ? PaymentStatus.PAID : PaymentStatus.PARTIAL,
-            paidAt: now,
-            method: source.name,
-            paymentSourceId: source.id,
-            note,
-          },
-        });
 
+        // Dòng tiền đối soát nội thành lấy CashVoucher làm nguồn ghi nhận chính.
+        // Không gắn refId = order.id vì một số DB đang có FK CashVoucher_refId_fkey
+        // không trỏ sang Order, sẽ gây lỗi 23503 khi insert phiếu.
         await this.insertConfirmedCashVoucher(tx, {
           type: "RECEIPT",
           branchId: order.branchId || current.branchId || null,
@@ -1159,9 +1152,9 @@ export class FinanceService {
           title: `Thu COD đối soát nội thành ${order.orderCode || ""}`.trim(),
           partnerName,
           partnerPhone,
-          refType: "ORDER",
-          refId: order.id,
-          note: `${note} ${current.code ? `· ${current.code}` : ""}`.trim(),
+          refType: null,
+          refId: null,
+          note: `${note} ${current.code ? `· ${current.code}` : ""} · Order ${order.orderCode || order.id}`.trim(),
           createdById: actorId,
           createdByName: actorName,
           confirmedById: actorId,
@@ -1181,9 +1174,9 @@ export class FinanceService {
           title: `Chi phí ship nội thành ${order.orderCode || ""}`.trim(),
           partnerName: this.normalizeCarrier(shipment.carrier),
           partnerPhone: shipment.trackingCode || shipment.ahamoveOrderId || null,
-          refType: "ORDER",
-          refId: order.id,
-          note: `${note} ${current.code ? `· ${current.code}` : ""} · ${shippingFeePayer === "SHOP" ? "Shop trả phí ship" : "Khách trả phí ship"}`.trim(),
+          refType: null,
+          refId: null,
+          note: `${note} ${current.code ? `· ${current.code}` : ""} · Order ${order.orderCode || order.id} · ${shippingFeePayer === "SHOP" ? "Shop trả phí ship" : "Khách trả phí ship"}`.trim(),
           createdById: actorId,
           createdByName: actorName,
           confirmedById: actorId,
