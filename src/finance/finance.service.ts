@@ -1016,11 +1016,11 @@ export class FinanceService {
             paymentSourceId: String(row.paymentSourceId || "").trim(),
             amount: Number(row.amount || 0),
           }))
-          .filter((row) => row.paymentSourceId && row.amount > 0)
+          .filter((row) => row.paymentSourceId && Number.isFinite(row.amount) && row.amount >= 0)
       : [];
 
     if (!paymentRows.length) {
-      throw new BadRequestException("Nhập ít nhất 1 dòng thanh toán.");
+      throw new BadRequestException("Chọn nguồn tiền thanh toán. Có thể nhập 0 nếu khách đã chuyển khoản trước.");
     }
 
     if (paymentRows.length > 3) {
@@ -1069,10 +1069,6 @@ export class FinanceService {
 
     const totalPaid = paymentRows.reduce((sum, row) => sum + row.amount, 0);
     const targetAmount = this.toNumber(current.codAmount || order.finalAmount || 0);
-
-    if (totalPaid <= 0) {
-      throw new BadRequestException("Số tiền thanh toán phải lớn hơn 0.");
-    }
 
     if (targetAmount > 0 && totalPaid > targetAmount) {
       throw new BadRequestException("Tổng tiền thanh toán không được lớn hơn COD cần thu.");
@@ -1138,11 +1134,15 @@ export class FinanceService {
       }
 
       for (const row of paymentRows) {
+        if (row.amount <= 0) continue;
+
         const source = sourceMap.get(row.paymentSourceId)!;
 
         // Dòng tiền đối soát nội thành lấy CashVoucher làm nguồn ghi nhận chính.
         // Không gắn refId = order.id vì một số DB đang có FK CashVoucher_refId_fkey
         // không trỏ sang Order, sẽ gây lỗi 23503 khi insert phiếu.
+        // Nếu khách đã chuyển khoản trước và đối soát nhập 0 thì không tạo thêm phiếu thu,
+        // vì phiếu thu đã được tạo lúc tạo đơn/chọn khách đã thanh toán.
         await this.insertConfirmedCashVoucher(tx, {
           type: "RECEIPT",
           branchId: order.branchId || current.branchId || null,
