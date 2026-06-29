@@ -32,6 +32,17 @@ type MetaProfile = {
   first_name?: string;
   last_name?: string;
   profile_pic?: string;
+  picture?: {
+    data?: {
+      url?: string;
+      is_silhouette?: boolean;
+    };
+  };
+};
+
+type MetaFeedChange = {
+  field?: string;
+  value?: any;
 };
 
 @Injectable()
@@ -77,6 +88,7 @@ export class OmniInboxService {
       "message_deliveries",
       "message_reactions",
       "messaging_postbacks",
+      "feed",
     ];
   }
 
@@ -320,6 +332,40 @@ export class OmniInboxService {
         `[META_PROFILE_FALLBACK] psid=${last6(psid)} | ${error?.message || error}`,
       );
       return { name: fallbackName, avatarUrl: null, isFallback: true };
+    }
+  }
+
+  private async getFacebookCommentProfile(
+    userId: string,
+    fallbackNameFromWebhook?: string | null,
+  ): Promise<{ name: string; avatarUrl?: string | null; isFallback: boolean }> {
+    const fallbackName = safeText(fallbackNameFromWebhook) || `Khách ${last6(userId)}`;
+
+    if (!this.pageAccessToken) {
+      this.logMetaDebug(
+        `[META_COMMENT_PROFILE_SKIP] missing page access token | user=${last6(userId)}`,
+      );
+      return { name: fallbackName, avatarUrl: null, isFallback: isFallbackCustomerName(fallbackName) };
+    }
+
+    try {
+      const profile = await this.metaFetch<MetaProfile>(userId, {
+        fields: "id,name,picture.width(240).height(240)",
+      });
+
+      const name = safeText(profile.name) || fallbackName;
+      const avatarUrl = safeText(profile.picture?.data?.url) || null;
+
+      return {
+        name,
+        avatarUrl,
+        isFallback: !isUsableProfileName(name),
+      };
+    } catch (error: any) {
+      this.logMetaDebug(
+        `[META_COMMENT_PROFILE_FALLBACK] user=${last6(userId)} | ${error?.message || error}`,
+      );
+      return { name: fallbackName, avatarUrl: null, isFallback: isFallbackCustomerName(fallbackName) };
     }
   }
 
@@ -682,6 +728,158 @@ export class OmniInboxService {
     this.realtime.emit({ type: "conversation.updated", payload: updated });
 
     return message;
+  }
+
+  async ingestMetaFeedChange(change: MetaFeedChange, entry?: any) {
+    const field = safeText(change?.field);
+    const value = change?.value || {};
+    const item = safeText(value?.item);
+    const verb = safeText(value?.verb);
+
+    if (field !== "feed") return { skipped: true, reason: "not_feed_change" };
+    if (item !== "comment") return { skipped: true, reason: `not_comment_${item || "unknown"}` };
+    if (verb && !["add", "edited"].includes(verb)) {
+      return { skipped: true, reason: `comment_${verb}` };
+    }
+
+    const pageId =
+      safeText(value?.recipient_id) ||
+      safeText(value?.page_id) ||
+      safeText(entry?.id) ||
+      this.configuredPageId;
+    const postId = safeText(value?.post_id) || safeText(value?.parent_id);
+    const commentId =
+      safeText(value?.comment_id) ||
+      safeText(value?.id) ||
+      safeText(value?.comment?.id);
+    const senderId =
+      safeText(value?.from?.id) ||
+      safeText(value?.sender_id) ||
+      safeText(value?.user_id);
+    const senderNameFromWebhook =
+      safeText(value?.from?.name) || safeText(value?.sender_name);
+    const text = safeText(value?.message) || safeText(value?.comment?.message);
+    const attachmentUrl =
+      safeText(value?.photo) ||
+      safeText(value?.photo_url) ||
+      safeText(value?.attachment?.media?.image?.src) ||
+      safeText(value?.attachment?.url);
+    const createdTime = Number(value?.created_time || value?.timestamp || Date.now());
+    const sentAt = new Date(createdTime > 10_000_000_000 ? createdTime : createdTime * 1000);
+
+    if (!pageId || !senderId || !commentId) {
+      this.logMetaDebug(
+        `[META_FEED_COMMENT_SKIP] missing_required page=${pageId || "-"} sender=${senderId ? last6(senderId) : "-"} comment=${commentId || "-"}`,
+      );
+      return { skipped: true, reason: "missing_page_sender_or_comment" };
+    }
+
+    if (!text && !attachmentUrl) {
+      return { skipped: true, reason: "empty_comment" };
+    }
+
+    const existed = await this.prisma.omniMessage.findUnique({
+      where: { providerMessageId: commentId },
+    });
+    if (existed) return { duplicated: true };
+
+    const profile = await this.getFacebookCommentProfile(
+      senderId,
+      senderNameFromWebhook,
+    );
+
+    const page = await this.prisma.omniInboxPage.upsert({
+      where: { providerPageId: pageId },
+      update: {
+        lastWebhookAt: new Date(),
+        pageName:
+          pageId === this.configuredPageId
+            ? "The 1970"
+            : `Page ${pageId}`,
+      },
+      create: {
+        providerPageId: pageId,
+        pageName:
+          pageId === this.configuredPageId
+            ? "The 1970"
+            : `Page ${pageId}`,
+        channel: "FACEBOOK",
+        lastWebhookAt: new Date(),
+      },
+    });
+
+    const existingCustomer = await this.prisma.omniCustomer.findUnique({
+      where: { providerUserId: senderId },
+    });
+
+    const nextCustomerName = profile.isFallback
+      ? existingCustomer?.name || profile.name
+      : profile.name;
+    const nextAvatarUrl =
+      profile.avatarUrl || existingCustomer?.avatarUrl || null;
+
+    const customer = await this.prisma.omniCustomer.upsert({
+      where: { providerUserId: senderId },
+      update: {
+        name: nextCustomerName,
+        avatarUrl: nextAvatarUrl,
+      },
+      create: {
+        providerUserId: senderId,
+        name: nextCustomerName,
+        avatarUrl: nextAvatarUrl,
+      },
+    });
+
+    const providerThreadId = `FACEBOOK_COMMENT:${pageId}:${postId || "post"}:${commentId}`;
+    const messageText = text || "[Bình luận có tệp đính kèm]";
+    const lastMessageText = `[Bình luận] ${messageText}`;
+
+    const conversation = await this.prisma.omniConversation.upsert({
+      where: { providerThreadId },
+      update: {
+        pageId: page.id,
+        customerId: customer.id,
+        lastMessageText,
+        lastMessageAt: sentAt,
+        unreadCount: { increment: 1 },
+        status: "OPEN",
+      },
+      create: {
+        providerThreadId,
+        channel: "FACEBOOK",
+        pageId: page.id,
+        customerId: customer.id,
+        lastMessageText,
+        lastMessageAt: sentAt,
+        unreadCount: 1,
+        status: "OPEN",
+      },
+      include: { customer: true, page: true, tags: true },
+    });
+
+    const message = await this.prisma.omniMessage.create({
+      data: {
+        conversationId: conversation.id,
+        providerMessageId: commentId,
+        direction: "IN",
+        type: attachmentUrl ? "IMAGE" : "TEXT",
+        text: messageText,
+        attachmentUrl: attachmentUrl || null,
+        senderId,
+        senderName: customer.name,
+        sentAt,
+      },
+    });
+
+    this.logger.log(
+      `[META_FEED_COMMENT] page=${pageId} post=${postId || "-"} comment=${commentId} sender=${last6(senderId)} customer="${customer.name}" text="${messageText.slice(0, 80)}"`,
+    );
+
+    this.realtime.emit({ type: "message.created", payload: message });
+    this.realtime.emit({ type: "conversation.updated", payload: conversation });
+
+    return { ok: true };
   }
 
   async ingestMetaWebhookEvent(event: any) {

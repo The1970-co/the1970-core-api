@@ -47,6 +47,7 @@ export class OmniInboxMetaWebhookController {
 
     for (const entry of entries) {
       const messaging = Array.isArray(entry?.messaging) ? entry.messaging : [];
+      const changes = Array.isArray(entry?.changes) ? entry.changes : [];
 
       for (const event of messaging) {
         try {
@@ -58,6 +59,23 @@ export class OmniInboxMetaWebhookController {
           // Vẫn trả 200 cho Meta để không bị retry storm, nhưng log rõ lỗi để debug.
           this.logger.error(
             `[META_WEBHOOK_EVENT_FAILED] ${error?.message || error}`,
+            error?.stack,
+          );
+        }
+      }
+
+      for (const change of changes) {
+        try {
+          const result: any = await this.service.ingestMetaFeedChange(
+            change,
+            entry,
+          );
+          if (result?.ok || result?.duplicated) handled += 1;
+          else skipped += 1;
+        } catch (error: any) {
+          skipped += 1;
+          this.logger.error(
+            `[META_WEBHOOK_CHANGE_FAILED] ${error?.message || error}`,
             error?.stack,
           );
         }
