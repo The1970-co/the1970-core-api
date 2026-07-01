@@ -69,7 +69,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
   private viettelPostTrackingSyncTimer: NodeJS.Timeout | null = null;
   private viettelPostTrackingSyncRunning = false;
   private readonly viettelPostTrackingSyncCronEnabled = !["0", "false", "off", "no"].includes(
-    String(process.env.SHIPMENT_VIETTELPOST_SYNC_CRON_ENABLED || "true").toLowerCase(),
+    String(process.env.SHIPMENT_VIETTELPOST_SYNC_CRON_ENABLED || "false").toLowerCase(),
   );
   private readonly viettelPostTrackingSyncIntervalMs = Math.max(
     60_000,
