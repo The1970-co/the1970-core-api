@@ -65,11 +65,18 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     Math.max(Number(process.env.SHIPMENT_AHAMOVE_SYNC_LIMIT || 30), 1),
     100,
   );
+  private readonly ahamoveTrackingSyncLookbackHours = Math.min(
+    Math.max(Number(process.env.SHIPMENT_AHAMOVE_SYNC_LOOKBACK_HOURS || 48), 1),
+    168,
+  );
+  private readonly ahamoveTrackingDisableNotFound = !["0", "false", "off", "no"].includes(
+    String(process.env.SHIPMENT_AHAMOVE_DISABLE_NOT_FOUND || "true").toLowerCase(),
+  );
 
   private viettelPostTrackingSyncTimer: NodeJS.Timeout | null = null;
   private viettelPostTrackingSyncRunning = false;
   private readonly viettelPostTrackingSyncCronEnabled = !["0", "false", "off", "no"].includes(
-    String(process.env.SHIPMENT_VIETTELPOST_SYNC_CRON_ENABLED || "false").toLowerCase(),
+    String(process.env.SHIPMENT_VIETTELPOST_SYNC_CRON_ENABLED || "true").toLowerCase(),
   );
   private readonly viettelPostTrackingSyncIntervalMs = Math.max(
     60_000,
@@ -182,6 +189,45 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private isAhamoveOrderNotFoundError(error: unknown) {
+    const text = String(error instanceof Error ? error.message : error || "")
+      .toUpperCase();
+
+    return (
+      text.includes("ORDER_NOT_FOUND") ||
+      text.includes("STATUS=404") ||
+      text.includes("STATUS 404") ||
+      text.includes("KHÔNG TÌM THẤY MÃ ĐƠN HÀNG") ||
+      text.includes("KHONG TIM THAY MA DON HANG")
+    );
+  }
+
+  private async markAhamoveTrackingNotFound(shipment: any, error: unknown, source: string) {
+    const currentMetadata =
+      shipment?.metadata && typeof shipment.metadata === "object" && !Array.isArray(shipment.metadata)
+        ? shipment.metadata
+        : {};
+
+    return this.prisma.shipment.update({
+      where: { id: shipment.id },
+      data: {
+        partnerStatus: "ORDER_NOT_FOUND",
+        ahamoveStatus: "ORDER_NOT_FOUND",
+        metadata: {
+          ...(currentMetadata as any),
+          ahamoveSync: {
+            disabled: true,
+            reason: "ORDER_NOT_FOUND",
+            source,
+            lastError: String(error instanceof Error ? error.message : error || ""),
+            updatedAt: new Date().toISOString(),
+          },
+        },
+        lastSyncedAt: new Date(),
+      },
+    });
+  }
+
   private startAhamoveTrackingSyncCron() {
     if (!this.ahamoveTrackingSyncCronEnabled) {
       this.logger.log("[AHAMOVE_SYNC_CRON] disabled by SHIPMENT_AHAMOVE_SYNC_CRON_ENABLED");
@@ -221,10 +267,19 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
 
     try {
       const activeStatuses = ["CREATED", "PICKING", "DELIVERING", "IN_TRANSIT", "PROCESSING"];
+      const lookbackFrom = new Date(
+        Date.now() - this.ahamoveTrackingSyncLookbackHours * 60 * 60 * 1000,
+      );
+      const ignoredNotFoundStatuses = ["ORDER_NOT_FOUND", "NOT_FOUND", "TRACKING_NOT_FOUND"];
       const shipments = await this.prisma.shipment.findMany({
         where: {
           carrier: "AHAMOVE",
           trackingCode: { not: "" },
+          createdAt: { gte: lookbackFrom },
+          NOT: [
+            { partnerStatus: { in: ignoredNotFoundStatuses } },
+            { ahamoveStatus: { in: ignoredNotFoundStatuses } },
+          ],
           OR: [
             { shippingStatus: { in: activeStatuses } },
             { shippingStatus: "" },
@@ -241,6 +296,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       let delivered = 0;
       let statusChanged = 0;
       let failed = 0;
+      let markedNotFound = 0;
 
       for (const shipment of shipments) {
         try {
@@ -252,6 +308,15 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
           if (afterStatus && afterStatus !== beforeStatus) statusChanged += 1;
           if (afterStatus === "DELIVERED") delivered += 1;
         } catch (error) {
+          if (this.ahamoveTrackingDisableNotFound && this.isAhamoveOrderNotFoundError(error)) {
+            markedNotFound += 1;
+            await this.markAhamoveTrackingNotFound(shipment, error, `cron:${trigger}`);
+            this.logger.warn(
+              `[AHAMOVE_SYNC_CRON] shipment=${shipment.id} marked ORDER_NOT_FOUND and will be skipped next runs`,
+            );
+            continue;
+          }
+
           failed += 1;
           this.logger.warn(
             `[AHAMOVE_SYNC_CRON] shipment=${shipment.id} failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -261,7 +326,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
 
       const elapsedSeconds = Number(((Date.now() - startedAt) / 1000).toFixed(1));
       this.logger.log(
-        `[AHAMOVE_SYNC_CRON] ${trigger} done checked=${shipments.length} synced=${synced} changed=${statusChanged} delivered=${delivered} failed=${failed} elapsed=${elapsedSeconds}s`,
+        `[AHAMOVE_SYNC_CRON] ${trigger} done checked=${shipments.length} synced=${synced} changed=${statusChanged} delivered=${delivered} markedNotFound=${markedNotFound} failed=${failed} elapsed=${elapsedSeconds}s`,
       );
 
       return {
@@ -271,6 +336,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         synced,
         statusChanged,
         delivered,
+        markedNotFound,
         failed,
         elapsedSeconds,
       };
@@ -294,7 +360,9 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       running: this.ahamoveTrackingSyncRunning,
       intervalSeconds: Math.round(this.ahamoveTrackingSyncIntervalMs / 1000),
       limit: this.ahamoveTrackingSyncLimit,
-      mode: "sync_active_ahamove_shipments",
+      lookbackHours: this.ahamoveTrackingSyncLookbackHours,
+      disableNotFound: this.ahamoveTrackingDisableNotFound,
+      mode: "sync_recent_active_ahamove_shipments",
       note: "Cron chỉ quét vận đơn AhaMove đang active; mặc định 15 phút/lần, không ghi timeline nếu trạng thái không đổi.",
     };
   }

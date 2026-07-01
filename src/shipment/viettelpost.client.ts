@@ -435,12 +435,18 @@ export class ViettelPostClient {
   }
 
   trackOrder(orderNumber: string) {
-    const path = this.endpoint("TRACK", "/order/getOrderStatus");
-    const separator = path.includes("?") ? "&" : "?";
+    const cleanOrderNumber = String(orderNumber || "").trim();
 
-    return this.request<any>(
-      `${path}${separator}ORDER_NUMBER=${encodeURIComponent(orderNumber)}`
-    );
+    if (!cleanOrderNumber) {
+      throw new BadRequestException("Thiếu mã vận đơn ViettelPost");
+    }
+
+    return this.request<any>(this.endpoint("TRACK", "/order/getOrderStatus"), {
+      method: "POST",
+      body: {
+        ORDER_NUMBER: cleanOrderNumber,
+      },
+    });
   }
 
   cancelOrder(orderNumber: string) {
