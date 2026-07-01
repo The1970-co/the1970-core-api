@@ -109,6 +109,16 @@ export class ShipmentController {
     return this.shipmentService.runAhamoveTrackingSyncCronNow();
   }
 
+  @Get("viettelpost/tracking/cron/status")
+  getViettelPostTrackingCronStatus() {
+    return this.shipmentService.getViettelPostTrackingSyncCronStatus();
+  }
+
+  @Post("viettelpost/tracking/cron/run-now")
+  runViettelPostTrackingCronNow() {
+    return this.shipmentService.runViettelPostTrackingSyncCronNow();
+  }
+
   @Get("war-room/delivery-revenue")
   getWarRoomDeliveryRevenue(@Query() query: any) {
     return this.shipmentService.getWarRoomDeliveryRevenue(query);

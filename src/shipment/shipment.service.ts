@@ -66,9 +66,24 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     100,
   );
 
+  private viettelPostTrackingSyncTimer: NodeJS.Timeout | null = null;
+  private viettelPostTrackingSyncRunning = false;
+  private readonly viettelPostTrackingSyncCronEnabled = !["0", "false", "off", "no"].includes(
+    String(process.env.SHIPMENT_VIETTELPOST_SYNC_CRON_ENABLED || "true").toLowerCase(),
+  );
+  private readonly viettelPostTrackingSyncIntervalMs = Math.max(
+    60_000,
+    Number(process.env.SHIPMENT_VIETTELPOST_SYNC_INTERVAL_SECONDS || 900) * 1000,
+  );
+  private readonly viettelPostTrackingSyncLimit = Math.min(
+    Math.max(Number(process.env.SHIPMENT_VIETTELPOST_SYNC_LIMIT || 30), 1),
+    100,
+  );
+
   onModuleInit() {
     this.startGhnTrackingSyncCron();
     this.startAhamoveTrackingSyncCron();
+    this.startViettelPostTrackingSyncCron();
   }
 
   onModuleDestroy() {
@@ -80,6 +95,11 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     if (this.ahamoveTrackingSyncTimer) {
       clearInterval(this.ahamoveTrackingSyncTimer);
       this.ahamoveTrackingSyncTimer = null;
+    }
+
+    if (this.viettelPostTrackingSyncTimer) {
+      clearInterval(this.viettelPostTrackingSyncTimer);
+      this.viettelPostTrackingSyncTimer = null;
     }
   }
 
@@ -276,6 +296,123 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       limit: this.ahamoveTrackingSyncLimit,
       mode: "sync_active_ahamove_shipments",
       note: "Cron chỉ quét vận đơn AhaMove đang active; mặc định 15 phút/lần, không ghi timeline nếu trạng thái không đổi.",
+    };
+  }
+
+  private startViettelPostTrackingSyncCron() {
+    if (!this.viettelPostTrackingSyncCronEnabled) {
+      this.logger.log("[VIETTELPOST_SYNC_CRON] disabled by SHIPMENT_VIETTELPOST_SYNC_CRON_ENABLED");
+      return;
+    }
+
+    if (this.viettelPostTrackingSyncTimer) return;
+
+    this.logger.log(
+      `[VIETTELPOST_SYNC_CRON] enabled interval=${Math.round(this.viettelPostTrackingSyncIntervalMs / 1000)}s limit=${this.viettelPostTrackingSyncLimit}`,
+    );
+
+    const firstDelayMs = Math.max(
+      10_000,
+      Number(process.env.SHIPMENT_VIETTELPOST_SYNC_FIRST_DELAY_SECONDS || 45) * 1000,
+    );
+
+    setTimeout(() => {
+      void this.runViettelPostTrackingSyncCron("startup");
+    }, firstDelayMs).unref?.();
+
+    this.viettelPostTrackingSyncTimer = setInterval(() => {
+      void this.runViettelPostTrackingSyncCron("interval");
+    }, this.viettelPostTrackingSyncIntervalMs);
+
+    this.viettelPostTrackingSyncTimer.unref?.();
+  }
+
+  private async runViettelPostTrackingSyncCron(trigger: "startup" | "interval" | "manual" = "interval") {
+    if (this.viettelPostTrackingSyncRunning) {
+      this.logger.warn(`[VIETTELPOST_SYNC_CRON] skip ${trigger}: previous run is still running`);
+      return { ok: false, skipped: true, reason: "previous_run_still_running" };
+    }
+
+    this.viettelPostTrackingSyncRunning = true;
+    const startedAt = Date.now();
+
+    try {
+      const activeStatuses = ["CREATED", "PICKING", "DELIVERING", "IN_TRANSIT", "PROCESSING", "SHIPPED"];
+      const shipments = await this.prisma.shipment.findMany({
+        where: {
+          carrier: "VIETTELPOST",
+          trackingCode: { not: "" },
+          OR: [
+            { shippingStatus: { in: activeStatuses } },
+            { shippingStatus: "" },
+          ],
+        },
+        orderBy: [
+          { lastSyncedAt: "asc" },
+          { createdAt: "asc" },
+        ],
+        take: this.viettelPostTrackingSyncLimit,
+      });
+
+      let synced = 0;
+      let delivered = 0;
+      let statusChanged = 0;
+      let failed = 0;
+
+      for (const shipment of shipments) {
+        try {
+          const beforeStatus = String(shipment.shippingStatus || "").toUpperCase();
+          const result = await this.trackViettelPostByShipmentId(shipment.id, `cron:${trigger}`);
+          synced += 1;
+
+          const afterStatus = String(result?.shipment?.shippingStatus || "").toUpperCase();
+          if (afterStatus && afterStatus !== beforeStatus) statusChanged += 1;
+          if (afterStatus === "DELIVERED") delivered += 1;
+        } catch (error) {
+          failed += 1;
+          this.logger.warn(
+            `[VIETTELPOST_SYNC_CRON] shipment=${shipment.id} failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+
+      const elapsedSeconds = Number(((Date.now() - startedAt) / 1000).toFixed(1));
+      this.logger.log(
+        `[VIETTELPOST_SYNC_CRON] ${trigger} done checked=${shipments.length} synced=${synced} changed=${statusChanged} delivered=${delivered} failed=${failed} elapsed=${elapsedSeconds}s`,
+      );
+
+      return {
+        ok: true,
+        trigger,
+        checked: shipments.length,
+        synced,
+        statusChanged,
+        delivered,
+        failed,
+        elapsedSeconds,
+      };
+    } catch (error) {
+      this.logger.error(
+        `[VIETTELPOST_SYNC_CRON] ${trigger} failed after ${Number(((Date.now() - startedAt) / 1000).toFixed(1))}s: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { ok: false, skipped: false, reason: error instanceof Error ? error.message : String(error) };
+    } finally {
+      this.viettelPostTrackingSyncRunning = false;
+    }
+  }
+
+  async runViettelPostTrackingSyncCronNow() {
+    return this.runViettelPostTrackingSyncCron("manual");
+  }
+
+  getViettelPostTrackingSyncCronStatus() {
+    return {
+      enabled: this.viettelPostTrackingSyncCronEnabled,
+      running: this.viettelPostTrackingSyncRunning,
+      intervalSeconds: Math.round(this.viettelPostTrackingSyncIntervalMs / 1000),
+      limit: this.viettelPostTrackingSyncLimit,
+      mode: "sync_active_viettelpost_shipments",
+      note: "Cron chỉ quét vận đơn ViettelPost đang active; mặc định 15 phút/lần, không ghi timeline nếu trạng thái không đổi.",
     };
   }
 
@@ -5077,7 +5214,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  async trackViettelPostByShipmentId(id: string) {
+  async trackViettelPostByShipmentId(id: string, source = "manual_refresh") {
     const shipment = await this.prisma.shipment.findUnique({
       where: { id },
     });
@@ -5097,6 +5234,14 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     const shippingStatus = this.mapViettelPostShippingStatus(partnerStatus);
     const trackingUrl = this.buildViettelPostTrackingUrl(trackingCode);
 
+    const previousShippingStatus = String(shipment.shippingStatus || "").toUpperCase();
+    const previousPartnerStatus = String(shipment.partnerStatus || "").toUpperCase();
+    const nextShippingStatus = String(shippingStatus || "").toUpperCase();
+    const nextPartnerStatus = String(partnerStatus || "").toUpperCase();
+    const statusChanged =
+      previousShippingStatus !== nextShippingStatus ||
+      previousPartnerStatus !== nextPartnerStatus;
+
     const updated = await this.prisma.shipment.update({
       where: { id: shipment.id },
       data: {
@@ -5111,18 +5256,20 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       },
     });
 
-    await this.appendShipmentTimelineEvent(this.prisma, {
-      shipmentId: shipment.id,
-      orderId: shipment.orderId,
-      carrier: "VIETTELPOST",
-      trackingCode,
-      status: shippingStatus,
-      partnerStatus,
-      title: this.timelineTitle(shippingStatus, "VIETTELPOST"),
-      description: trackingUrl ? `Tracking: ${trackingUrl}` : null,
-      raw,
-      source: "manual_refresh",
-    });
+    if (statusChanged) {
+      await this.appendShipmentTimelineEvent(this.prisma, {
+        shipmentId: shipment.id,
+        orderId: shipment.orderId,
+        carrier: "VIETTELPOST",
+        trackingCode,
+        status: shippingStatus,
+        partnerStatus,
+        title: this.timelineTitle(shippingStatus, "VIETTELPOST"),
+        description: trackingUrl ? `Tracking: ${trackingUrl}` : null,
+        raw,
+        source,
+      });
+    }
 
     const orderForSync = await this.prisma.order.findUnique({
       where: { id: shipment.orderId },
