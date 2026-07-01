@@ -6,15 +6,24 @@ import { AhamoveClient } from "./ahamove.client";
 import { ViettelPostClient } from "./viettelpost.client";
 import { SpxClient } from "./spx.client";
 import { SpxService } from "./spx.service";
+import { CarrierInventoryService } from "./carrier-inventory.service";
 import { AuthTotpModule } from "../auth-totp/auth-totp.module";
 import { AhamoveWebhookController } from "./ahamove-webhook.controller";
 
 @Module({
   imports: [
-  AuthTotpModule, // 👈 inject TOTP đúng cách
+    AuthTotpModule,
   ],
   controllers: [ShipmentController, AhamoveWebhookController],
-  providers: [ShipmentService, GhnClient, AhamoveClient, ViettelPostClient, SpxClient, SpxService],
+  providers: [
+    ShipmentService,
+    GhnClient,
+    AhamoveClient,
+    ViettelPostClient,
+    SpxClient,
+    SpxService,
+    CarrierInventoryService,
+  ],
   exports: [ShipmentService],
 })
 export class ShipmentModule {}

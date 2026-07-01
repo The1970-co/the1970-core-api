@@ -279,9 +279,10 @@ export class ShipmentController {
   @Post(":orderId/viettelpost/create")
   createViettelPostShipment(
     @Param("orderId") orderId: string,
-    @Body() body: any
+    @Body() body: any,
+    @Req() req: any
   ) {
-    return this.shipmentService.createViettelPostShipment(orderId, body);
+    return this.shipmentService.createViettelPostShipment(orderId, body, req.user);
   }
 
   @Post(":orderId/viettelpost/cancel")
@@ -305,9 +306,10 @@ export class ShipmentController {
   @Post(":orderId/ahamove/create")
   createAhamoveShipment(
     @Param("orderId") orderId: string,
-    @Body() body: any
+    @Body() body: any,
+    @Req() req: any
   ) {
-    return this.shipmentService.createAhamoveShipment(orderId, body);
+    return this.shipmentService.createAhamoveShipment(orderId, body, req.user);
   }
 
   @Post(":orderId/ahamove/cancel")
@@ -332,9 +334,10 @@ export class ShipmentController {
   @Post(":orderId/spx/create")
   createSpxShipment(
     @Param("orderId") orderId: string,
-    @Body() body: CreateSpxShipmentDto
+    @Body() body: CreateSpxShipmentDto,
+    @Req() req: any
   ) {
-    return this.shipmentService.createSpxShipment(orderId, body);
+    return this.shipmentService.createSpxShipment(orderId, body, req.user);
   }
 
   @Post(":orderId/spx/cancel")

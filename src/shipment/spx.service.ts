@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { SpxClient } from "./spx.client";
+import { CarrierInventoryService } from "./carrier-inventory.service";
 
 type SpxAdminAddressItem = { label: string; value: number };
 
@@ -24,7 +25,8 @@ export class SpxService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly spxClient: SpxClient
+    private readonly spxClient: SpxClient,
+    private readonly carrierInventoryService: CarrierInventoryService
   ) {}
 
   private normalizeText(input?: string | null) {
@@ -1065,7 +1067,7 @@ export class SpxService {
     }
   }
 
-  async createSpxShipment(orderId: string, dto: any) {
+  async createSpxShipment(orderId: string, dto: any, user?: any) {
     return this.prisma.$transaction(async (tx) => {
       const order = await tx.order.findUnique({
         where: { id: orderId },
@@ -1135,6 +1137,12 @@ export class SpxService {
         },
       });
 
+      const stockOutResult = await this.carrierInventoryService.ensureOrderStockOutForShipment(tx, order, {
+        carrier: "SPX",
+        trackingCode,
+        actorName: this.carrierInventoryService.getActorName(user),
+      });
+
       await (tx as any).shipmentTimelineEvent.create({
         data: {
           shipmentId: shipment.id,
@@ -1160,7 +1168,7 @@ export class SpxService {
         },
       });
 
-      return { duplicated: false, spx: created, shipment };
+      return { duplicated: false, spx: created, shipment, stockOut: stockOutResult };
     }, { timeout: 30000, maxWait: 10000 });
   }
 
@@ -1219,8 +1227,24 @@ export class SpxService {
     if (!order) throw new BadRequestException("Không tìm thấy order");
 
     const shipment = order.shipment;
+    const actorName = this.carrierInventoryService.getActorName(user);
+
     if (!shipment?.trackingCode) {
-      return this.prisma.order.update({ where: { id: orderId }, data: { status: "CANCELLED" as any, fulfillmentStatus: "UNFULFILLED" as any } });
+      const localResult = await this.prisma.$transaction(async (tx) => {
+        const inventoryRestore = await this.carrierInventoryService.restoreOrderStockForShipmentCancel(tx, order, shipment, {
+          carrier: "SPX",
+          actorName,
+        });
+
+        const updatedOrder = await tx.order.update({
+          where: { id: orderId },
+          data: { status: "CANCELLED" as any, fulfillmentStatus: "UNFULFILLED" as any },
+        });
+
+        return { order: updatedOrder, inventoryRestore };
+      });
+
+      return localResult.order;
     }
 
     if (String(shipment.carrier || "").toUpperCase() !== "SPX") {
@@ -1235,31 +1259,46 @@ export class SpxService {
 
     const raw = await this.spxClient.cancelOrder(orderSn);
 
-    await this.prisma.shipment.update({
-      where: { id: shipment.id },
-      data: {
-        shippingStatus: "CANCELLED",
-        partnerStatus: "cancel",
-        metadata: { ...(metadata || {}), carrier: "SPX", cancelResponse: raw },
-        lastSyncedAt: new Date(),
-      },
-    });
-
-    await (this.prisma as any).shipmentTimelineEvent.create({
-      data: {
-        shipmentId: shipment.id,
-        orderId,
+    const result = await this.prisma.$transaction(async (tx) => {
+      const inventoryRestore = await this.carrierInventoryService.restoreOrderStockForShipmentCancel(tx, order, shipment, {
         carrier: "SPX",
-        trackingCode: shipment.trackingCode,
-        status: "CANCELLED",
-        partnerStatus: "cancel",
-        title: "Đã huỷ vận đơn",
-        raw,
-        source: "cancel",
-        eventTime: new Date(),
-      },
+        actorName,
+      });
+
+      const updatedShipment = await tx.shipment.update({
+        where: { id: shipment.id },
+        data: {
+          shippingStatus: "CANCELLED",
+          partnerStatus: "cancel",
+          metadata: { ...(metadata || {}), carrier: "SPX", cancelResponse: raw },
+          lastSyncedAt: new Date(),
+        },
+      });
+
+      await (tx as any).shipmentTimelineEvent.create({
+        data: {
+          shipmentId: shipment.id,
+          orderId,
+          carrier: "SPX",
+          trackingCode: shipment.trackingCode,
+          status: "CANCELLED",
+          partnerStatus: "cancel",
+          title: "Đã huỷ vận đơn",
+          raw,
+          source: "cancel",
+          eventTime: new Date(),
+        },
+      });
+
+      const updatedOrder = await tx.order.update({
+        where: { id: orderId },
+        data: { status: "CANCELLED" as any, fulfillmentStatus: "UNFULFILLED" as any },
+      });
+
+      return { order: updatedOrder, shipment: updatedShipment, inventoryRestore };
     });
 
-    return this.prisma.order.update({ where: { id: orderId }, data: { status: "CANCELLED" as any, fulfillmentStatus: "UNFULFILLED" as any } });
+    return result.order;
   }
+
 }
