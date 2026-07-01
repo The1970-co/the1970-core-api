@@ -127,7 +127,7 @@ export class InventoryController {
 
 
   @Get("movements/product/:productId")
-  @RequirePermissions("inventory.view")
+  @RequirePermissions("inventory.logs.view")
   async getInventoryMovementsByProduct(
     @Param("productId") productId: string,
     @Query("limit") limit?: string,

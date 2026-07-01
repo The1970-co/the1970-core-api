@@ -35,7 +35,13 @@ export class InventoryService {
   }
 
   private resolveBranchIdFromUser(user?: any) {
-    return user?.branchId || user?.branchName || null;
+    return (
+      user?.activeBranchId ||
+      user?.workingBranchId ||
+      user?.currentBranchId ||
+      user?.branchId ||
+      null
+    );
   }
 
   private ensureBranchAccess(user: any, branchId?: string | null) {
