@@ -21,7 +21,7 @@ const LEGACY_BOOLEAN_TO_PERMISSION_KEYS: Record<string, string[]> = {
   canApproveOrder: ["orders.approve", "orders.update_status"],
   canCancelOrder: ["orders.cancel"],
   canHandleReturn: ["returns.view", "returns.create", "menu.returns", "orders.return"],
-  canViewStock: ["inventory.view", "menu.inventory"],
+  canViewStock: ["inventory.view", "inventory.logs.view", "menu.inventory"],
   canManageStock: ["inventory.manage", "inventory.adjust", "inventory.transfer"],
   canStocktake: ["stocktake.view", "stocktake.create", "stocktake.scan", "menu.stocktake"],
   canTransferStock: ["stock_transfer.view", "stock_transfer.create", "menu.stock_transfer"],

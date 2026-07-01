@@ -99,6 +99,16 @@ export class ShipmentController {
     return this.shipmentService.runGhnTrackingSyncCronNow();
   }
 
+  @Get("ahamove/tracking/cron/status")
+  getAhamoveTrackingCronStatus() {
+    return this.shipmentService.getAhamoveTrackingSyncCronStatus();
+  }
+
+  @Post("ahamove/tracking/cron/run-now")
+  runAhamoveTrackingCronNow() {
+    return this.shipmentService.runAhamoveTrackingSyncCronNow();
+  }
+
   @Get("war-room/delivery-revenue")
   getWarRoomDeliveryRevenue(@Query() query: any) {
     return this.shipmentService.getWarRoomDeliveryRevenue(query);

@@ -52,14 +52,34 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     365,
   );
 
+  private ahamoveTrackingSyncTimer: NodeJS.Timeout | null = null;
+  private ahamoveTrackingSyncRunning = false;
+  private readonly ahamoveTrackingSyncCronEnabled = !["0", "false", "off", "no"].includes(
+    String(process.env.SHIPMENT_AHAMOVE_SYNC_CRON_ENABLED || "true").toLowerCase(),
+  );
+  private readonly ahamoveTrackingSyncIntervalMs = Math.max(
+    60_000,
+    Number(process.env.SHIPMENT_AHAMOVE_SYNC_INTERVAL_SECONDS || 900) * 1000,
+  );
+  private readonly ahamoveTrackingSyncLimit = Math.min(
+    Math.max(Number(process.env.SHIPMENT_AHAMOVE_SYNC_LIMIT || 30), 1),
+    100,
+  );
+
   onModuleInit() {
     this.startGhnTrackingSyncCron();
+    this.startAhamoveTrackingSyncCron();
   }
 
   onModuleDestroy() {
     if (this.ghnTrackingSyncTimer) {
       clearInterval(this.ghnTrackingSyncTimer);
       this.ghnTrackingSyncTimer = null;
+    }
+
+    if (this.ahamoveTrackingSyncTimer) {
+      clearInterval(this.ahamoveTrackingSyncTimer);
+      this.ahamoveTrackingSyncTimer = null;
     }
   }
 
@@ -139,6 +159,123 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       days: this.ghnTrackingSyncDays,
       mode: "sync_all_safe_statuses",
       note: "Cron cập nhật trạng thái vận đơn GHN; không tự huỷ đơn nội bộ và không tự xác nhận shop đã nhận hàng hoàn.",
+    };
+  }
+
+  private startAhamoveTrackingSyncCron() {
+    if (!this.ahamoveTrackingSyncCronEnabled) {
+      this.logger.log("[AHAMOVE_SYNC_CRON] disabled by SHIPMENT_AHAMOVE_SYNC_CRON_ENABLED");
+      return;
+    }
+
+    if (this.ahamoveTrackingSyncTimer) return;
+
+    this.logger.log(
+      `[AHAMOVE_SYNC_CRON] enabled interval=${Math.round(this.ahamoveTrackingSyncIntervalMs / 1000)}s limit=${this.ahamoveTrackingSyncLimit}`,
+    );
+
+    const firstDelayMs = Math.max(
+      10_000,
+      Number(process.env.SHIPMENT_AHAMOVE_SYNC_FIRST_DELAY_SECONDS || 30) * 1000,
+    );
+
+    setTimeout(() => {
+      void this.runAhamoveTrackingSyncCron("startup");
+    }, firstDelayMs).unref?.();
+
+    this.ahamoveTrackingSyncTimer = setInterval(() => {
+      void this.runAhamoveTrackingSyncCron("interval");
+    }, this.ahamoveTrackingSyncIntervalMs);
+
+    this.ahamoveTrackingSyncTimer.unref?.();
+  }
+
+  private async runAhamoveTrackingSyncCron(trigger: "startup" | "interval" | "manual" = "interval") {
+    if (this.ahamoveTrackingSyncRunning) {
+      this.logger.warn(`[AHAMOVE_SYNC_CRON] skip ${trigger}: previous run is still running`);
+      return { ok: false, skipped: true, reason: "previous_run_still_running" };
+    }
+
+    this.ahamoveTrackingSyncRunning = true;
+    const startedAt = Date.now();
+
+    try {
+      const activeStatuses = ["CREATED", "PICKING", "DELIVERING", "IN_TRANSIT", "PROCESSING"];
+      const shipments = await this.prisma.shipment.findMany({
+        where: {
+          carrier: "AHAMOVE",
+          trackingCode: { not: "" },
+          OR: [
+            { shippingStatus: { in: activeStatuses } },
+            { shippingStatus: "" },
+          ],
+        },
+        orderBy: [
+          { lastSyncedAt: "asc" },
+          { createdAt: "asc" },
+        ],
+        take: this.ahamoveTrackingSyncLimit,
+      });
+
+      let synced = 0;
+      let delivered = 0;
+      let statusChanged = 0;
+      let failed = 0;
+
+      for (const shipment of shipments) {
+        try {
+          const beforeStatus = String(shipment.shippingStatus || "").toUpperCase();
+          const result = await this.trackAhamoveByShipmentId(shipment.id, `cron:${trigger}`);
+          synced += 1;
+
+          const afterStatus = String(result?.shipment?.shippingStatus || "").toUpperCase();
+          if (afterStatus && afterStatus !== beforeStatus) statusChanged += 1;
+          if (afterStatus === "DELIVERED") delivered += 1;
+        } catch (error) {
+          failed += 1;
+          this.logger.warn(
+            `[AHAMOVE_SYNC_CRON] shipment=${shipment.id} failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+
+      const elapsedSeconds = Number(((Date.now() - startedAt) / 1000).toFixed(1));
+      this.logger.log(
+        `[AHAMOVE_SYNC_CRON] ${trigger} done checked=${shipments.length} synced=${synced} changed=${statusChanged} delivered=${delivered} failed=${failed} elapsed=${elapsedSeconds}s`,
+      );
+
+      return {
+        ok: true,
+        trigger,
+        checked: shipments.length,
+        synced,
+        statusChanged,
+        delivered,
+        failed,
+        elapsedSeconds,
+      };
+    } catch (error) {
+      this.logger.error(
+        `[AHAMOVE_SYNC_CRON] ${trigger} failed after ${Number(((Date.now() - startedAt) / 1000).toFixed(1))}s: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { ok: false, skipped: false, reason: error instanceof Error ? error.message : String(error) };
+    } finally {
+      this.ahamoveTrackingSyncRunning = false;
+    }
+  }
+
+  async runAhamoveTrackingSyncCronNow() {
+    return this.runAhamoveTrackingSyncCron("manual");
+  }
+
+  getAhamoveTrackingSyncCronStatus() {
+    return {
+      enabled: this.ahamoveTrackingSyncCronEnabled,
+      running: this.ahamoveTrackingSyncRunning,
+      intervalSeconds: Math.round(this.ahamoveTrackingSyncIntervalMs / 1000),
+      limit: this.ahamoveTrackingSyncLimit,
+      mode: "sync_active_ahamove_shipments",
+      note: "Cron chỉ quét vận đơn AhaMove đang active; mặc định 15 phút/lần, không ghi timeline nếu trạng thái không đổi.",
     };
   }
 
@@ -2061,7 +2198,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     const shipments = await this.prisma.shipment.findMany({
       where: {
         carrier: { contains: "GHN", mode: "insensitive" },
-        trackingCode: { not: null },
+        trackingCode: { not: "" },
         order: { createdAt: { gte: since } },
         ...(includeFinal
           ? {}
@@ -5501,7 +5638,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     }, { timeout: 20000, maxWait: 10000 });
   }
 
-  async trackAhamoveByShipmentId(id: string) {
+  async trackAhamoveByShipmentId(id: string, source = "manual_refresh") {
     const shipment = await this.prisma.shipment.findUnique({
       where: { id },
     });
@@ -5523,6 +5660,14 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     const shippingStatus = this.mapAhamoveShippingStatus(ahamoveStatus);
     const driver = this.extractAhamoveDriver(raw);
 
+    const previousShippingStatus = String(shipment.shippingStatus || "").toUpperCase();
+    const previousPartnerStatus = String(shipment.partnerStatus || shipment.ahamoveStatus || "").toUpperCase();
+    const nextShippingStatus = String(shippingStatus || "").toUpperCase();
+    const nextPartnerStatus = String(ahamoveStatus || "").toUpperCase();
+    const statusChanged =
+      previousShippingStatus !== nextShippingStatus ||
+      previousPartnerStatus !== nextPartnerStatus;
+
     const updated = await this.prisma.shipment.update({
       where: { id: shipment.id },
       data: {
@@ -5538,19 +5683,21 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       },
     });
 
-    await this.appendShipmentTimelineEvent(this.prisma, {
-      shipmentId: shipment.id,
-      orderId: shipment.orderId,
-      carrier: "AHAMOVE",
-      trackingCode: ahamoveOrderId,
-      status: shippingStatus,
-      partnerStatus: ahamoveStatus,
-      title: this.timelineTitle(shippingStatus, "AHAMOVE"),
-      description: trackingUrl ? `Tracking: ${trackingUrl}` : null,
-      raw,
-      source: "manual_refresh",
-      ...driver,
-    });
+    if (statusChanged) {
+      await this.appendShipmentTimelineEvent(this.prisma, {
+        shipmentId: shipment.id,
+        orderId: shipment.orderId,
+        carrier: "AHAMOVE",
+        trackingCode: ahamoveOrderId,
+        status: shippingStatus,
+        partnerStatus: ahamoveStatus,
+        title: this.timelineTitle(shippingStatus, "AHAMOVE"),
+        description: trackingUrl ? `Tracking: ${trackingUrl}` : null,
+        raw,
+        source,
+        ...driver,
+      });
+    }
 
     const orderForSync = await this.prisma.order.findUnique({
       where: { id: shipment.orderId },
@@ -5788,6 +5935,22 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         reason: "shipment_not_found",
         ahamoveOrderId,
       };
+    }
+
+    try {
+      const liveResult = await this.trackAhamoveByShipmentId(shipment.id, "webhook_live_refresh");
+      return {
+        ok: true,
+        source: "webhook_live_refresh",
+        ahamoveOrderId,
+        status: this.getAhamoveStatus(liveResult?.tracking),
+        shippingStatus: liveResult?.shipment?.shippingStatus,
+        shipment: liveResult?.shipment,
+      };
+    } catch (error) {
+      this.logger.warn(
+        `[AHAMOVE_WEBHOOK] live refresh failed ahamoveOrderId=${ahamoveOrderId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
 
     const updatedShipment = await this.prisma.shipment.update({
