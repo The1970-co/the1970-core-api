@@ -45,6 +45,35 @@ export class PayrollService {
     return new Prisma.Decimal(this.toNumber(value));
   }
 
+  private normalizeOvertimeConfigs(value: any, fallbackHourlyRate = 0, overtimeRate = 1, holidayRate = 2) {
+    const defaults = [
+      { key: "OT1", label: "Tăng ca 1", enabled: true, baseHourlyRate: fallbackHourlyRate, multiplier: overtimeRate || 1 },
+      { key: "OT2", label: "Ngày lễ", enabled: true, baseHourlyRate: fallbackHourlyRate, multiplier: holidayRate || 2 },
+      { key: "OT3", label: "Tăng ca 3", enabled: false, baseHourlyRate: fallbackHourlyRate, multiplier: 1 },
+      { key: "OT4", label: "Tăng ca 4", enabled: false, baseHourlyRate: fallbackHourlyRate, multiplier: 1 },
+    ];
+    const rows = Array.isArray(value) ? value : [];
+    return defaults.map((fallback, index) => {
+      const row = rows[index] || {};
+      return {
+        key: String(row.key || fallback.key),
+        label: String(row.label || fallback.label),
+        enabled: row.enabled === undefined ? fallback.enabled : Boolean(row.enabled),
+        baseHourlyRate: Math.max(0, this.toNumber(row.baseHourlyRate ?? fallback.baseHourlyRate)),
+        multiplier: Math.max(0, this.toNumber(row.multiplier ?? fallback.multiplier)),
+      };
+    });
+  }
+
+  private calculateOvertime(configs: any[], hours: number[]) {
+    const breakdown = configs.map((config, index) => {
+      const workedHours = Math.max(0, this.toNumber(hours[index] || 0));
+      const amount = config.enabled ? workedHours * this.toNumber(config.baseHourlyRate) * this.toNumber(config.multiplier) : 0;
+      return { ...config, hours: workedHours, amount: Math.round(amount) };
+    });
+    return { breakdown, amount: breakdown.reduce((sum, row) => sum + this.toNumber(row.amount), 0) };
+  }
+
   private asDate(value?: string | Date | null, fallback?: Date) {
     if (!value) return fallback || new Date();
     const date = value instanceof Date ? value : new Date(value);
@@ -405,7 +434,7 @@ export class PayrollService {
       ];
     }
 
-    return this.prisma.payrollConfig.findMany({ where, orderBy: [{ isActive: "desc" }, { staffName: "asc" }] });
+    return this.prisma.payrollConfig.findMany({ where, orderBy: [{ isActive: "desc" }, { branchName: "asc" }, { staffName: "asc" }] });
   }
 
   async createConfig(body: PayrollConfigDto, user?: AnyUser) {
@@ -439,6 +468,8 @@ export class PayrollService {
         standardHoursPerDay: this.decimal2(body.standardHoursPerDay || 9.5),
         overtimeRate: this.decimal2(body.overtimeRate || 1),
         holidayRate: this.decimal2(body.holidayRate || 2),
+        overtimeConfigs: this.normalizeOvertimeConfigs((body as any).overtimeConfigs, this.toNumber(body.hourlyRate), this.toNumber(body.overtimeRate || 1), this.toNumber(body.holidayRate || 2)) as any,
+        sourceTemplateId: (body as any).sourceTemplateId || null,
         paidLeaveEnabled: Boolean(body.paidLeaveEnabled),
         paidLeaveHoursPerDay: this.decimal2(body.paidLeaveHoursPerDay || body.standardHoursPerDay || 9.5),
         mealAllowanceEnabled: Boolean(body.mealAllowanceEnabled),
@@ -490,6 +521,8 @@ export class PayrollService {
         standardHoursPerDay: body.standardHoursPerDay === undefined ? undefined : this.decimal2(body.standardHoursPerDay),
         overtimeRate: body.overtimeRate === undefined ? undefined : this.decimal2(body.overtimeRate),
         holidayRate: body.holidayRate === undefined ? undefined : this.decimal2(body.holidayRate),
+        overtimeConfigs: (body as any).overtimeConfigs === undefined ? undefined : this.normalizeOvertimeConfigs((body as any).overtimeConfigs, this.toNumber(body.hourlyRate ?? current.hourlyRate), this.toNumber(body.overtimeRate ?? current.overtimeRate), this.toNumber(body.holidayRate ?? current.holidayRate)) as any,
+        sourceTemplateId: (body as any).sourceTemplateId === undefined ? undefined : (body as any).sourceTemplateId,
         paidLeaveEnabled: body.paidLeaveEnabled ?? undefined,
         paidLeaveHoursPerDay: body.paidLeaveHoursPerDay === undefined ? undefined : this.decimal2(body.paidLeaveHoursPerDay),
         mealAllowanceEnabled: body.mealAllowanceEnabled ?? undefined,
@@ -534,6 +567,7 @@ export class PayrollService {
       standardHoursPerDay: this.decimal2(body?.standardHoursPerDay || 9.5),
       overtimeRate: this.decimal2(body?.overtimeRate || 1),
       holidayRate: this.decimal2(body?.holidayRate || 2),
+      overtimeConfigs: this.normalizeOvertimeConfigs(body?.overtimeConfigs, this.toNumber(body?.hourlyRate), this.toNumber(body?.overtimeRate || 1), this.toNumber(body?.holidayRate || 2)) as any,
       paidLeaveEnabled: Boolean(body?.paidLeaveEnabled),
       paidLeaveHoursPerDay: this.decimal2(body?.paidLeaveHoursPerDay || body?.standardHoursPerDay || 9.5),
       mealAllowanceEnabled: Boolean(body?.mealAllowanceEnabled),
@@ -577,6 +611,8 @@ export class PayrollService {
       standardHoursPerDay: template.standardHoursPerDay || 9.5,
       overtimeRate: template.overtimeRate || 1,
       holidayRate: template.holidayRate || 2,
+      overtimeConfigs: this.normalizeOvertimeConfigs(template.overtimeConfigs, this.toNumber(template.hourlyRate), this.toNumber(template.overtimeRate || 1), this.toNumber(template.holidayRate || 2)) as any,
+      sourceTemplateId: template.id,
       paidLeaveEnabled: Boolean(template.paidLeaveEnabled),
       paidLeaveHoursPerDay: template.paidLeaveHoursPerDay || template.standardHoursPerDay || 9.5,
       mealAllowanceEnabled: Boolean(template.mealAllowanceEnabled),
@@ -640,10 +676,27 @@ export class PayrollService {
     this.scopedBranchId(user, current.branchId || null);
     const branchId = body?.branchId ? this.scopedBranchId(user, body.branchId) : current.branchId;
     const branchName = body?.branchName || await this.resolveBranchName(branchId);
-    return (this.prisma as any).payrollBranchConfigTemplate.update({
+    const template = await (this.prisma as any).payrollBranchConfigTemplate.update({
       where: { id },
       data: { branchId, branchName, ...this.branchTemplateConfigData(body) },
     });
+
+    let synced = 0;
+    if (body?.syncApplied !== false) {
+      const configs = await this.prisma.payrollConfig.findMany({
+        where: { isActive: true, OR: [{ sourceTemplateId: id }, { sourceTemplateId: null, branchId }] } as any,
+      });
+      for (const config of configs) {
+        const staff = { id: config.staffId, code: config.staffCode, name: config.staffName, branchId: config.branchId, branchName: config.branchName };
+        const data = this.payrollConfigDataFromTemplate(template, staff, config.effectiveFrom);
+        await this.prisma.payrollConfig.update({
+          where: { id: config.id },
+          data: { ...data, attendanceCode: config.attendanceCode || undefined, effectiveTo: config.effectiveTo } as any,
+        });
+        synced += 1;
+      }
+    }
+    return { ...template, syncedConfigs: synced };
   }
 
   async applyBranchConfigTemplate(body: any, user?: AnyUser) {
@@ -794,17 +847,23 @@ export class PayrollService {
         const normalHours = this.toNumber(input.normalHours || 0);
         const overtimeHours = this.toNumber(input.overtimeHours || 0);
         const holidayHours = this.toNumber(input.holidayHours || 0);
+        const overtime3Hours = this.toNumber(input.overtime3Hours || 0);
+        const overtime4Hours = this.toNumber(input.overtime4Hours || 0);
         const overtimeRate = this.toNumber((config as any).overtimeRate || 1);
         const holidayRate = this.toNumber((config as any).holidayRate || 2);
         const hourlyRate = this.toNumber((config as any).hourlyRate || 0);
-        const convertedWorkingHours = normalHours + overtimeHours * overtimeRate + holidayHours * holidayRate;
-        const hourlyAmount = (config as any).hourlyEnabled ? convertedWorkingHours * hourlyRate : 0;
+        const overtimeConfigs = this.normalizeOvertimeConfigs((config as any).overtimeConfigs, hourlyRate, overtimeRate, holidayRate);
+        const overtime = this.calculateOvertime(overtimeConfigs, [overtimeHours, holidayHours, overtime3Hours, overtime4Hours]);
+        const convertedWorkingHours = normalHours + overtime.breakdown.reduce((sum, row) => sum + this.toNumber(row.hours) * this.toNumber(row.multiplier), 0);
+        const normalHourlyAmount = (config as any).hourlyEnabled ? normalHours * hourlyRate : 0;
+        const overtimeAmount = (config as any).hourlyEnabled ? overtime.amount : 0;
+        const hourlyAmount = normalHourlyAmount + overtimeAmount;
 
         const paidLeaveDays = this.toNumber(input.paidLeaveDays || 0);
         const paidLeaveHoursPerDay = this.toNumber((config as any).paidLeaveHoursPerDay || (config as any).standardHoursPerDay || 9.5);
         const paidLeaveAmount = (config as any).paidLeaveEnabled ? paidLeaveDays * paidLeaveHoursPerDay * hourlyRate : 0;
 
-        const rawWorkingHours = normalHours + overtimeHours + holidayHours;
+        const rawWorkingHours = normalHours + overtimeHours + holidayHours + overtime3Hours + overtime4Hours;
         const mealAllowanceAmount = (config as any).mealAllowanceEnabled
           ? (rawWorkingHours / Math.max(1, this.toNumber((config as any).mealHoursPerUnit || 9.5))) * this.toNumber((config as any).mealAmountPerUnit || 0)
           : 0;
@@ -873,10 +932,14 @@ export class PayrollService {
             overtimeHours: this.decimal2(overtimeHours),
             overtimeRate: this.decimal2(overtimeRate),
             holidayHours: this.decimal2(holidayHours),
+            overtime3Hours: this.decimal2(overtime3Hours),
+            overtime4Hours: this.decimal2(overtime4Hours),
             holidayRate: this.decimal2(holidayRate),
             convertedWorkingHours: this.decimal2(convertedWorkingHours),
             hourlyRate: this.money(hourlyRate),
             hourlyAmount: this.money(hourlyAmount),
+            overtimeAmount: this.money(overtimeAmount),
+            overtimeBreakdown: overtime.breakdown as any,
             paidLeaveDays: this.decimal2(paidLeaveDays),
             paidLeaveHoursPerDay: this.decimal2(paidLeaveHoursPerDay),
             paidLeaveAmount: this.money(paidLeaveAmount),
@@ -1197,12 +1260,18 @@ export class PayrollService {
 
     const normalHours = body.normalHours === undefined ? this.toNumber((line as any).normalHours) : this.toNumber(body.normalHours);
     const overtimeHours = body.overtimeHours === undefined ? this.toNumber((line as any).overtimeHours) : this.toNumber(body.overtimeHours);
-    const overtimeRate = body.overtimeRate === undefined ? this.toNumber((line as any).overtimeRate || 1) : this.toNumber(body.overtimeRate || 1);
     const holidayHours = body.holidayHours === undefined ? this.toNumber((line as any).holidayHours) : this.toNumber(body.holidayHours);
+    const overtime3Hours = body.overtime3Hours === undefined ? this.toNumber((line as any).overtime3Hours) : this.toNumber(body.overtime3Hours);
+    const overtime4Hours = body.overtime4Hours === undefined ? this.toNumber((line as any).overtime4Hours) : this.toNumber(body.overtime4Hours);
+    const overtimeRate = body.overtimeRate === undefined ? this.toNumber((line as any).overtimeRate || 1) : this.toNumber(body.overtimeRate || 1);
     const holidayRate = body.holidayRate === undefined ? this.toNumber((line as any).holidayRate || 2) : this.toNumber(body.holidayRate || 2);
     const hourlyRate = body.hourlyRate === undefined ? this.toNumber((line as any).hourlyRate) : this.toNumber(body.hourlyRate);
-    const convertedWorkingHours = normalHours + overtimeHours * overtimeRate + holidayHours * holidayRate;
-    const hourlyAmount = convertedWorkingHours * hourlyRate;
+    const existingBreakdown = Array.isArray((line as any).overtimeBreakdown) ? (line as any).overtimeBreakdown : [];
+    const overtimeConfigs = this.normalizeOvertimeConfigs(body.overtimeConfigs || existingBreakdown, hourlyRate, overtimeRate, holidayRate);
+    const overtime = this.calculateOvertime(overtimeConfigs, [overtimeHours, holidayHours, overtime3Hours, overtime4Hours]);
+    const convertedWorkingHours = normalHours + overtime.breakdown.reduce((sum, row) => sum + this.toNumber(row.hours) * this.toNumber(row.multiplier), 0);
+    const overtimeAmount = overtime.amount;
+    const hourlyAmount = normalHours * hourlyRate + overtimeAmount;
 
     const paidLeaveDays = body.paidLeaveDays === undefined ? this.toNumber((line as any).paidLeaveDays) : this.toNumber(body.paidLeaveDays);
     const paidLeaveHoursPerDay = body.paidLeaveHoursPerDay === undefined ? this.toNumber((line as any).paidLeaveHoursPerDay) : this.toNumber(body.paidLeaveHoursPerDay);
@@ -1231,10 +1300,14 @@ export class PayrollService {
       overtimeHours: this.decimal2(overtimeHours),
       overtimeRate: this.decimal2(overtimeRate),
       holidayHours: this.decimal2(holidayHours),
+        overtime3Hours: this.decimal2(overtime3Hours),
+        overtime4Hours: this.decimal2(overtime4Hours),
       holidayRate: this.decimal2(holidayRate),
       convertedWorkingHours: this.decimal2(convertedWorkingHours),
       hourlyRate: this.money(hourlyRate),
       hourlyAmount: this.money(hourlyAmount),
+        overtimeAmount: this.money(overtimeAmount),
+        overtimeBreakdown: overtime.breakdown as any,
       paidLeaveDays: this.decimal2(paidLeaveDays),
       paidLeaveHoursPerDay: this.decimal2(paidLeaveHoursPerDay),
       paidLeaveAmount: this.money(paidLeaveAmount),

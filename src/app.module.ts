@@ -34,6 +34,7 @@ import { RbacSnapshotsModule } from "./rbac-snapshots/rbac-snapshots.module";
 import { PayrollModule } from "./payroll/payroll.module";
 import { OmniInboxModule } from "./omni-inbox/omni-inbox.module";
 import { MobilePushModule } from "./mobile-push/mobile-push.module";
+import { FinancialReportModule } from "./reports/financial-report.module";
 @Module({
   imports: [
     PrismaModule,
@@ -71,6 +72,7 @@ import { MobilePushModule } from "./mobile-push/mobile-push.module";
     PayrollModule,
     OmniInboxModule,
     MobilePushModule,
+    FinancialReportModule,
   ],
 })
 export class AppModule {}

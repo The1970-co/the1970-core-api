@@ -9,6 +9,7 @@ export type ParsedAttendanceRow = {
   overtimeHours: number;
   holidayHours: number;
   overtime3Hours: number;
+  overtime4Hours: number;
   totalWorkHours: number;
   lateCount: number;
   lateMinutes: number;
@@ -180,6 +181,7 @@ export function parseAttendanceWorkbook(buffer: Buffer | Uint8Array): ParsedAtte
       overtimeHours,
       holidayHours,
       overtime3Hours,
+      overtime4Hours: 0,
       totalWorkHours: totalWorkHours || normalHours + overtimeHours + holidayHours + overtime3Hours,
       lateCount: Math.round(attendance.lateCount),
       lateMinutes: Math.round(attendance.lateMinutes),

@@ -25,6 +25,8 @@ export class PayrollConfigDto {
   standardHoursPerDay?: number;
   overtimeRate?: number;
   holidayRate?: number;
+  overtimeConfigs?: Array<{ key?: string; label?: string; enabled?: boolean; baseHourlyRate?: number; multiplier?: number }>;
+  sourceTemplateId?: string | null;
 
   paidLeaveEnabled?: boolean;
   paidLeaveHoursPerDay?: number;

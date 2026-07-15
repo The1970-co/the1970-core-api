@@ -1871,10 +1871,14 @@ model PayrollLine {
   overtimeHours         Decimal @default(0) @db.Decimal(10, 2)
   overtimeRate          Decimal @default(1) @db.Decimal(8, 2)
   holidayHours          Decimal @default(0) @db.Decimal(10, 2)
+  overtime3Hours        Decimal @default(0) @db.Decimal(10, 2)
+  overtime4Hours        Decimal @default(0) @db.Decimal(10, 2)
   holidayRate           Decimal @default(2) @db.Decimal(8, 2)
   convertedWorkingHours Decimal @default(0) @db.Decimal(10, 2)
   hourlyRate            Decimal @default(0) @db.Decimal(18, 2)
   hourlyAmount          Decimal @default(0) @db.Decimal(18, 2)
+  overtimeAmount        Decimal @default(0) @db.Decimal(18, 2)
+  overtimeBreakdown     Json?
 
   paidLeaveDays        Decimal @default(0) @db.Decimal(8, 2)
   paidLeaveHoursPerDay Decimal @default(0) @db.Decimal(8, 2)
@@ -1965,6 +1969,7 @@ model PayrollConfig {
   branchId       String?
   branchName     String?
   attendanceCode String?
+  sourceTemplateId String?
 
   salaryType          String  @default("MONTHLY") // MONTHLY | DAILY | SHIFT | NONE
   baseSalary          Decimal @default(0) @db.Decimal(18, 2)
@@ -1985,6 +1990,7 @@ model PayrollConfig {
   standardHoursPerDay Decimal @default(9.5) @db.Decimal(8, 2)
   overtimeRate        Decimal @default(1) @db.Decimal(8, 2)
   holidayRate         Decimal @default(2) @db.Decimal(8, 2)
+  overtimeConfigs     Json?
 
   paidLeaveEnabled     Boolean @default(false)
   paidLeaveHoursPerDay Decimal @default(9.5) @db.Decimal(8, 2)
@@ -2019,6 +2025,7 @@ model PayrollConfig {
   @@index([branchId])
   @@index([isActive])
   @@index([effectiveFrom])
+  @@index([sourceTemplateId])
 }
 
 model PayrollSettings {
@@ -2106,6 +2113,7 @@ model PayrollBranchConfigTemplate {
   standardHoursPerDay Decimal @default(9.5) @db.Decimal(8, 2)
   overtimeRate        Decimal @default(1) @db.Decimal(8, 2)
   holidayRate         Decimal @default(2) @db.Decimal(8, 2)
+  overtimeConfigs     Json?
 
   paidLeaveEnabled     Boolean @default(false)
   paidLeaveHoursPerDay Decimal @default(9.5) @db.Decimal(8, 2)
