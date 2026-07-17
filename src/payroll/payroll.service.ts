@@ -498,12 +498,21 @@ export class PayrollService {
     if (!current) throw new NotFoundException("Không tìm thấy cấu hình lương.");
     this.scopedBranchId(user, current.branchId || null);
 
+    const branchChanged = body.branchId !== undefined;
+    const targetBranchId = branchChanged
+      ? this.scopedBranchId(user, body.branchId || null)
+      : undefined;
+    const targetBranchName = branchChanged
+      ? (body.branchName || await this.resolveBranchName(targetBranchId || null))
+      : undefined;
+
     return this.prisma.payrollConfig.update({
       where: { id },
       data: {
         staffCode: body.staffCode ?? undefined,
         staffName: body.staffName ?? undefined,
-        branchName: body.branchName ?? undefined,
+        branchId: branchChanged ? targetBranchId : undefined,
+        branchName: branchChanged ? targetBranchName : (body.branchName ?? undefined),
         attendanceCode: (body as any).attendanceCode ?? undefined,
         salaryType: body.salaryType ?? undefined,
         baseSalary: body.baseSalary === undefined ? undefined : this.money(body.baseSalary),
@@ -779,7 +788,10 @@ export class PayrollService {
 
     const staffIds = Array.from(new Set(configs.map((c) => c.staffId)));
     const staffRows = await this.prisma.staffUser.findMany({
-      where: { id: { in: staffIds }, isActive: true },
+      // Cấu hình lương đang hoạt động mới là nguồn quyết định nhân viên có mặt trong kỳ lương.
+      // Không lọc StaffUser.isActive ở đây vì nhân viên nghỉ/đã tắt tài khoản sau kỳ chốt
+      // vẫn phải xuất hiện khi tính hoặc tính lại kỳ lương cũ.
+      where: { id: { in: staffIds } },
       select: { id: true, code: true, name: true, branchId: true, branchName: true },
     });
     const staffMap = new Map(staffRows.map((s) => [s.id, s]));
