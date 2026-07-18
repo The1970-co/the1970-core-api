@@ -104,6 +104,37 @@ export class OrderService implements OnModuleInit {
     return Number(value || 0);
   }
 
+  private getCarrierShippingFee(order: any) {
+    const shipment = order?.shipment || {};
+    const candidates = [
+      shipment?.shippingFee,
+      shipment?.metadata?.shippingFee,
+      shipment?.metadata?.fee,
+      shipment?.metadata?.total_fee,
+      shipment?.metadata?.totalFee,
+      shipment?.metadata?.total_pay,
+      shipment?.metadata?.totalPay,
+      shipment?.ahamoveRaw?.fee,
+      shipment?.ahamoveRaw?.total_fee,
+      shipment?.ahamoveRaw?.totalFee,
+      shipment?.ahamoveRaw?.total_pay,
+      shipment?.ahamoveRaw?.totalPay,
+    ];
+
+    for (const value of candidates) {
+      const amount = this.toNumber(value);
+      if (Number.isFinite(amount) && amount > 0) return amount;
+    }
+
+    return 0;
+  }
+
+  private getShopActualReceived(order: any) {
+    const customerTotal = this.toNumber(order?.finalAmount);
+    const carrierShippingFee = this.getCarrierShippingFee(order);
+    return Math.max(0, Math.round(customerTotal - carrierShippingFee));
+  }
+
   private normalizePhone(phone?: string | null) {
     if (!phone) return null;
     const cleaned = String(phone).replace(/\D/g, "").trim();
@@ -987,6 +1018,7 @@ export class OrderService implements OnModuleInit {
       discountAmount: this.toNumber(order.discountAmount),
       shippingFee: this.toNumber(order.shippingFee),
       finalAmount: this.toNumber(order.finalAmount),
+      shopActualReceived: this.getShopActualReceived(order),
       createdAt: new Date(order.createdAt).toLocaleString("vi-VN"),
       updatedAt: new Date(order.updatedAt).toLocaleString("vi-VN"),
       soldAt: order.soldAt ? new Date(order.soldAt).toLocaleString("vi-VN") : null,
@@ -1010,6 +1042,9 @@ export class OrderService implements OnModuleInit {
           ...order.shipment,
           shippingFee: this.toNumber(order.shipment.shippingFee),
           codAmount: this.toNumber(order.shipment.codAmount),
+          codReconciliationAmount: String(order.shipment.carrier || "").toUpperCase().includes("AHAMOVE")
+            ? this.getShopActualReceived(order)
+            : this.toNumber(order.shipment.codReconciliationAmount),
         }
         : null,
       partialDeliveries: Array.isArray(order.partialDeliveries)
@@ -2436,14 +2471,21 @@ export class OrderService implements OnModuleInit {
         const row = map.get(String(order.id));
         if (!row) return order;
 
+        const carrier = String(order?.shipment?.carrier || "").toUpperCase();
+        const storedReconciliationAmount = this.toNumber(row.codReconciliationAmount);
+        const reconciliationAmount = carrier.includes("AHAMOVE")
+          ? this.getShopActualReceived(order)
+          : storedReconciliationAmount;
+
         return {
           ...order,
+          shopActualReceived: this.getShopActualReceived(order),
           shipmentCodReconciliationStatus: row.codReconciliationStatus || null,
           shipmentCodReconciledAt: row.codReconciledAt || null,
           shipmentCodReconciliationBatchId: row.codReconciliationBatchId || null,
           shipmentCodReconciliationRowId: row.codReconciliationRowId || null,
           shipmentCodReconciliationIssue: row.codReconciliationIssue || null,
-          shipmentCodReconciliationAmount: this.toNumber(row.codReconciliationAmount),
+          shipmentCodReconciliationAmount: reconciliationAmount,
           shipment: order.shipment
             ? {
                 ...order.shipment,
@@ -2452,7 +2494,7 @@ export class OrderService implements OnModuleInit {
                 codReconciliationBatchId: row.codReconciliationBatchId || null,
                 codReconciliationRowId: row.codReconciliationRowId || null,
                 codReconciliationIssue: row.codReconciliationIssue || null,
-                codReconciliationAmount: this.toNumber(row.codReconciliationAmount),
+                codReconciliationAmount: reconciliationAmount,
               }
             : order.shipment,
         };
@@ -2547,6 +2589,7 @@ export class OrderService implements OnModuleInit {
       discountAmount: this.toNumber(order.discountAmount),
       shippingFee: this.toNumber(order.shippingFee),
       finalAmount: this.toNumber(order.finalAmount),
+      shopActualReceived: this.getShopActualReceived(order),
       createdAt: order.createdAt,
       updatedAt: order.updatedAt,
       soldAt: order.soldAt || null,
