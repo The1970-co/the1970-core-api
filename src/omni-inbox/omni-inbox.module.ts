@@ -3,10 +3,8 @@ import { OmniInboxController } from "./omni-inbox.controller";
 import { OmniInboxMetaWebhookController } from "./omni-inbox.meta-webhook.controller";
 import { OmniInboxService } from "./omni-inbox.service";
 import { OmniInboxRealtimeService } from "./omni-inbox.realtime";
-import { OrderModule } from "../order/order.module";
 
 @Module({
-  imports: [OrderModule],
   controllers: [OmniInboxController, OmniInboxMetaWebhookController],
   providers: [OmniInboxService, OmniInboxRealtimeService],
   exports: [OmniInboxService],

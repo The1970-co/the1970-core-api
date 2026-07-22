@@ -55,19 +55,11 @@ export class OmniInboxService {
   ) {}
 
   private get pageAccessToken() {
-    return safeText(
-      process.env.META_INBOX_PAGE_ACCESS_TOKEN ||
-        process.env.META_INBOX ||
-        process.env.META_ACCESS_TOKEN,
-    );
+    return safeText(process.env.META_INBOX_PAGE_ACCESS_TOKEN);
   }
 
   private get configuredPageId() {
-    return safeText(
-      process.env.META_INBOX_PAGE_ID ||
-        process.env.META_PAGE_ID ||
-        process.env.FACEBOOK_PAGE_ID,
-    );
+    return safeText(process.env.META_INBOX_PAGE_ID);
   }
 
   private get graphVersion() {

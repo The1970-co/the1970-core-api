@@ -8,11 +8,7 @@ type InboxEvent = {
     | "message.created"
     | "conversation.assigned"
     | "conversation.tagged"
-    | "conversation.note_created"
-    | "conversation.quick_order_created"
-    | "conversation.quick_order_updated"
-    | "conversation.quick_order_cancelled"
-    | "conversation.quick_order_deleted";
+    | "conversation.note_created";
   payload: any;
 };
 
