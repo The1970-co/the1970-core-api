@@ -7,7 +7,6 @@ import {
 import { PrismaService } from "../prisma/prisma.service";
 import { OmniInboxRealtimeService } from "./omni-inbox.realtime";
 import { ListConversationsDto } from "./dto/list-conversations.dto";
-import { OrderService } from "../order/order.service";
 
 function safeText(value: any) {
   return String(value || "").trim();
@@ -48,21 +47,27 @@ type MetaFeedChange = {
 
 @Injectable()
 export class OmniInboxService {
-  private lastStaleAssignmentSweepAt = 0;
   private readonly logger = new Logger(OmniInboxService.name);
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly realtime: OmniInboxRealtimeService,
-    private readonly orderService: OrderService,
   ) {}
 
   private get pageAccessToken() {
-    return safeText(process.env.META_INBOX_PAGE_ACCESS_TOKEN);
+    return safeText(
+      process.env.META_INBOX_PAGE_ACCESS_TOKEN ||
+        process.env.META_INBOX ||
+        process.env.META_ACCESS_TOKEN,
+    );
   }
 
   private get configuredPageId() {
-    return safeText(process.env.META_INBOX_PAGE_ID);
+    return safeText(
+      process.env.META_INBOX_PAGE_ID ||
+        process.env.META_PAGE_ID ||
+        process.env.FACEBOOK_PAGE_ID,
+    );
   }
 
   private get graphVersion() {
@@ -187,447 +192,6 @@ export class OmniInboxService {
     }
 
     return json as T;
-  }
-
-  private readonly defaultAssignmentPriorities = [
-    "ONLINE",
-    "BRANCH",
-    "LOWEST_LOAD",
-    "DRAFT_OWNER",
-  ];
-
-  private normalizeSharedText(value: any) {
-    return safeText(value).toLocaleLowerCase("vi-VN").replace(/\s+/g, " ");
-  }
-
-  private isAdminUser(user?: any) {
-    const roles = [
-      user?.role,
-      user?.roleName,
-      user?.activeRole,
-      ...(Array.isArray(user?.roles) ? user.roles : []),
-    ]
-      .map((value) => safeText(value).toUpperCase())
-      .filter(Boolean);
-    return roles.includes("OWNER") || roles.includes("ADMIN");
-  }
-
-  async heartbeat(staff?: any, dto?: { activeBranchId?: string; manualAway?: boolean }) {
-    const staffId = safeText(staff?.id || staff?.sub);
-    if (!staffId) throw new BadRequestException("Không xác định được nhân viên.");
-    const now = new Date();
-    const presence = await (this.prisma as any).omniStaffPresence.upsert({
-      where: { staffId },
-      update: {
-        staffName: safeText(staff?.name || staff?.username) || null,
-        activeBranchId: safeText(dto?.activeBranchId) || null,
-        manualAway: Boolean(dto?.manualAway),
-        status: dto?.manualAway ? "AWAY" : "ONLINE",
-        lastHeartbeatAt: now,
-        lastActiveAt: now,
-      },
-      create: {
-        staffId,
-        staffName: safeText(staff?.name || staff?.username) || null,
-        activeBranchId: safeText(dto?.activeBranchId) || null,
-        manualAway: Boolean(dto?.manualAway),
-        status: dto?.manualAway ? "AWAY" : "ONLINE",
-        lastHeartbeatAt: now,
-        lastActiveAt: now,
-      },
-    });
-    if (Date.now() - this.lastStaleAssignmentSweepAt > 60_000) {
-      this.lastStaleAssignmentSweepAt = Date.now();
-      void this.reassignStaleUnreadConversations().catch((error: any) =>
-        this.logger.warn(`[OMNI_ASSIGNMENT_SWEEP_SKIP] ${error?.message || error}`),
-      );
-    }
-    return presence;
-  }
-
-  async getAssignmentSettings() {
-    const setting = await (this.prisma as any).omniAssignmentSetting.upsert({
-      where: { id: "default" },
-      update: {},
-      create: {
-        id: "default",
-        priorityOrder: this.defaultAssignmentPriorities,
-        workDays: [1, 2, 3, 4, 5, 6, 0],
-      },
-      include: { members: { orderBy: [{ sortOrder: "asc" }, { staffName: "asc" }] } },
-    });
-
-    const staffIds = (setting.members || []).map((item: any) => item.staffId);
-    const presences = staffIds.length
-      ? await (this.prisma as any).omniStaffPresence.findMany({ where: { staffId: { in: staffIds } } })
-      : [];
-    const presenceByStaff = new Map(presences.map((item: any) => [item.staffId, item]));
-    const onlineCutoff = Date.now() - Number(setting.onlineWindowSeconds || 90) * 1000;
-
-    return {
-      ...setting,
-      priorityOrder: Array.isArray(setting.priorityOrder)
-        ? setting.priorityOrder
-        : this.defaultAssignmentPriorities,
-      members: (setting.members || []).map((member: any) => {
-        const presence: any = presenceByStaff.get(member.staffId);
-        const online = Boolean(
-          presence &&
-            !presence.manualAway &&
-            new Date(presence.lastHeartbeatAt).getTime() >= onlineCutoff,
-        );
-        return {
-          ...member,
-          presence: presence || null,
-          isOnline: online,
-        };
-      }),
-    };
-  }
-
-  async updateAssignmentSettings(dto: any, staff?: any) {
-    const priorityOrder = Array.isArray(dto.priorityOrder)
-      ? dto.priorityOrder.filter((item: string) => this.defaultAssignmentPriorities.includes(item))
-      : undefined;
-
-    const scalarData: any = {};
-    const scalarKeys = [
-      "isActive", "mode", "requireOnline", "branchPriorityEnabled",
-      "lowestLoadEnabled", "draftOwnerPriorityEnabled", "keepPreviousAssignee",
-      "keepPreviousDays", "reassignIfAssigneeOffline", "workingHoursOnly",
-      "workStartMinute", "workEndMinute", "workDays", "outsideHoursMode", "onlineWindowSeconds", "maxActiveEnabled",
-      "maxActiveConversations", "maxUnreadEnabled", "maxUnreadConversations",
-      "branchRoutingEnabled", "fallbackBranchId", "noCandidateMode",
-      "onlyAssignedCanView", "managerCanViewBranch", "onlyAssignedCanReply",
-      "shuffleEachRound", "reassignUnreadEnabled", "reassignAfterMinutes",
-    ];
-    scalarKeys.forEach((key) => {
-      if (dto[key] !== undefined) scalarData[key] = dto[key] === "" ? null : dto[key];
-    });
-    if (priorityOrder?.length) scalarData.priorityOrder = priorityOrder;
-    scalarData.updatedById = safeText(staff?.id || staff?.sub) || null;
-    scalarData.updatedByName = safeText(staff?.name || staff?.username) || null;
-
-    await (this.prisma as any).$transaction(async (tx: any) => {
-      await tx.omniAssignmentSetting.upsert({
-        where: { id: "default" },
-        update: scalarData,
-        create: {
-          id: "default",
-          priorityOrder: priorityOrder?.length ? priorityOrder : this.defaultAssignmentPriorities,
-          workDays: Array.isArray(dto.workDays) ? dto.workDays : [1, 2, 3, 4, 5, 6, 0],
-          ...scalarData,
-        },
-      });
-
-      if (Array.isArray(dto.members)) {
-        const ids = dto.members.map((item: any) => safeText(item.staffId)).filter(Boolean);
-        await tx.omniAssignmentMember.deleteMany({
-          where: { settingId: "default", ...(ids.length ? { staffId: { notIn: ids } } : {}) },
-        });
-        for (const member of dto.members) {
-          const staffId = safeText(member.staffId);
-          if (!staffId) continue;
-          await tx.omniAssignmentMember.upsert({
-            where: { settingId_staffId: { settingId: "default", staffId } },
-            update: {
-              staffName: safeText(member.staffName) || staffId,
-              branchId: safeText(member.branchId) || null,
-              branchName: safeText(member.branchName) || null,
-              isActive: member.isActive !== false,
-              receiveMessages: member.receiveMessages !== false,
-              receiveComments: Boolean(member.receiveComments),
-              sortOrder: Number(member.sortOrder || 0),
-              weight: Math.max(1, Number(member.weight || 1)),
-              maxActiveConversations: member.maxActiveConversations || null,
-              maxUnreadConversations: member.maxUnreadConversations || null,
-            },
-            create: {
-              settingId: "default",
-              staffId,
-              staffName: safeText(member.staffName) || staffId,
-              branchId: safeText(member.branchId) || null,
-              branchName: safeText(member.branchName) || null,
-              isActive: member.isActive !== false,
-              receiveMessages: member.receiveMessages !== false,
-              receiveComments: Boolean(member.receiveComments),
-              sortOrder: Number(member.sortOrder || 0),
-              weight: Math.max(1, Number(member.weight || 1)),
-              maxActiveConversations: member.maxActiveConversations || null,
-              maxUnreadConversations: member.maxUnreadConversations || null,
-            },
-          });
-        }
-      }
-    });
-
-    return this.getAssignmentSettings();
-  }
-
-  async listAssignmentHistory(limit = 100) {
-    return (this.prisma as any).omniAssignmentHistory.findMany({
-      orderBy: { createdAt: "desc" },
-      take: Math.min(Math.max(Number(limit || 100), 10), 500),
-    });
-  }
-
-  async listQuickReplyTemplates(includeInactive = false) {
-    return (this.prisma as any).omniQuickReplyTemplate.findMany({
-      where: includeInactive ? {} : { isActive: true },
-      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
-    });
-  }
-
-  async createQuickReplyTemplate(dto: any, staff?: any) {
-    const content = safeText(dto.content);
-    if (!content) throw new BadRequestException("Nội dung mẫu trả lời trống.");
-    const normalizedText = this.normalizeSharedText(content);
-    const existed = await (this.prisma as any).omniQuickReplyTemplate.findUnique({ where: { normalizedText } });
-    if (existed) throw new BadRequestException("Mẫu trả lời này đã tồn tại.");
-    return (this.prisma as any).omniQuickReplyTemplate.create({
-      data: {
-        title: safeText(dto.title) || null,
-        content,
-        normalizedText,
-        category: safeText(dto.category) || null,
-        sortOrder: Number(dto.sortOrder || 0),
-        createdById: safeText(staff?.id || staff?.sub) || null,
-        createdByName: safeText(staff?.name || staff?.username) || null,
-      },
-    });
-  }
-
-  async updateQuickReplyTemplate(id: string, dto: any) {
-    const current = await (this.prisma as any).omniQuickReplyTemplate.findUnique({ where: { id } });
-    if (!current) throw new NotFoundException("Không tìm thấy mẫu trả lời.");
-    const content = dto.content === undefined ? current.content : safeText(dto.content);
-    if (!content) throw new BadRequestException("Nội dung mẫu trả lời trống.");
-    const normalizedText = this.normalizeSharedText(content);
-    const duplicate = await (this.prisma as any).omniQuickReplyTemplate.findFirst({
-      where: { normalizedText, id: { not: id } },
-    });
-    if (duplicate) throw new BadRequestException("Mẫu trả lời này đã tồn tại.");
-    return (this.prisma as any).omniQuickReplyTemplate.update({
-      where: { id },
-      data: {
-        title: dto.title === undefined ? current.title : safeText(dto.title) || null,
-        content,
-        normalizedText,
-        category: dto.category === undefined ? current.category : safeText(dto.category) || null,
-        sortOrder: dto.sortOrder === undefined ? current.sortOrder : Number(dto.sortOrder || 0),
-        isActive: dto.isActive === undefined ? current.isActive : Boolean(dto.isActive),
-      },
-    });
-  }
-
-  async deleteQuickReplyTemplate(id: string) {
-    const current = await (this.prisma as any).omniQuickReplyTemplate.findUnique({ where: { id } });
-    if (!current) throw new NotFoundException("Không tìm thấy mẫu trả lời.");
-    return (this.prisma as any).omniQuickReplyTemplate.update({ where: { id }, data: { isActive: false } });
-  }
-
-  private async getAssignmentAccessRule(staff?: any) {
-    if (!staff || this.isAdminUser(staff)) return { unrestricted: true };
-    const setting: any = await (this.prisma as any).omniAssignmentSetting.findUnique({ where: { id: "default" } });
-    const roles = [staff?.role, ...(Array.isArray(staff?.roles) ? staff.roles : [])]
-      .map((value) => safeText(value).toUpperCase());
-    const isManager = roles.includes("MANAGER");
-    return {
-      unrestricted: !setting?.onlyAssignedCanView,
-      onlyAssigned: Boolean(setting?.onlyAssignedCanView) && !(isManager && setting?.managerCanViewBranch),
-      branchOnly: Boolean(setting?.onlyAssignedCanView) && isManager && setting?.managerCanViewBranch,
-      onlyAssignedCanReply: Boolean(setting?.onlyAssignedCanReply),
-      staffId: safeText(staff?.id || staff?.sub),
-      branchId: safeText(staff?.branchId || staff?.activeBranchId),
-    };
-  }
-
-  private async assertCanAccessConversation(id: string, staff?: any, reply = false) {
-    const access: any = await this.getAssignmentAccessRule(staff);
-    if (access.unrestricted) return;
-    const conversation: any = await this.prisma.omniConversation.findUnique({ where: { id }, select: { assigneeId: true, branchId: true } });
-    if (!conversation) throw new NotFoundException("Không tìm thấy hội thoại.");
-    if (reply && access.onlyAssignedCanReply && conversation.assigneeId !== access.staffId) {
-      throw new BadRequestException("Hội thoại này đang được phân công cho nhân viên khác.");
-    }
-    if (access.onlyAssigned && conversation.assigneeId !== access.staffId) {
-      throw new NotFoundException("Không tìm thấy hội thoại trong phạm vi được phân công.");
-    }
-    if (access.branchOnly && access.branchId && conversation.branchId !== access.branchId) {
-      throw new NotFoundException("Hội thoại không thuộc chi nhánh của bạn.");
-    }
-  }
-
-  private isInsideWorkingHours(setting: any, now = new Date()) {
-    if (!setting?.workingHoursOnly) return true;
-    const vnNow = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Ho_Chi_Minh" }));
-    const workDays = Array.isArray(setting.workDays) ? setting.workDays.map(Number) : [1, 2, 3, 4, 5, 6, 0];
-    if (!workDays.includes(vnNow.getDay())) return false;
-    const minute = vnNow.getHours() * 60 + vnNow.getMinutes();
-    return minute >= Number(setting.workStartMinute || 480) && minute <= Number(setting.workEndMinute || 1320);
-  }
-
-  private async reassignStaleUnreadConversations() {
-    const setting: any = await (this.prisma as any).omniAssignmentSetting.findUnique({ where: { id: "default" } });
-    if (!setting?.isActive || !setting.reassignUnreadEnabled) return;
-    const cutoff = new Date(Date.now() - Number(setting.reassignAfterMinutes || 10) * 60_000);
-    const rows = await this.prisma.omniConversation.findMany({
-      where: { unreadCount: { gt: 0 }, lastMessageAt: { lt: cutoff }, status: { in: ["OPEN", "PROCESSING"] as any } },
-      orderBy: { lastMessageAt: "asc" },
-      take: 20,
-      select: { id: true },
-    });
-    for (const row of rows) await this.autoAssignConversation(row.id, "STALE_UNREAD");
-  }
-
-  private async autoAssignConversation(conversationId: string, triggerType: string) {
-    const setting: any = await (this.prisma as any).omniAssignmentSetting.findUnique({
-      where: { id: "default" },
-      include: { members: { where: { isActive: true }, orderBy: [{ sortOrder: "asc" }, { staffName: "asc" }] } },
-    });
-    if (!setting?.isActive || setting.mode !== "AUTO" || !setting.members?.length) return null;
-
-    const conversation: any = await this.prisma.omniConversation.findUnique({
-      where: { id: conversationId },
-      include: { customer: true },
-    });
-    if (!conversation) return null;
-    if (!this.isInsideWorkingHours(setting) && setting.outsideHoursMode === "QUEUE") return null;
-
-    const isComment = safeText(conversation.providerThreadId).startsWith("FACEBOOK_COMMENT:");
-    let candidates = setting.members.filter((member: any) =>
-      isComment ? member.receiveComments : member.receiveMessages,
-    );
-    if (!candidates.length) return null;
-
-    const presenceRows = await (this.prisma as any).omniStaffPresence.findMany({
-      where: { staffId: { in: candidates.map((item: any) => item.staffId) } },
-    });
-    const presenceMap = new Map(presenceRows.map((item: any) => [item.staffId, item]));
-    const cutoff = Date.now() - Number(setting.onlineWindowSeconds || 90) * 1000;
-    const isOnline = (member: any) => {
-      const presence: any = presenceMap.get(member.staffId);
-      return Boolean(presence && !presence.manualAway && new Date(presence.lastHeartbeatAt).getTime() >= cutoff);
-    };
-
-    if (conversation.assigneeId) {
-      const currentMember = candidates.find((item: any) => item.staffId === conversation.assigneeId);
-      if (currentMember && (!setting.requireOnline || isOnline(currentMember))) return conversation;
-      if (!setting.reassignIfAssigneeOffline) return conversation;
-    }
-
-    const draftOrder: any = await this.prisma.order.findFirst({
-      where: { omniConversationId: conversationId, status: "NEW" as any },
-      orderBy: { createdAt: "desc" },
-      select: { assignedStaffId: true, assignedStaffName: true, createdByStaffId: true, createdByStaffName: true, branchId: true },
-    });
-    const draftOwnerId = safeText(draftOrder?.assignedStaffId || draftOrder?.createdByStaffId);
-    const targetBranchId = safeText(conversation.branchId || draftOrder?.branchId || setting.fallbackBranchId);
-
-    const staffIds = candidates.map((item: any) => item.staffId);
-    const groupedLoads: any[] = await (this.prisma.omniConversation as any).groupBy({
-      by: ["assigneeId"],
-      where: { assigneeId: { in: staffIds }, status: { in: ["OPEN", "PROCESSING", "PENDING"] as any } },
-      _count: { _all: true },
-    });
-    const unreadLoads: any[] = await (this.prisma.omniConversation as any).groupBy({
-      by: ["assigneeId"],
-      where: { assigneeId: { in: staffIds }, unreadCount: { gt: 0 }, status: { in: ["OPEN", "PROCESSING", "PENDING"] as any } },
-      _count: { _all: true },
-    });
-    const activeMap = new Map(groupedLoads.map((item: any) => [item.assigneeId, item._count._all]));
-    const unreadMap = new Map(unreadLoads.map((item: any) => [item.assigneeId, item._count._all]));
-    candidates = candidates.filter((member: any) => {
-      const active = Number(activeMap.get(member.staffId) || 0);
-      const unread = Number(unreadMap.get(member.staffId) || 0);
-      const maxActive = Number(member.maxActiveConversations || setting.maxActiveConversations || 20);
-      const maxUnread = Number(member.maxUnreadConversations || setting.maxUnreadConversations || 10);
-      if (setting.maxActiveEnabled && active >= maxActive) return false;
-      if (setting.maxUnreadEnabled && unread >= maxUnread) return false;
-      return true;
-    });
-    if (!candidates.length) return null;
-
-    const priorities = Array.isArray(setting.priorityOrder)
-      ? setting.priorityOrder
-      : this.defaultAssignmentPriorities;
-    const decision: any = { triggerType, priorities, targetBranchId, draftOwnerId, considered: [] };
-    const narrow = (matching: any[], reason: string) => {
-      if (matching.length) {
-        candidates = matching;
-        decision.considered.push({ reason, remaining: matching.map((item: any) => item.staffId) });
-      }
-    };
-
-    for (const priority of priorities) {
-      if (priority === "ONLINE" && setting.requireOnline) {
-        const online = candidates.filter(isOnline);
-        if (!online.length) {
-          if (setting.noCandidateMode === "ASSIGN_ANYWAY") continue;
-          await (this.prisma as any).omniAssignmentHistory.create({
-            data: {
-              conversationId,
-              customerName: conversation.customer?.name || null,
-              channel: conversation.channel,
-              branchId: targetBranchId || null,
-              action: "NO_CANDIDATE",
-              reason: "Không có nhân viên online đủ điều kiện.",
-              decisionDetail: decision,
-              triggerType,
-            },
-          });
-          return null;
-        }
-        candidates = online;
-        decision.considered.push({ reason: "ONLINE", remaining: online.map((item: any) => item.staffId) });
-      }
-      if (priority === "BRANCH" && setting.branchPriorityEnabled && setting.branchRoutingEnabled && targetBranchId) {
-        narrow(candidates.filter((item: any) => safeText(item.branchId) === targetBranchId), "BRANCH");
-      }
-      if (priority === "LOWEST_LOAD" && setting.lowestLoadEnabled && candidates.length > 1) {
-        const minimum = Math.min(...candidates.map((item: any) => Number(activeMap.get(item.staffId) || 0)));
-        narrow(candidates.filter((item: any) => Number(activeMap.get(item.staffId) || 0) === minimum), "LOWEST_LOAD");
-      }
-      if (priority === "DRAFT_OWNER" && setting.draftOwnerPriorityEnabled && draftOwnerId) {
-        narrow(candidates.filter((item: any) => item.staffId === draftOwnerId), "DRAFT_OWNER");
-      }
-    }
-
-    if (!candidates.length) return null;
-    let selected = candidates[0];
-    if (candidates.length > 1) {
-      const lastIndex = candidates.findIndex((item: any) => item.staffId === setting.lastAssignedStaffId);
-      selected = candidates[(lastIndex + 1 + candidates.length) % candidates.length];
-    }
-
-    const previousStaffId = conversation.assigneeId;
-    const updated = await this.prisma.$transaction(async (tx: any) => {
-      const row = await tx.omniConversation.update({
-        where: { id: conversationId },
-        data: { assigneeId: selected.staffId, assigneeName: selected.staffName, status: "PROCESSING" },
-        include: { customer: true, page: true, tags: true },
-      });
-      await tx.omniAssignmentSetting.update({ where: { id: "default" }, data: { lastAssignedStaffId: selected.staffId } });
-      await tx.omniAssignmentHistory.create({
-        data: {
-          conversationId,
-          customerName: conversation.customer?.name || null,
-          channel: conversation.channel,
-          branchId: targetBranchId || null,
-          previousStaffId: previousStaffId || null,
-          previousStaffName: conversation.assigneeName || null,
-          assignedStaffId: selected.staffId,
-          assignedStaffName: selected.staffName,
-          action: previousStaffId ? "REASSIGNED" : "ASSIGNED",
-          reason: `Phân công tự động theo thứ tự: ${priorities.join(" → ")}`,
-          decisionDetail: { ...decision, selected: selected.staffId, activeLoad: Number(activeMap.get(selected.staffId) || 0), unreadLoad: Number(unreadMap.get(selected.staffId) || 0) },
-          triggerType,
-        },
-      });
-      return row;
-    });
-    this.realtime.emit({ type: "conversation.assigned", payload: updated });
-    return updated;
   }
 
   async getMetaConnectionStatus() {
@@ -876,21 +440,16 @@ export class OmniInboxService {
     return items;
   }
 
-  async listConversations(query: ListConversationsDto, staff?: any) {
+  async listConversations(query: ListConversationsDto) {
     const page = Number(query.page || 1);
     const limit = Math.min(Math.max(Number(query.limit || 30), 10), 100);
     const skip = (page - 1) * limit;
 
     const where: any = {};
-    const access: any = await this.getAssignmentAccessRule(staff);
-    if (!access.unrestricted) {
-      if (access.onlyAssigned) where.assigneeId = access.staffId || "__NO_STAFF__";
-      if (access.branchOnly && access.branchId) where.branchId = access.branchId;
-    }
 
     if (query.status && query.status !== "ALL") where.status = query.status;
     if (query.channel && query.channel !== "ALL") where.channel = query.channel;
-    if (query.assigneeId && access.unrestricted) where.assigneeId = query.assigneeId;
+    if (query.assigneeId) where.assigneeId = query.assigneeId;
     if (query.branchId) where.branchId = query.branchId;
 
     const q = safeText(query.q);
@@ -929,8 +488,7 @@ export class OmniInboxService {
     };
   }
 
-  async getConversation(id: string, staff?: any) {
-    await this.assertCanAccessConversation(id, staff);
+  async getConversation(id: string) {
     const item = await this.prisma.omniConversation.findUnique({
       where: { id },
       include: {
@@ -938,12 +496,6 @@ export class OmniInboxService {
         page: true,
         tags: true,
         notes: { orderBy: { createdAt: "desc" }, take: 20 },
-        orders: {
-          where: { source: "OMNI_INBOX_QUICK_ORDER" },
-          orderBy: { createdAt: "desc" },
-          take: 10,
-          include: { items: true },
-        },
         messages: { orderBy: { sentAt: "asc" }, take: 100 },
       },
     });
@@ -967,9 +519,7 @@ export class OmniInboxService {
   async assignConversation(
     id: string,
     dto: { assigneeId: string; assigneeName: string },
-    staff?: any,
   ) {
-    const current = await this.prisma.omniConversation.findUnique({ where: { id }, include: { customer: true } });
     const item = await this.prisma.omniConversation.update({
       where: { id },
       data: {
@@ -980,21 +530,6 @@ export class OmniInboxService {
       include: { customer: true, page: true, tags: true },
     });
 
-    await (this.prisma as any).omniAssignmentHistory.create({ data: {
-      conversationId: id,
-      customerName: current?.customer?.name || null,
-      channel: item.channel,
-      branchId: item.branchId || null,
-      previousStaffId: current?.assigneeId || null,
-      previousStaffName: current?.assigneeName || null,
-      assignedStaffId: dto.assigneeId,
-      assignedStaffName: dto.assigneeName,
-      action: "MANUAL_ASSIGN",
-      reason: "Phân công thủ công",
-      triggerType: "MANUAL",
-      createdById: safeText(staff?.id || staff?.sub) || null,
-      createdByName: safeText(staff?.name || staff?.username) || null,
-    }});
     this.realtime.emit({ type: "conversation.assigned", payload: item });
     return item;
   }
@@ -1039,70 +574,13 @@ export class OmniInboxService {
     return item;
   }
 
-  private normalizeNoteTemplateName(value: string) {
-    return safeText(value).toLocaleLowerCase("vi-VN").replace(/\s+/g, " ");
-  }
-
-  async listNoteTemplates(includeInactive = false) {
-    return this.prisma.omniNoteTemplate.findMany({
-      where: includeInactive ? {} : { isActive: true },
-      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
-    });
-  }
-
-  async createNoteTemplate(dto: any, staff?: any) {
-    const name = safeText(dto.name);
-    if (!name) throw new BadRequestException("Tên ghi chú trống.");
-    const normalizedName = this.normalizeNoteTemplateName(name);
-    const existed = await this.prisma.omniNoteTemplate.findUnique({ where: { normalizedName } });
-    if (existed) throw new BadRequestException("Tên ghi chú này đã tồn tại.");
-    return this.prisma.omniNoteTemplate.create({
-      data: {
-        name, normalizedName, color: safeText(dto.color) || null,
-        sortOrder: Number(dto.sortOrder || 0),
-        createdById: staff?.id || staff?.sub || null,
-        createdByName: staff?.name || staff?.username || null,
-      },
-    });
-  }
-
-  async updateNoteTemplate(id: string, dto: any) {
-    const current = await this.prisma.omniNoteTemplate.findUnique({ where: { id } });
-    if (!current) throw new NotFoundException("Không tìm thấy mẫu ghi chú.");
-    const name = dto.name === undefined ? current.name : safeText(dto.name);
-    if (!name) throw new BadRequestException("Tên ghi chú trống.");
-    const normalizedName = this.normalizeNoteTemplateName(name);
-    const existed = await this.prisma.omniNoteTemplate.findFirst({ where: { normalizedName, id: { not: id } } });
-    if (existed) throw new BadRequestException("Tên ghi chú này đã tồn tại.");
-    return this.prisma.omniNoteTemplate.update({
-      where: { id },
-      data: {
-        name, normalizedName,
-        color: dto.color === undefined ? current.color : safeText(dto.color) || null,
-        sortOrder: dto.sortOrder === undefined ? current.sortOrder : Number(dto.sortOrder || 0),
-        isActive: dto.isActive === undefined ? current.isActive : Boolean(dto.isActive),
-      },
-    });
-  }
-
-  async deleteNoteTemplate(id: string) {
-    return this.prisma.omniNoteTemplate.update({ where: { id }, data: { isActive: false } });
-  }
-
-  async createNote(id: string, dto: { note: string; templateId?: string }, staff?: any) {
+  async createNote(id: string, dto: { note: string }, staff?: any) {
     const note = safeText(dto.note);
     if (!note) throw new BadRequestException("Ghi chú trống.");
-
-    let template: any = null;
-    if (dto.templateId) {
-      template = await this.prisma.omniNoteTemplate.findUnique({ where: { id: dto.templateId } });
-      if (!template || !template.isActive) throw new BadRequestException("Mẫu ghi chú không còn hoạt động.");
-    }
 
     const item = await this.prisma.omniConversationNote.create({
       data: {
         conversationId: id,
-        templateId: template?.id || null,
         note,
         staffId: staff?.id || staff?.sub || null,
         staffName: staff?.name || staff?.username || null,
@@ -1187,7 +665,6 @@ export class OmniInboxService {
     dto: { text: string; attachmentUrl?: string },
     staff?: any,
   ) {
-    await this.assertCanAccessConversation(id, staff, true);
     const conversation = await this.prisma.omniConversation.findUnique({
       where: { id },
       include: { customer: true },
@@ -1259,74 +736,6 @@ export class OmniInboxService {
     this.realtime.emit({ type: "conversation.updated", payload: updated });
 
     return message;
-  }
-
-  async createQuickOrder(conversationId: string, dto: any, staff?: any) {
-    const conversation = await this.prisma.omniConversation.findUnique({
-      where: { id: conversationId },
-      include: { customer: true },
-    });
-    if (!conversation) throw new NotFoundException("Không tìm thấy hội thoại.");
-
-    const requestId = safeText(dto.requestId);
-    if (requestId) {
-      const existed = await this.prisma.order.findUnique({ where: { quickOrderRequestId: requestId }, include: { items: true } });
-      if (existed) return existed;
-    }
-
-    const currentDraft = await this.prisma.order.findFirst({
-      where: { omniConversationId: conversationId, source: "OMNI_INBOX_QUICK_ORDER", status: "NEW" },
-      include: { items: true },
-      orderBy: { createdAt: "desc" },
-    });
-    if (currentDraft) throw new BadRequestException(`Hội thoại đã có đơn nháp ${currentDraft.orderCode}. Hãy sửa đơn hiện có.`);
-
-    const phone = safeText(dto.phone).replace(/\D/g, "");
-    if (!phone) throw new BadRequestException("Thiếu số điện thoại khách hàng.");
-    const customerName = safeText(dto.customerName) || conversation.customer?.name || "Khách hàng";
-    const address = safeText(dto.address);
-    if (!address) throw new BadRequestException("Thiếu địa chỉ giao hàng.");
-
-    const order: any = await this.orderService.createOrder({
-      salesChannel: "FACEBOOK_MANUAL",
-      customerName, customerPhone: phone, branchId: dto.branchId,
-      note: safeText(dto.note) || `Đơn chốt nhanh từ hội thoại ${conversationId}`,
-      mode: "draft", source: "OMNI_INBOX_QUICK_ORDER",
-      omniConversationId: conversationId, quickOrderRequestId: requestId || null,
-      shippingSnapshot: {
-        shippingRecipientName: customerName, shippingPhone: phone,
-        shippingAddressLine1: address, skipAutoShipment: true,
-      },
-      items: dto.items,
-    }, staff);
-
-    await this.prisma.omniCustomer.updateMany({
-      where: { id: conversation.customerId || "" },
-      data: { phone, address },
-    });
-    const note = await this.prisma.omniConversationNote.create({
-      data: { conversationId, staffId: staff?.id || staff?.sub || null, staffName: staff?.name || staff?.username || null, note: `Đã tạo đơn nháp ${order.orderCode}.` },
-    });
-    this.realtime.emit({ type: "conversation.note_created", payload: note });
-    this.realtime.emit({ type: "conversation.quick_order_created", payload: order });
-    return order;
-  }
-
-  async cancelQuickOrder(conversationId: string, orderId: string, staff?: any) {
-    const order = await this.prisma.order.findFirst({ where: { id: orderId, omniConversationId: conversationId, source: "OMNI_INBOX_QUICK_ORDER" } });
-    if (!order) throw new NotFoundException("Không tìm thấy đơn chốt nhanh.");
-    const updated = await this.orderService.updateOrderStatus(orderId, "CANCELLED" as any, staff);
-    this.realtime.emit({ type: "conversation.quick_order_cancelled", payload: updated });
-    return updated;
-  }
-
-  async deleteQuickOrder(conversationId: string, orderId: string, staff?: any) {
-    const order = await this.prisma.order.findFirst({ where: { id: orderId, omniConversationId: conversationId, source: "OMNI_INBOX_QUICK_ORDER" } });
-    if (!order) throw new NotFoundException("Không tìm thấy đơn chốt nhanh.");
-    if (String(order.status) !== "NEW") throw new BadRequestException("Chỉ được xoá đơn nháp chưa duyệt.");
-    const result = await this.orderService.deleteOrder(orderId, staff);
-    this.realtime.emit({ type: "conversation.quick_order_deleted", payload: { id: orderId, conversationId } });
-    return result;
   }
 
   async ingestMetaFeedChange(change: MetaFeedChange, entry?: any) {
@@ -1477,7 +886,6 @@ export class OmniInboxService {
 
     this.realtime.emit({ type: "message.created", payload: message });
     this.realtime.emit({ type: "conversation.updated", payload: conversation });
-    await this.autoAssignConversation(conversation.id, "INCOMING_MESSAGE");
 
     return { ok: true };
   }
@@ -1613,7 +1021,6 @@ export class OmniInboxService {
 
     this.realtime.emit({ type: "message.created", payload: message });
     this.realtime.emit({ type: "conversation.updated", payload: conversation });
-    await this.autoAssignConversation(conversation.id, "INCOMING_MESSAGE");
 
     return { ok: true };
   }
