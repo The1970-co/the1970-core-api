@@ -58,21 +58,11 @@ export class OmniInboxService {
   ) {}
 
   private get pageAccessToken() {
-    // Giữ tương thích với tên biến môi trường cũ đang dùng trên Railway.
-    // Ưu tiên biến chuẩn mới, sau đó mới fallback về các biến cũ.
-    return safeText(
-      process.env.META_INBOX_PAGE_ACCESS_TOKEN ||
-        process.env.META_INBOX ||
-        process.env.META_ACCESS_TOKEN,
-    );
+    return safeText(process.env.META_INBOX_PAGE_ACCESS_TOKEN);
   }
 
   private get configuredPageId() {
-    return safeText(
-      process.env.META_INBOX_PAGE_ID ||
-        process.env.META_PAGE_ID ||
-        process.env.FACEBOOK_PAGE_ID,
-    );
+    return safeText(process.env.META_INBOX_PAGE_ID);
   }
 
   private get graphVersion() {
@@ -198,7 +188,6 @@ export class OmniInboxService {
 
     return json as T;
   }
-
 
   private readonly defaultAssignmentPriorities = [
     "ONLINE",
@@ -1423,9 +1412,7 @@ export class OmniInboxService {
     });
 
     const nextCustomerName = profile.isFallback
-      ? isUsableProfileName(existingCustomer?.name)
-        ? existingCustomer!.name
-        : profile.name
+      ? existingCustomer?.name || profile.name
       : profile.name;
     const nextAvatarUrl =
       profile.avatarUrl || existingCustomer?.avatarUrl || null;
@@ -1561,9 +1548,7 @@ export class OmniInboxService {
     });
 
     const nextCustomerName = profile.isFallback
-      ? isUsableProfileName(existingCustomer?.name)
-        ? existingCustomer!.name
-        : profile.name
+      ? existingCustomer?.name || profile.name
       : profile.name;
     const nextAvatarUrl =
       profile.avatarUrl || existingCustomer?.avatarUrl || null;
