@@ -55,11 +55,19 @@ export class OmniInboxService {
   ) {}
 
   private get pageAccessToken() {
-    return safeText(process.env.META_INBOX_PAGE_ACCESS_TOKEN);
+    return safeText(
+      process.env.META_INBOX_PAGE_ACCESS_TOKEN ||
+        process.env.META_INBOX ||
+        process.env.META_ACCESS_TOKEN,
+    );
   }
 
   private get configuredPageId() {
-    return safeText(process.env.META_INBOX_PAGE_ID);
+    return safeText(
+      process.env.META_INBOX_PAGE_ID ||
+        process.env.META_PAGE_ID ||
+        process.env.FACEBOOK_PAGE_ID,
+    );
   }
 
   private get graphVersion() {
@@ -328,8 +336,8 @@ export class OmniInboxService {
       // Không để lỗi gọi profile làm rơi webhook. Khi token Page hết hạn hoặc app
       // chưa đủ quyền, hệ thống vẫn lưu hội thoại bằng tên tạm và sẽ enrich lại
       // khi token được thay mới.
-      this.logMetaDebug(
-        `[META_PROFILE_FALLBACK] psid=${last6(psid)} | ${error?.message || error}`,
+      this.logger.error(
+        `[META_PROFILE_ERROR] psid=${psid} | ${error?.message || error}`,
       );
       return { name: fallbackName, avatarUrl: null, isFallback: true };
     }
@@ -410,7 +418,7 @@ export class OmniInboxService {
           isFallbackCustomerName(item.customer?.name) ||
           !safeText(item.customer?.avatarUrl),
       )
-      .slice(0, 10);
+      .slice(0, 50);
 
     if (!targets.length) return items;
 
