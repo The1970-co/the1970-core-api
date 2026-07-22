@@ -92,6 +92,7 @@ export class OmniInboxService {
   private get defaultSubscribedFields() {
     return [
       "messages",
+      "message_echoes",
       "message_reads",
       "message_deliveries",
       "message_reactions",
@@ -902,7 +903,11 @@ export class OmniInboxService {
       return { skipped: true, reason: "missing_sender_or_recipient" };
 
     if (event?.message?.is_echo) {
-      // Tin do Page/shop gửi từ Facebook, Meta Business Suite hoặc Pancake.
+      this.logger.warn(
+        `[META_ECHO_RECEIVED] sender=${senderId} recipient=${recipientId} mid=${messageId || "-"}`,
+      );
+
+      // Echo là tin do Page/shop gửi từ Facebook, Meta Business Suite hoặc Pancake.
       // Với echo: sender là Page, recipient là khách.
       const pageId = senderId;
       const customerPsid = recipientId;

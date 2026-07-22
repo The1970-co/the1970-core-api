@@ -51,6 +51,10 @@ export class OmniInboxMetaWebhookController {
 
       for (const event of messaging) {
         try {
+          this.logger.warn(
+            `[META_EVENT_RAW] ${JSON.stringify(event)}`,
+          );
+
           const result: any = await this.service.ingestMetaWebhookEvent(event);
           if (result?.ok || result?.duplicated) handled += 1;
           else skipped += 1;
