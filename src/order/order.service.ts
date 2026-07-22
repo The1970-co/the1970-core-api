@@ -1888,6 +1888,9 @@ export class OrderService implements OnModuleInit {
             fulfillmentStatus: initialFulfillmentStatus,
             status: initialOrderStatus,
             note: body.note || null,
+            source: body.source || null,
+            omniConversationId: body.omniConversationId || null,
+            quickOrderRequestId: body.quickOrderRequestId || null,
 
             customerAddressId: isInstantCounterSale
               ? null
@@ -2033,7 +2036,7 @@ export class OrderService implements OnModuleInit {
           }
         }
 
-        if (customerId) {
+        if (customerId && mode !== "draft") {
           await tx.customer.update({
             where: { id: customerId },
             data: {

@@ -236,7 +236,11 @@ model Order {
   returnPartialDeliveries PartialDeliveryRecord[] @relation("PartialDeliveryReturnOrder")
   payments                Payment[]
   shipment                Shipment?
+  omniConversationId      String?
+  omniConversation        OmniConversation? @relation(fields: [omniConversationId], references: [id], onDelete: SetNull)
+  quickOrderRequestId     String? @unique
 
+  @@index([omniConversationId])
   @@index([customerPhone])
   @@index([branchId])
   @@index([customerId])
@@ -2406,6 +2410,128 @@ model OmniCustomer {
   @@index([name])
 }
 
+
+model OmniAssignmentSetting {
+  id                         String   @id @default("default")
+  isActive                   Boolean  @default(false)
+  mode                       String   @default("AUTO")
+  priorityOrder              Json
+  requireOnline              Boolean  @default(true)
+  branchPriorityEnabled      Boolean  @default(true)
+  lowestLoadEnabled          Boolean  @default(true)
+  draftOwnerPriorityEnabled  Boolean  @default(true)
+  keepPreviousAssignee       Boolean  @default(true)
+  keepPreviousDays           Int      @default(7)
+  reassignIfAssigneeOffline  Boolean  @default(true)
+  workingHoursOnly           Boolean  @default(false)
+  workStartMinute            Int      @default(480)
+  workEndMinute              Int      @default(1320)
+  workDays                   Json
+  outsideHoursMode           String   @default("QUEUE")
+  onlineWindowSeconds        Int      @default(90)
+  maxActiveEnabled           Boolean  @default(true)
+  maxActiveConversations     Int      @default(20)
+  maxUnreadEnabled           Boolean  @default(true)
+  maxUnreadConversations     Int      @default(10)
+  branchRoutingEnabled       Boolean  @default(true)
+  fallbackBranchId           String?
+  noCandidateMode            String   @default("UNASSIGNED")
+  onlyAssignedCanView        Boolean  @default(true)
+  managerCanViewBranch       Boolean  @default(true)
+  onlyAssignedCanReply       Boolean  @default(true)
+  shuffleEachRound           Boolean  @default(true)
+  reassignUnreadEnabled      Boolean  @default(false)
+  reassignAfterMinutes       Int      @default(10)
+  lastAssignedStaffId        String?
+  updatedById                String?
+  updatedByName              String?
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+
+  members OmniAssignmentMember[]
+
+  @@index([isActive, mode])
+}
+
+model OmniAssignmentMember {
+  id                      String   @id @default(cuid())
+  settingId               String   @default("default")
+  staffId                 String
+  staffName               String
+  branchId                String?
+  branchName              String?
+  isActive                Boolean  @default(true)
+  receiveMessages         Boolean  @default(true)
+  receiveComments         Boolean  @default(false)
+  sortOrder               Int      @default(0)
+  weight                  Int      @default(1)
+  maxActiveConversations  Int?
+  maxUnreadConversations  Int?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  setting OmniAssignmentSetting @relation(fields: [settingId], references: [id], onDelete: Cascade)
+
+  @@unique([settingId, staffId])
+  @@index([settingId, isActive, sortOrder])
+  @@index([staffId])
+  @@index([branchId])
+}
+
+model OmniStaffPresence {
+  staffId          String   @id
+  staffName        String?
+  status           String   @default("OFFLINE")
+  manualAway       Boolean  @default(false)
+  activeBranchId   String?
+  lastHeartbeatAt  DateTime @default(now())
+  lastActiveAt     DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([status, lastHeartbeatAt])
+  @@index([activeBranchId, status])
+}
+
+model OmniAssignmentHistory {
+  id                 String   @id @default(cuid())
+  conversationId     String
+  customerName       String?
+  channel            OmniChannel?
+  branchId           String?
+  previousStaffId    String?
+  previousStaffName  String?
+  assignedStaffId    String?
+  assignedStaffName  String?
+  action             String
+  reason             String?
+  decisionDetail     Json?
+  triggerType        String?
+  createdById        String?
+  createdByName      String?
+  createdAt          DateTime @default(now())
+
+  @@index([conversationId, createdAt])
+  @@index([assignedStaffId, createdAt])
+  @@index([action, createdAt])
+}
+
+model OmniQuickReplyTemplate {
+  id             String   @id @default(cuid())
+  title          String?
+  content        String
+  normalizedText String   @unique
+  category       String?
+  sortOrder      Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdById    String?
+  createdByName  String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
+  @@index([category, isActive])
+}
+
 model OmniConversation {
   id               String      @id @default(cuid())
   channel          OmniChannel
@@ -2435,6 +2561,7 @@ model OmniConversation {
   messages OmniMessage[]
   tags     OmniConversationTag[]
   notes    OmniConversationNote[]
+  orders   Order[]
 
   @@index([status, updatedAt])
   @@index([assigneeId, status])
@@ -2474,18 +2601,37 @@ model OmniConversationTag {
   @@index([tag])
 }
 
+model OmniNoteTemplate {
+  id             String   @id @default(cuid())
+  name           String
+  normalizedName String   @unique
+  color          String?
+  sortOrder       Int      @default(0)
+  isActive        Boolean  @default(true)
+  createdById    String?
+  createdByName  String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  notes          OmniConversationNote[]
+
+  @@index([isActive, sortOrder])
+}
+
 model OmniConversationNote {
   id String @id @default(cuid())
 
   conversationId String
   conversation   OmniConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
+  templateId String?
+  template   OmniNoteTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
   staffId   String?
   staffName String?
   note      String
   createdAt DateTime @default(now())
 
   @@index([conversationId, createdAt])
+  @@index([templateId])
 }
 
 model LocalDeliveryReconciliation {
