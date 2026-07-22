@@ -902,7 +902,98 @@ export class OmniInboxService {
       return { skipped: true, reason: "missing_sender_or_recipient" };
 
     if (event?.message?.is_echo) {
-      return { skipped: true, reason: "echo_message" };
+      // Tin do Page/shop gửi từ Facebook, Meta Business Suite hoặc Pancake.
+      // Với echo: sender là Page, recipient là khách.
+      const pageId = senderId;
+      const customerPsid = recipientId;
+      const providerThreadId = `FACEBOOK:${pageId}:${customerPsid}`;
+      const sentAt = new Date(timestamp);
+      const messageText = text || "[Tệp đính kèm]";
+
+      if (messageId) {
+        const existed = await this.prisma.omniMessage.findUnique({
+          where: { providerMessageId: messageId },
+        });
+        if (existed) return { duplicated: true, echo: true };
+      }
+
+      const page = await this.prisma.omniInboxPage.upsert({
+        where: { providerPageId: pageId },
+        update: {
+          lastWebhookAt: new Date(),
+          pageName:
+            pageId === this.configuredPageId
+              ? "The 1970"
+              : `Page ${pageId}`,
+        },
+        create: {
+          providerPageId: pageId,
+          pageName:
+            pageId === this.configuredPageId
+              ? "The 1970"
+              : `Page ${pageId}`,
+          channel: "FACEBOOK",
+          lastWebhookAt: new Date(),
+        },
+      });
+
+      let customer = await this.prisma.omniCustomer.findUnique({
+        where: { providerUserId: customerPsid },
+      });
+
+      if (!customer) {
+        const profile = await this.getMessengerProfile(customerPsid);
+        customer = await this.prisma.omniCustomer.create({
+          data: {
+            providerUserId: customerPsid,
+            name: profile.name,
+            avatarUrl: profile.avatarUrl || null,
+          },
+        });
+      }
+
+      const conversation = await this.prisma.omniConversation.upsert({
+        where: { providerThreadId },
+        update: {
+          pageId: page.id,
+          customerId: customer.id,
+          lastMessageText: messageText,
+          lastMessageAt: sentAt,
+        },
+        create: {
+          providerThreadId,
+          channel: "FACEBOOK",
+          pageId: page.id,
+          customerId: customer.id,
+          lastMessageText: messageText,
+          lastMessageAt: sentAt,
+          unreadCount: 0,
+          status: "PROCESSING",
+        },
+        include: { customer: true, page: true, tags: true },
+      });
+
+      const message = await this.prisma.omniMessage.create({
+        data: {
+          conversationId: conversation.id,
+          providerMessageId: messageId || null,
+          direction: "OUT",
+          type: attachment ? "IMAGE" : "TEXT",
+          text,
+          attachmentUrl: attachment?.payload?.url || null,
+          senderId: pageId,
+          senderName: page.pageName || "The 1970",
+          sentAt,
+        },
+      });
+
+      this.realtime.emit({ type: "message.created", payload: message });
+      this.realtime.emit({
+        type: "conversation.updated",
+        payload: conversation,
+      });
+
+      return { ok: true, echo: true };
     }
 
     if (event?.delivery || event?.read || event?.reaction || event?.postback) {
