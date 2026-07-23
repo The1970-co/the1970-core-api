@@ -230,6 +230,104 @@ export class OmniInboxController {
     return this.service.deleteQuickOrder(id, orderId, req.user);
   }
 
+
+  @UseGuards(JwtGuard, PermissionGuard)
+  @Post("presence/heartbeat")
+  @RequireAnyPermissions(
+    "omni_inbox.view",
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
+  heartbeat(@Body() dto: any, @Request() req: any) {
+    return this.service.heartbeat(req.user, dto);
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
+  @Get("assignment/settings")
+  @RequireAnyPermissions(
+    "omni_inbox.settings",
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
+  getAssignmentSettings(@Request() req: any) {
+    this.assertAdmin(req.user);
+    return this.service.getAssignmentSettings();
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
+  @Patch("assignment/settings")
+  @RequireAnyPermissions(
+    "omni_inbox.settings",
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
+  updateAssignmentSettings(@Body() dto: any, @Request() req: any) {
+    this.assertAdmin(req.user);
+    return this.service.updateAssignmentSettings(dto, req.user);
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
+  @Get("assignment/history")
+  @RequireAnyPermissions(
+    "omni_inbox.settings",
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
+  listAssignmentHistory(
+    @Query("limit") limit: string | undefined,
+    @Request() req: any,
+  ) {
+    this.assertAdmin(req.user);
+    return this.service.listAssignmentHistory(Number(limit || 100));
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
+  @Get("quick-replies")
+  @RequireAnyPermissions(
+    "omni_inbox.view",
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
+  listQuickReplies(@Query("includeInactive") includeInactive?: string) {
+    return this.service.listQuickReplyTemplates(
+      ["1", "true", "yes"].includes(
+        String(includeInactive || "").toLowerCase(),
+      ),
+    );
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
+  @Post("quick-replies")
+  @RequireAnyPermissions(
+    "omni_inbox.settings",
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
+  createQuickReply(@Body() dto: any, @Request() req: any) {
+    this.assertAdmin(req.user);
+    return this.service.createQuickReplyTemplate(dto, req.user);
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
+  @Patch("quick-replies/:id")
+  @RequireAnyPermissions(
+    "omni_inbox.settings",
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
+  updateQuickReply(
+    @Param("id") id: string,
+    @Body() dto: any,
+    @Request() req: any,
+  ) {
+    this.assertAdmin(req.user);
+    return this.service.updateQuickReplyTemplate(id, dto);
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
+  @Delete("quick-replies/:id")
+  @RequireAnyPermissions(
+    "omni_inbox.settings",
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
+  deleteQuickReply(@Param("id") id: string, @Request() req: any) {
+    this.assertAdmin(req.user);
+    return this.service.deleteQuickReplyTemplate(id);
+  }
+
   /**
    * 1 kết nối SSE duy nhất cho cả màn Inbox.
    * Không poll liên tục → giảm request và egress Railway.
