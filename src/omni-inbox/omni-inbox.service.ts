@@ -1139,11 +1139,78 @@ export class OmniInboxService {
 
     const q = safeText(query.q);
     if (q) {
-      where.OR = [
+      const qDigits = q.replace(/\D/g, "");
+      const phoneCandidates = new Set<string>();
+
+      if (qDigits.length >= 5) {
+        phoneCandidates.add(qDigits);
+
+        // Cho phép tìm cùng một số ở dạng 0xxxxxxxxx, 84xxxxxxxxx hoặc +84xxxxxxxxx.
+        if (qDigits.startsWith("84") && qDigits.length >= 10) {
+          phoneCandidates.add(`0${qDigits.slice(2)}`);
+        } else if (qDigits.startsWith("0") && qDigits.length >= 9) {
+          phoneCandidates.add(`84${qDigits.slice(1)}`);
+          phoneCandidates.add(`+84${qDigits.slice(1)}`);
+        }
+      }
+
+      const searchConditions: any[] = [
+        { id: { contains: q, mode: "insensitive" } },
+        { providerThreadId: { contains: q, mode: "insensitive" } },
         { lastMessageText: { contains: q, mode: "insensitive" } },
+        { assigneeName: { contains: q, mode: "insensitive" } },
         { customer: { name: { contains: q, mode: "insensitive" } } },
         { customer: { phone: { contains: q, mode: "insensitive" } } },
+        { customer: { address: { contains: q, mode: "insensitive" } } },
+        {
+          customer: {
+            providerUserId: { contains: q, mode: "insensitive" },
+          },
+        },
+        {
+          messages: {
+            some: {
+              OR: [
+                { text: { contains: q, mode: "insensitive" } },
+                { senderName: { contains: q, mode: "insensitive" } },
+                {
+                  providerMessageId: {
+                    contains: q,
+                    mode: "insensitive",
+                  },
+                },
+              ],
+            },
+          },
+        },
+        {
+          notes: {
+            some: {
+              OR: [
+                { note: { contains: q, mode: "insensitive" } },
+                { staffName: { contains: q, mode: "insensitive" } },
+              ],
+            },
+          },
+        },
+        {
+          tags: {
+            some: {
+              tag: { contains: q, mode: "insensitive" },
+            },
+          },
+        },
       ];
+
+      for (const phone of phoneCandidates) {
+        searchConditions.push({
+          customer: {
+            phone: { contains: phone, mode: "insensitive" },
+          },
+        });
+      }
+
+      where.OR = searchConditions;
     }
 
     const [items, total] = await this.prisma.$transaction([
