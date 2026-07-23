@@ -1769,6 +1769,7 @@ export class OmniInboxService {
         customerName,
         customerPhone: phone,
         branchId: dto.branchId,
+        shippingFee: 30000,
         note:
           safeText(dto.note) ||
           `Đơn chốt nhanh từ hội thoại ${conversationId}`,
