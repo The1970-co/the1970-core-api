@@ -78,10 +78,7 @@ export class OmniInboxService {
   }
 
   private get verboseMetaLogs() {
-    return (
-      process.env.META_INBOX_VERBOSE_LOGS === "true" ||
-      process.env.NODE_ENV !== "production"
-    );
+    return process.env.META_INBOX_VERBOSE_LOGS === "true";
   }
 
   private logMetaDebug(message: string) {
@@ -381,6 +378,180 @@ export class OmniInboxService {
     });
   }
 
+  async getAssignmentReport(query: {
+    from?: string;
+    to?: string;
+    branchId?: string;
+    staffId?: string;
+    channel?: string;
+    assignmentType?: string;
+  }) {
+    const now = new Date();
+    const defaultFrom = new Date(now);
+    defaultFrom.setHours(0, 0, 0, 0);
+
+    const from = query.from ? new Date(query.from) : defaultFrom;
+    const to = query.to ? new Date(query.to) : now;
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+      throw new BadRequestException("Khoảng ngày báo cáo không hợp lệ.");
+    }
+    // Bao trọn ngày khi frontend gửi YYYY-MM-DD.
+    if (query.to && /^\d{4}-\d{2}-\d{2}$/.test(query.to)) {
+      to.setHours(23, 59, 59, 999);
+    }
+
+    const actionFilter =
+      query.assignmentType === "AUTO"
+        ? { in: ["ASSIGNED", "REASSIGNED"] }
+        : query.assignmentType === "MANUAL"
+          ? "MANUAL_ASSIGN"
+          : query.assignmentType === "REASSIGNED"
+            ? "REASSIGNED"
+            : { in: ["ASSIGNED", "REASSIGNED", "MANUAL_ASSIGN"] };
+
+    const where: any = {
+      createdAt: { gte: from, lte: to },
+      assignedStaffId: { not: null },
+      action: actionFilter,
+    };
+    if (safeText(query.branchId)) where.branchId = safeText(query.branchId);
+    if (safeText(query.staffId)) {
+      where.assignedStaffId = safeText(query.staffId);
+    }
+    if (safeText(query.channel) && query.channel !== "ALL") {
+      where.channel = safeText(query.channel);
+    }
+
+    const [setting, historyRows] = await Promise.all([
+      (this.prisma as any).omniAssignmentSetting.findUnique({
+        where: { id: "default" },
+        include: {
+          members: {
+            orderBy: [{ sortOrder: "asc" }, { staffName: "asc" }],
+          },
+        },
+      }),
+      (this.prisma as any).omniAssignmentHistory.findMany({
+        where,
+        orderBy: { createdAt: "asc" },
+        select: {
+          assignedStaffId: true,
+          assignedStaffName: true,
+          action: true,
+          triggerType: true,
+          conversationId: true,
+          createdAt: true,
+        },
+      }),
+    ]);
+
+    const memberById = new Map(
+      (setting?.members || []).map((member: any) => [member.staffId, member]),
+    );
+    const stats = new Map<string, any>();
+
+    for (const row of historyRows) {
+      const staffId = safeText(row.assignedStaffId);
+      if (!staffId) continue;
+      const member: any = memberById.get(staffId);
+      const current = stats.get(staffId) || {
+        staffId,
+        staffName:
+          safeText(row.assignedStaffName) ||
+          safeText(member?.staffName) ||
+          staffId,
+        branchId: safeText(member?.branchId) || null,
+        branchName: safeText(member?.branchName) || null,
+        weight: Math.max(1, Number(member?.weight || 1)),
+        assignedCount: 0,
+        autoAssignedCount: 0,
+        manualAssignedCount: 0,
+        reassignedCount: 0,
+        uniqueConversationIds: new Set<string>(),
+      };
+      current.assignedCount += 1;
+      if (row.action === "MANUAL_ASSIGN") current.manualAssignedCount += 1;
+      else current.autoAssignedCount += 1;
+      if (row.action === "REASSIGNED") current.reassignedCount += 1;
+      if (row.conversationId) current.uniqueConversationIds.add(row.conversationId);
+      stats.set(staffId, current);
+    }
+
+    // Hiện cả nhân viên đã cấu hình dù kỳ này chưa được chia hội thoại.
+    for (const member of setting?.members || []) {
+      if (query.staffId && member.staffId !== query.staffId) continue;
+      if (query.branchId && member.branchId !== query.branchId) continue;
+      if (!stats.has(member.staffId)) {
+        stats.set(member.staffId, {
+          staffId: member.staffId,
+          staffName: member.staffName,
+          branchId: member.branchId || null,
+          branchName: member.branchName || null,
+          weight: Math.max(1, Number(member.weight || 1)),
+          assignedCount: 0,
+          autoAssignedCount: 0,
+          manualAssignedCount: 0,
+          reassignedCount: 0,
+          uniqueConversationIds: new Set<string>(),
+        });
+      }
+    }
+
+    const rows = Array.from(stats.values());
+    const totalAssigned = rows.reduce(
+      (sum: number, row: any) => sum + row.assignedCount,
+      0,
+    );
+    const activeRows = rows.filter((row: any) => row.weight > 0);
+    const totalWeight = activeRows.reduce(
+      (sum: number, row: any) => sum + row.weight,
+      0,
+    );
+
+    const normalizedRows = rows
+      .map((row: any) => {
+        const targetPercent = totalWeight
+          ? (row.weight / totalWeight) * 100
+          : 0;
+        const actualPercent = totalAssigned
+          ? (row.assignedCount / totalAssigned) * 100
+          : 0;
+        return {
+          ...row,
+          uniqueConversationCount: row.uniqueConversationIds.size,
+          uniqueConversationIds: undefined,
+          targetPercent,
+          actualPercent,
+          differencePercent: actualPercent - targetPercent,
+        };
+      })
+      .sort(
+        (a: any, b: any) =>
+          b.assignedCount - a.assignedCount ||
+          b.weight - a.weight ||
+          safeText(a.staffName).localeCompare(safeText(b.staffName)),
+      );
+
+    return {
+      from: from.toISOString(),
+      to: to.toISOString(),
+      totalAssigned,
+      totalAutoAssigned: normalizedRows.reduce(
+        (sum: number, row: any) => sum + row.autoAssignedCount,
+        0,
+      ),
+      totalManualAssigned: normalizedRows.reduce(
+        (sum: number, row: any) => sum + row.manualAssignedCount,
+        0,
+      ),
+      totalReassigned: normalizedRows.reduce(
+        (sum: number, row: any) => sum + row.reassignedCount,
+        0,
+      ),
+      rows: normalizedRows,
+    };
+  }
+
   async listQuickReplyTemplates(includeInactive = false) {
     return (this.prisma as any).omniQuickReplyTemplate.findMany({
       where: includeInactive ? {} : { isActive: true },
@@ -604,11 +775,65 @@ export class OmniInboxService {
     }
 
     if (!candidates.length) return null;
-    let selected = candidates[0];
-    if (candidates.length > 1) {
-      const lastIndex = candidates.findIndex((item: any) => item.staffId === setting.lastAssignedStaffId);
-      selected = candidates[(lastIndex + 1 + candidates.length) % candidates.length];
-    }
+
+    // Chia theo trọng số bằng weighted fair queue:
+    // nhân viên có weight 1/2/3 sẽ tiến dần tới tỷ lệ 1:2:3.
+    // Mốc đếm bắt đầu từ lần lưu cấu hình gần nhất để thay đổi trọng số có hiệu lực ngay.
+    const weightWindowStart = setting.updatedAt || new Date(0);
+    const weightedHistory: any[] = await (this.prisma as any).omniAssignmentHistory.groupBy({
+      by: ["assignedStaffId"],
+      where: {
+        assignedStaffId: { in: candidates.map((item: any) => item.staffId) },
+        createdAt: { gte: weightWindowStart },
+        action: { in: ["ASSIGNED", "REASSIGNED", "MANUAL_ASSIGN"] },
+      },
+      _count: { _all: true },
+    });
+    const assignedCountMap = new Map(
+      weightedHistory.map((item: any) => [
+        item.assignedStaffId,
+        Number(item?._count?._all || 0),
+      ]),
+    );
+
+    const candidateScores = candidates.map((member: any, index: number) => {
+      const weight = Math.max(1, Number(member.weight || 1));
+      const assignedCount = Number(assignedCountMap.get(member.staffId) || 0);
+      return {
+        member,
+        weight,
+        assignedCount,
+        // Điểm nhỏ hơn sẽ được nhận trước.
+        score: (assignedCount + 1) / weight,
+        roundRobinDistance:
+          setting.lastAssignedStaffId && candidates.length > 1
+            ? (index -
+                candidates.findIndex(
+                  (item: any) => item.staffId === setting.lastAssignedStaffId,
+                ) +
+                candidates.length) %
+              candidates.length
+            : index,
+      };
+    });
+
+    candidateScores.sort(
+      (a: any, b: any) =>
+        a.score - b.score ||
+        a.roundRobinDistance - b.roundRobinDistance ||
+        Number(a.member.sortOrder || 0) - Number(b.member.sortOrder || 0) ||
+        safeText(a.member.staffName).localeCompare(safeText(b.member.staffName)),
+    );
+
+    const selectedScore = candidateScores[0];
+    const selected = selectedScore.member;
+    decision.weightedCandidates = candidateScores.map((item: any) => ({
+      staffId: item.member.staffId,
+      staffName: item.member.staffName,
+      weight: item.weight,
+      assignedCount: item.assignedCount,
+      score: item.score,
+    }));
 
     const previousStaffId = conversation.assigneeId;
     const updated = await this.prisma.$transaction(async (tx: any) => {
@@ -630,7 +855,16 @@ export class OmniInboxService {
           assignedStaffName: selected.staffName,
           action: previousStaffId ? "REASSIGNED" : "ASSIGNED",
           reason: `Phân công tự động theo thứ tự: ${priorities.join(" → ")}`,
-          decisionDetail: { ...decision, selected: selected.staffId, activeLoad: Number(activeMap.get(selected.staffId) || 0), unreadLoad: Number(unreadMap.get(selected.staffId) || 0) },
+          decisionDetail: {
+            ...decision,
+            selected: selected.staffId,
+            selectedWeight: Math.max(1, Number(selected.weight || 1)),
+            assignedCountInWeightWindow: Number(
+              assignedCountMap.get(selected.staffId) || 0,
+            ),
+            activeLoad: Number(activeMap.get(selected.staffId) || 0),
+            unreadLoad: Number(unreadMap.get(selected.staffId) || 0),
+          },
           triggerType,
         },
       });

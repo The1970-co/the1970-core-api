@@ -91,8 +91,12 @@ export class OmniInboxController {
   @UseGuards(JwtGuard, PermissionGuard)
   @Patch("conversations/:id/assign")
   @RequirePermissions("omni_inbox.assign")
-  assign(@Param("id") id: string, @Body() dto: AssignConversationDto) {
-    return this.service.assignConversation(id, dto);
+  assign(
+    @Param("id") id: string,
+    @Body() dto: AssignConversationDto,
+    @Request() req: any,
+  ) {
+    return this.service.assignConversation(id, dto, req.user);
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
@@ -261,6 +265,32 @@ export class OmniInboxController {
   updateAssignmentSettings(@Body() dto: any, @Request() req: any) {
     this.assertAdmin(req.user);
     return this.service.updateAssignmentSettings(dto, req.user);
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
+  @Get("assignment/report")
+  @RequireAnyPermissions(
+    "omni_inbox.settings",
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
+  getAssignmentReport(
+    @Query("from") from: string | undefined,
+    @Query("to") to: string | undefined,
+    @Query("branchId") branchId: string | undefined,
+    @Query("staffId") staffId: string | undefined,
+    @Query("channel") channel: string | undefined,
+    @Query("assignmentType") assignmentType: string | undefined,
+    @Request() req: any,
+  ) {
+    this.assertAdmin(req.user);
+    return this.service.getAssignmentReport({
+      from,
+      to,
+      branchId,
+      staffId,
+      channel,
+      assignmentType,
+    });
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
