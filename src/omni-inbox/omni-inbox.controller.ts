@@ -348,6 +348,17 @@ export class OmniInboxController {
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
+  @Delete("quick-replies")
+  @RequireAnyPermissions(
+    "omni_inbox.settings",
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
+  deleteAllQuickReplies(@Request() req: any) {
+    this.assertAdmin(req.user);
+    return this.service.deleteAllQuickReplyTemplates();
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
   @Delete("quick-replies/:id")
   @RequireAnyPermissions(
     "omni_inbox.settings",

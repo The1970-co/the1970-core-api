@@ -602,9 +602,24 @@ export class OmniInboxService {
   }
 
   async deleteQuickReplyTemplate(id: string) {
-    const current = await (this.prisma as any).omniQuickReplyTemplate.findUnique({ where: { id } });
+    const current = await (this.prisma as any).omniQuickReplyTemplate.findUnique({
+      where: { id },
+    });
     if (!current) throw new NotFoundException("Không tìm thấy mẫu trả lời.");
-    return (this.prisma as any).omniQuickReplyTemplate.update({ where: { id }, data: { isActive: false } });
+
+    await (this.prisma as any).omniQuickReplyTemplate.delete({
+      where: { id },
+    });
+
+    return { success: true, id };
+  }
+
+  async deleteAllQuickReplyTemplates() {
+    const result = await (this.prisma as any).omniQuickReplyTemplate.deleteMany({});
+    return {
+      success: true,
+      deletedCount: Number(result?.count || 0),
+    };
   }
 
   private async getAssignmentAccessRule(staff?: any) {
