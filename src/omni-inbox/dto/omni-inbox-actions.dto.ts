@@ -100,6 +100,47 @@ export class CreateQuickOrderDto {
   @MaxLength(1000)
   address!: string;
 
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  addressLine1?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  addressLine2?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  province?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  district?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  ward?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  postalCode?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  ghnDistrictId?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  ghnWardCode?: string;
+
   @IsString()
   branchId!: string;
 

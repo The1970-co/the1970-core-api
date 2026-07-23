@@ -1620,26 +1620,67 @@ export class OmniInboxService {
 
     const phone = safeText(dto.phone).replace(/\D/g, "");
     if (!phone) throw new BadRequestException("Thiếu số điện thoại khách hàng.");
-    const customerName = safeText(dto.customerName) || conversation.customer?.name || "Khách hàng";
-    const address = safeText(dto.address);
-    if (!address) throw new BadRequestException("Thiếu địa chỉ giao hàng.");
+    const customerName =
+      safeText(dto.customerName) ||
+      conversation.customer?.name ||
+      "Khách hàng";
 
-    const order: any = await this.orderService.createOrder({
-      salesChannel: "FACEBOOK_MANUAL",
-      customerName, customerPhone: phone, branchId: dto.branchId,
-      note: safeText(dto.note) || `Đơn chốt nhanh từ hội thoại ${conversationId}`,
-      mode: "draft", source: "OMNI_INBOX_QUICK_ORDER",
-      omniConversationId: conversationId, quickOrderRequestId: requestId || null,
-      shippingSnapshot: {
-        shippingRecipientName: customerName, shippingPhone: phone,
-        shippingAddressLine1: address, skipAutoShipment: true,
+    const addressLine1 = safeText(dto.addressLine1) || safeText(dto.address);
+    const addressLine2 = safeText(dto.addressLine2);
+    const province = safeText(dto.province);
+    const district = safeText(dto.district);
+    const ward = safeText(dto.ward);
+    const postalCode = safeText(dto.postalCode);
+    const ghnDistrictId = Number(dto.ghnDistrictId || 0) || undefined;
+    const ghnWardCode = safeText(dto.ghnWardCode) || undefined;
+
+    if (!addressLine1)
+      throw new BadRequestException("Thiếu địa chỉ giao hàng.");
+
+    const fullAddress = [
+      addressLine1,
+      addressLine2,
+      ward,
+      district,
+      province,
+    ]
+      .filter(Boolean)
+      .join(", ");
+
+    const order: any = await this.orderService.createOrder(
+      {
+        salesChannel: "FACEBOOK_MANUAL",
+        customerName,
+        customerPhone: phone,
+        branchId: dto.branchId,
+        note:
+          safeText(dto.note) ||
+          `Đơn chốt nhanh từ hội thoại ${conversationId}`,
+        mode: "draft",
+        source: "OMNI_INBOX_QUICK_ORDER",
+        omniConversationId: conversationId,
+        quickOrderRequestId: requestId || null,
+        shippingSnapshot: {
+          shippingRecipientName: customerName,
+          shippingPhone: phone,
+          shippingAddressLine1: addressLine1,
+          shippingAddressLine2: addressLine2 || undefined,
+          shippingProvince: province || undefined,
+          shippingDistrict: district || undefined,
+          shippingWard: ward || undefined,
+          shippingPostalCode: postalCode || undefined,
+          shippingGhnDistrictId: ghnDistrictId,
+          shippingGhnWardCode: ghnWardCode,
+          skipAutoShipment: true,
+        },
+        items: dto.items,
       },
-      items: dto.items,
-    }, staff);
+      staff,
+    );
 
     await this.prisma.omniCustomer.updateMany({
       where: { id: conversation.customerId || "" },
-      data: { phone, address },
+      data: { phone, address: fullAddress || addressLine1 },
     });
     const note = await this.prisma.omniConversationNote.create({
       data: { conversationId, staffId: staff?.id || staff?.sub || null, staffName: staff?.name || staff?.username || null, note: `Đã tạo đơn nháp ${order.orderCode}.` },
