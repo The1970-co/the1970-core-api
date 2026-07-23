@@ -123,4 +123,14 @@ export const PERMISSIONS = {
   OMNI_MESSAGES_TAGS: "omni_inbox.tags.manage",
   OMNI_MESSAGES_NOTES: "omni_inbox.notes.manage",
   OMNI_MESSAGES_CREATE_ORDER: "omni_inbox.create_order",
+
+  OMNI_QUICK_REPLIES_VIEW: "omni_inbox.quick_replies.view",
+  OMNI_QUICK_REPLIES_CREATE: "omni_inbox.quick_replies.create",
+  OMNI_QUICK_REPLIES_EDIT: "omni_inbox.quick_replies.edit",
+  OMNI_QUICK_REPLIES_DELETE: "omni_inbox.quick_replies.delete",
+  OMNI_QUICK_REPLIES_DELETE_ALL: "omni_inbox.quick_replies.delete_all",
+  OMNI_QUICK_REPLIES_IMPORT: "omni_inbox.quick_replies.import",
+  OMNI_ASSIGNMENT_VIEW: "omni_inbox.assignment.view",
+  OMNI_ASSIGNMENT_MANAGE: "omni_inbox.assignment.manage",
+  OMNI_REPORTS_VIEW: "omni_inbox.reports.view",
 } as const;

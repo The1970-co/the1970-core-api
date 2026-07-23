@@ -52,6 +52,45 @@ const PERMISSION_KEY_ALIASES: Record<string, string[]> = {
   "omni_inbox.notes.manage": ["omni_inbox.notes.manage", "omni_messages.notes"],
   "omni_messages.create_order": ["omni_messages.create_order", "omni_inbox.create_order"],
   "omni_inbox.create_order": ["omni_inbox.create_order", "omni_messages.create_order"],
+
+  // Tương thích bộ quyền cũ: omni_inbox.settings vẫn là quyền quản trị tổng.
+  "omni_inbox.quick_replies.view": [
+    "omni_inbox.quick_replies.view",
+    "omni_inbox.view",
+    "omni_inbox.settings",
+  ],
+  "omni_inbox.quick_replies.create": [
+    "omni_inbox.quick_replies.create",
+    "omni_inbox.settings",
+  ],
+  "omni_inbox.quick_replies.edit": [
+    "omni_inbox.quick_replies.edit",
+    "omni_inbox.settings",
+  ],
+  "omni_inbox.quick_replies.delete": [
+    "omni_inbox.quick_replies.delete",
+    "omni_inbox.settings",
+  ],
+  "omni_inbox.quick_replies.delete_all": [
+    "omni_inbox.quick_replies.delete_all",
+    "omni_inbox.settings",
+  ],
+  "omni_inbox.quick_replies.import": [
+    "omni_inbox.quick_replies.import",
+    "omni_inbox.settings",
+  ],
+  "omni_inbox.assignment.view": [
+    "omni_inbox.assignment.view",
+    "omni_inbox.settings",
+  ],
+  "omni_inbox.assignment.manage": [
+    "omni_inbox.assignment.manage",
+    "omni_inbox.settings",
+  ],
+  "omni_inbox.reports.view": [
+    "omni_inbox.reports.view",
+    "omni_inbox.settings",
+  ],
 };
 
 function expandPermissionKeys(values: string[]) {

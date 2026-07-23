@@ -248,30 +248,30 @@ export class OmniInboxController {
   @UseGuards(JwtGuard, PermissionGuard)
   @Get("assignment/settings")
   @RequireAnyPermissions(
-    "omni_inbox.settings",
-    PERMISSIONS.MENU_OMNI_MESSAGES,
+    PERMISSIONS.OMNI_ASSIGNMENT_VIEW,
+    PERMISSIONS.OMNI_ASSIGNMENT_MANAGE,
+    PERMISSIONS.OMNI_MESSAGES_MANAGE,
   )
-  getAssignmentSettings(@Request() req: any) {
-    this.assertAdmin(req.user);
+  getAssignmentSettings() {
     return this.service.getAssignmentSettings();
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
   @Patch("assignment/settings")
   @RequireAnyPermissions(
-    "omni_inbox.settings",
-    PERMISSIONS.MENU_OMNI_MESSAGES,
+    PERMISSIONS.OMNI_ASSIGNMENT_MANAGE,
+    PERMISSIONS.OMNI_MESSAGES_MANAGE,
   )
   updateAssignmentSettings(@Body() dto: any, @Request() req: any) {
-    this.assertAdmin(req.user);
     return this.service.updateAssignmentSettings(dto, req.user);
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
   @Get("assignment/report")
   @RequireAnyPermissions(
-    "omni_inbox.settings",
-    PERMISSIONS.MENU_OMNI_MESSAGES,
+    PERMISSIONS.OMNI_REPORTS_VIEW,
+    PERMISSIONS.OMNI_ASSIGNMENT_VIEW,
+    PERMISSIONS.OMNI_MESSAGES_MANAGE,
   )
   getAssignmentReport(
     @Query("from") from: string | undefined,
@@ -282,7 +282,6 @@ export class OmniInboxController {
     @Query("assignmentType") assignmentType: string | undefined,
     @Request() req: any,
   ) {
-    this.assertAdmin(req.user);
     return this.service.getAssignmentReport({
       from,
       to,
@@ -296,21 +295,19 @@ export class OmniInboxController {
   @UseGuards(JwtGuard, PermissionGuard)
   @Get("assignment/history")
   @RequireAnyPermissions(
-    "omni_inbox.settings",
-    PERMISSIONS.MENU_OMNI_MESSAGES,
+    PERMISSIONS.OMNI_ASSIGNMENT_VIEW,
+    PERMISSIONS.OMNI_ASSIGNMENT_MANAGE,
+    PERMISSIONS.OMNI_MESSAGES_MANAGE,
   )
-  listAssignmentHistory(
-    @Query("limit") limit: string | undefined,
-    @Request() req: any,
-  ) {
-    this.assertAdmin(req.user);
+  listAssignmentHistory(@Query("limit") limit: string | undefined) {
     return this.service.listAssignmentHistory(Number(limit || 100));
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
   @Get("quick-replies")
   @RequireAnyPermissions(
-    "omni_inbox.view",
+    PERMISSIONS.OMNI_QUICK_REPLIES_VIEW,
+    PERMISSIONS.OMNI_MESSAGES_VIEW,
     PERMISSIONS.MENU_OMNI_MESSAGES,
   )
   listQuickReplies(@Query("includeInactive") includeInactive?: string) {
@@ -324,48 +321,43 @@ export class OmniInboxController {
   @UseGuards(JwtGuard, PermissionGuard)
   @Post("quick-replies")
   @RequireAnyPermissions(
-    "omni_inbox.settings",
-    PERMISSIONS.MENU_OMNI_MESSAGES,
+    PERMISSIONS.OMNI_QUICK_REPLIES_CREATE,
+    PERMISSIONS.OMNI_MESSAGES_MANAGE,
   )
   createQuickReply(@Body() dto: any, @Request() req: any) {
-    this.assertAdmin(req.user);
     return this.service.createQuickReplyTemplate(dto, req.user);
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
   @Patch("quick-replies/:id")
   @RequireAnyPermissions(
-    "omni_inbox.settings",
-    PERMISSIONS.MENU_OMNI_MESSAGES,
+    PERMISSIONS.OMNI_QUICK_REPLIES_EDIT,
+    PERMISSIONS.OMNI_MESSAGES_MANAGE,
   )
   updateQuickReply(
     @Param("id") id: string,
     @Body() dto: any,
-    @Request() req: any,
   ) {
-    this.assertAdmin(req.user);
     return this.service.updateQuickReplyTemplate(id, dto);
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
   @Delete("quick-replies")
   @RequireAnyPermissions(
-    "omni_inbox.settings",
-    PERMISSIONS.MENU_OMNI_MESSAGES,
+    PERMISSIONS.OMNI_QUICK_REPLIES_DELETE_ALL,
+    PERMISSIONS.OMNI_MESSAGES_MANAGE,
   )
-  deleteAllQuickReplies(@Request() req: any) {
-    this.assertAdmin(req.user);
+  deleteAllQuickReplies() {
     return this.service.deleteAllQuickReplyTemplates();
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
   @Delete("quick-replies/:id")
   @RequireAnyPermissions(
-    "omni_inbox.settings",
-    PERMISSIONS.MENU_OMNI_MESSAGES,
+    PERMISSIONS.OMNI_QUICK_REPLIES_DELETE,
+    PERMISSIONS.OMNI_MESSAGES_MANAGE,
   )
-  deleteQuickReply(@Param("id") id: string, @Request() req: any) {
-    this.assertAdmin(req.user);
+  deleteQuickReply(@Param("id") id: string) {
     return this.service.deleteQuickReplyTemplate(id);
   }
 
