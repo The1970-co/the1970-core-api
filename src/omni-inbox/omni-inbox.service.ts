@@ -1763,7 +1763,7 @@ export class OmniInboxService {
       .filter(Boolean)
       .join(", ");
 
-    const order: any = await this.orderService.createOrder(
+    let order: any = await this.orderService.createOrder(
       {
         salesChannel: "FACEBOOK_MANUAL",
         customerName,
@@ -1782,18 +1782,44 @@ export class OmniInboxService {
           shippingPhone: phone,
           shippingAddressLine1: addressLine1,
           shippingAddressLine2: addressLine2 || undefined,
+          shippingCity: province || undefined,
           shippingProvince: province || undefined,
           shippingDistrict: district || undefined,
           shippingWard: ward || undefined,
           shippingPostalCode: postalCode || undefined,
+
+          // Gửi cả hai bộ key để tương thích các phiên bản order.service.
+          ghnDistrictId,
+          ghnWardCode,
           shippingGhnDistrictId: ghnDistrictId,
           shippingGhnWardCode: ghnWardCode,
+
           skipAutoShipment: true,
         },
         items: dto.items,
       },
       staff,
     );
+
+    // Bảo đảm đơn nháp luôn có địa chỉ dạng cấu trúc.
+    // Không phụ thuộc việc order.service đang đọc key snapshot theo phiên bản nào.
+    order = await this.prisma.order.update({
+      where: { id: order.id },
+      data: {
+        shippingRecipientName: customerName,
+        shippingPhone: phone,
+        shippingAddressLine1: addressLine1,
+        shippingAddressLine2: addressLine2 || null,
+        shippingCity: province || null,
+        shippingProvince: province || null,
+        shippingDistrict: district || null,
+        shippingWard: ward || null,
+        shippingPostalCode: postalCode || null,
+        shippingGhnDistrictId: ghnDistrictId || null,
+        shippingGhnWardCode: ghnWardCode || null,
+      },
+      include: { items: true },
+    });
 
     await this.prisma.omniCustomer.updateMany({
       where: { id: conversation.customerId || "" },
