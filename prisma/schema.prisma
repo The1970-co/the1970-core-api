@@ -2551,6 +2551,22 @@ model OmniConversation {
   lastMessageAt   DateTime?
   unreadCount     Int                    @default(0)
 
+  // Nguồn quảng cáo / referral từ Meta Click-to-Messenger.
+  referralSource     String?
+  referralType       String?
+  referralRef        String?
+  referralIdentifier String?
+  adId               String?
+  adPostId           String?
+  adProductId        String?
+  adTitle            String?
+  adBody             String?
+  adImageUrl         String?
+  adVideoUrl         String?
+  adUrl              String?
+  adReferral         Json?
+  adFirstSeenAt      DateTime?
+
   lockedById String?
   lockedAt   DateTime?
   closedAt   DateTime?
@@ -2567,6 +2583,8 @@ model OmniConversation {
   @@index([assigneeId, status])
   @@index([branchId, status])
   @@index([lastMessageAt])
+  @@index([adId])
+  @@index([adPostId])
 }
 
 model OmniMessage {

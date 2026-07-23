@@ -97,6 +97,7 @@ export class OmniInboxService {
       "message_deliveries",
       "message_reactions",
       "messaging_postbacks",
+      "messaging_referrals",
       "feed",
     ];
   }
@@ -889,6 +890,116 @@ export class OmniInboxService {
     return updated;
   }
 
+  private extractMetaAdReferral(event: any) {
+    const referral =
+      event?.message?.referral ||
+      event?.referral ||
+      event?.postback?.referral ||
+      null;
+
+    if (!referral || typeof referral !== "object") return null;
+
+    const ads =
+      referral?.ads_context_data &&
+      typeof referral.ads_context_data === "object"
+        ? referral.ads_context_data
+        : {};
+
+    const adId = safeText(
+      referral?.ad_id ||
+        ads?.ad_id ||
+        ads?.advertisement_id,
+    );
+    const postId = safeText(
+      ads?.post_id ||
+        referral?.post_id ||
+        ads?.page_post_id,
+    );
+    const productId = safeText(
+      ads?.product_id ||
+        referral?.product_id,
+    );
+    const title = safeText(
+      ads?.ad_title ||
+        ads?.title ||
+        referral?.ad_title ||
+        referral?.title,
+    );
+    const body = safeText(
+      ads?.ad_text ||
+        ads?.body ||
+        ads?.description ||
+        referral?.ad_text ||
+        referral?.body,
+    );
+    const imageUrl = safeText(
+      ads?.photo_url ||
+        ads?.image_url ||
+        referral?.photo_url ||
+        referral?.image_url,
+    );
+    const videoUrl = safeText(
+      ads?.video_url ||
+        referral?.video_url,
+    );
+    const directUrl = safeText(
+      referral?.source_url ||
+        referral?.url ||
+        ads?.source_url ||
+        ads?.url ||
+        ads?.post_url,
+    );
+    const adUrl =
+      directUrl ||
+      (postId ? `https://www.facebook.com/${postId}` : "");
+
+    const normalized = {
+      source: safeText(referral?.source) || null,
+      type: safeText(referral?.type) || null,
+      ref: safeText(referral?.ref) || null,
+      identifier: safeText(referral?.identifier) || null,
+      adId: adId || null,
+      postId: postId || null,
+      productId: productId || null,
+      title: title || null,
+      body: body || null,
+      imageUrl: imageUrl || null,
+      videoUrl: videoUrl || null,
+      url: adUrl || null,
+      raw: referral,
+    };
+
+    const hasUsefulData = Object.entries(normalized).some(
+      ([key, value]) =>
+        key !== "raw" &&
+        value !== null &&
+        value !== "",
+    );
+
+    return hasUsefulData ? normalized : null;
+  }
+
+  private buildAdReferralUpdate(referral: any, timestamp: number) {
+    if (!referral) return {};
+
+    return {
+      referralSource: referral.source,
+      referralType: referral.type,
+      referralRef: referral.ref,
+      referralIdentifier: referral.identifier,
+      adId: referral.adId,
+      adPostId: referral.postId,
+      adProductId: referral.productId,
+      adTitle: referral.title,
+      adBody: referral.body,
+      adImageUrl: referral.imageUrl,
+      adVideoUrl: referral.videoUrl,
+      adUrl: referral.url,
+      adReferral: referral.raw,
+      adFirstSeenAt: new Date(timestamp || Date.now()),
+    };
+  }
+
   async getMetaConnectionStatus() {
     const pageId = this.configuredPageId;
     const subscribedFields = this.defaultSubscribedFields;
@@ -1174,6 +1285,11 @@ export class OmniInboxService {
         { providerThreadId: { contains: q, mode: "insensitive" } },
         { lastMessageText: { contains: q, mode: "insensitive" } },
         { assigneeName: { contains: q, mode: "insensitive" } },
+        { adId: { contains: q, mode: "insensitive" } },
+        { adPostId: { contains: q, mode: "insensitive" } },
+        { adTitle: { contains: q, mode: "insensitive" } },
+        { adBody: { contains: q, mode: "insensitive" } },
+        { referralRef: { contains: q, mode: "insensitive" } },
         { customer: { name: { contains: q, mode: "insensitive" } } },
         { customer: { phone: { contains: q, mode: "insensitive" } } },
         { customer: { address: { contains: q, mode: "insensitive" } } },
@@ -1876,6 +1992,8 @@ export class OmniInboxService {
     const text = safeText(event?.message?.text);
     const timestamp = Number(event?.timestamp || Date.now());
     const attachment = event?.message?.attachments?.[0];
+    const adReferral = this.extractMetaAdReferral(event);
+    const adReferralData = this.buildAdReferralUpdate(adReferral, timestamp);
 
     if (!senderId || !recipientId)
       return { skipped: true, reason: "missing_sender_or_recipient" };
@@ -1973,14 +2091,19 @@ export class OmniInboxService {
       return { ok: true, echo: true };
     }
 
-    if (event?.delivery || event?.read || event?.reaction || event?.postback) {
+    if (
+      event?.delivery ||
+      event?.read ||
+      event?.reaction ||
+      (event?.postback && !adReferral)
+    ) {
       this.logMetaDebug(
         `[META_WEBHOOK_EVENT] non-message event | sender=${last6(senderId)} recipient=${last6(recipientId)}`,
       );
       return { skipped: true, reason: "non_message_event" };
     }
 
-    if (!text && !event?.message?.attachments?.length) {
+    if (!text && !event?.message?.attachments?.length && !adReferral) {
       return { skipped: true, reason: "empty_message" };
     }
 
@@ -2044,53 +2167,90 @@ export class OmniInboxService {
 
     const providerThreadId = `FACEBOOK:${recipientId}:${senderId}`;
     const sentAt = new Date(timestamp);
-    const messageText = text || "[Tệp đính kèm]";
+    const hasMessage = Boolean(
+      text || event?.message?.attachments?.length,
+    );
+    const messageText = text || (attachment ? "[Tệp đính kèm]" : "");
+
+    const updateData: any = {
+      pageId: page.id,
+      customerId: customer.id,
+      ...adReferralData,
+    };
+    if (hasMessage) {
+      updateData.lastMessageText = messageText;
+      updateData.lastMessageAt = sentAt;
+      updateData.unreadCount = { increment: 1 };
+      updateData.status = "OPEN";
+    }
+
+    const createData: any = {
+      providerThreadId,
+      channel: "FACEBOOK",
+      pageId: page.id,
+      customerId: customer.id,
+      unreadCount: hasMessage ? 1 : 0,
+      status: hasMessage ? "OPEN" : "PENDING",
+      ...adReferralData,
+    };
+    if (hasMessage) {
+      createData.lastMessageText = messageText;
+      createData.lastMessageAt = sentAt;
+    }
 
     const conversation = await this.prisma.omniConversation.upsert({
       where: { providerThreadId },
-      update: {
-        pageId: page.id,
-        customerId: customer.id,
-        lastMessageText: messageText,
-        lastMessageAt: sentAt,
-        unreadCount: { increment: 1 },
-        status: "OPEN",
-      },
-      create: {
-        providerThreadId,
-        channel: "FACEBOOK",
-        pageId: page.id,
-        customerId: customer.id,
-        lastMessageText: messageText,
-        lastMessageAt: sentAt,
-        unreadCount: 1,
-        status: "OPEN",
-      },
+      update: updateData,
+      create: createData,
       include: { customer: true, page: true, tags: true },
     });
 
-    const message = await this.prisma.omniMessage.create({
-      data: {
-        conversationId: conversation.id,
-        providerMessageId: messageId || null,
-        direction: "IN",
-        type: attachment ? "IMAGE" : "TEXT",
-        text,
-        attachmentUrl: attachment?.payload?.url || null,
-        senderId,
-        senderName: customer.name,
-        sentAt,
-      },
-    });
+    let message: any = null;
+    if (hasMessage) {
+      message = await this.prisma.omniMessage.create({
+        data: {
+          conversationId: conversation.id,
+          providerMessageId: messageId || null,
+          direction: "IN",
+          type: attachment ? "IMAGE" : "TEXT",
+          text,
+          attachmentUrl: attachment?.payload?.url || null,
+          senderId,
+          senderName: customer.name,
+          sentAt,
+        },
+      });
+    }
+
+    if (adReferral) {
+      this.logger.log(
+        `[META_AD_REFERRAL] conversation=${conversation.id} ad=${adReferral.adId || "-"} post=${adReferral.postId || "-"} source=${adReferral.source || "-"}`,
+      );
+    }
 
     this.logMetaDebug(
       `[META_WEBHOOK_MESSAGE] page=${recipientId} sender=${last6(senderId)} customer="${customer.name}" text="${messageText.slice(0, 80)}"`,
     );
 
-    this.realtime.emit({ type: "message.created", payload: message });
-    this.realtime.emit({ type: "conversation.updated", payload: conversation });
-    await this.autoAssignConversation(conversation.id, "INCOMING_MESSAGE");
+    if (message) {
+      this.realtime.emit({ type: "message.created", payload: message });
+    }
+    this.realtime.emit({
+      type: "conversation.updated",
+      payload: conversation,
+    });
 
-    return { ok: true };
+    if (hasMessage) {
+      await this.autoAssignConversation(
+        conversation.id,
+        "INCOMING_MESSAGE",
+      );
+    }
+
+    return {
+      ok: true,
+      referral: Boolean(adReferral),
+      message: Boolean(message),
+    };
   }
 }
