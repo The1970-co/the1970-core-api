@@ -86,6 +86,7 @@ export class CreateQuickOrderItemDto {
   qty!: number;
 }
 
+// QUICK_ORDER_STRUCTURED_ADDRESS_DTO_V2_20260723
 export class CreateQuickOrderDto {
   @IsOptional()
   @IsString()

@@ -1714,7 +1714,9 @@ export class OmniInboxService {
     return message;
   }
 
+// QUICK_ORDER_STRUCTURED_ADDRESS_PERSIST_V2_20260723
   async createQuickOrder(conversationId: string, dto: any, staff?: any) {
+    this.logger.debug("[QUICK_ORDER_ADDRESS_V2] structured address payload enabled");
     const conversation = await this.prisma.omniConversation.findUnique({
       where: { id: conversationId },
       include: { customer: true },
