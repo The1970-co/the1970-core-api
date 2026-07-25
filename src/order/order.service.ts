@@ -1570,6 +1570,20 @@ export class OrderService implements OnModuleInit {
         const isPickupOrder = this.isPickupLikeOrder(body, salesChannel);
         const isInstantCounterSale = isPosSale || isPickupOrder;
 
+        const shippingSnapshot = body?.shippingSnapshot || {};
+        const normalizedShippingGhnDistrictId =
+          Number(
+            shippingSnapshot.shippingGhnDistrictId ??
+              shippingSnapshot.ghnDistrictId ??
+              0,
+          ) || null;
+        const normalizedShippingGhnWardCode =
+          String(
+            shippingSnapshot.shippingGhnWardCode ??
+              shippingSnapshot.ghnWardCode ??
+              "",
+          ).trim() || null;
+
         let branchId = body.branchId ? String(body.branchId).trim() : null;
 
         if (!this.isOwner(user)) {
@@ -1894,43 +1908,47 @@ export class OrderService implements OnModuleInit {
 
             customerAddressId: isInstantCounterSale
               ? null
-              : body?.shippingSnapshot?.shippingAddressId || null,
+              : shippingSnapshot.shippingAddressId || null,
             shippingRecipientName: isInstantCounterSale
               ? null
-              : body?.shippingSnapshot?.shippingRecipientName || null,
+              : shippingSnapshot.shippingRecipientName || null,
             shippingPhone: isInstantCounterSale
               ? null
-              : body?.shippingSnapshot?.shippingPhone || null,
+              : shippingSnapshot.shippingPhone || null,
             shippingAddressLine1: isInstantCounterSale
               ? null
-              : body?.shippingSnapshot?.shippingAddressLine1 || null,
+              : shippingSnapshot.shippingAddressLine1 || null,
             shippingAddressLine2: isInstantCounterSale
               ? null
-              : body?.shippingSnapshot?.shippingAddressLine2 || null,
+              : shippingSnapshot.shippingAddressLine2 || null,
             shippingWard: isInstantCounterSale
               ? null
-              : body?.shippingSnapshot?.shippingWard || null,
+              : shippingSnapshot.shippingWard || null,
             shippingDistrict: isInstantCounterSale
               ? null
-              : body?.shippingSnapshot?.shippingDistrict || null,
+              : shippingSnapshot.shippingDistrict || null,
             shippingCity: isInstantCounterSale
               ? null
-              : body?.shippingSnapshot?.shippingCity || null,
+              : shippingSnapshot.shippingCity ||
+                shippingSnapshot.shippingProvince ||
+                null,
             shippingProvince: isInstantCounterSale
               ? null
-              : body?.shippingSnapshot?.shippingProvince || null,
+              : shippingSnapshot.shippingProvince ||
+                shippingSnapshot.shippingCity ||
+                null,
             shippingCountry: isInstantCounterSale
               ? null
-              : body?.shippingSnapshot?.shippingCountry || null,
+              : shippingSnapshot.shippingCountry || null,
             shippingPostalCode: isInstantCounterSale
               ? null
-              : body?.shippingSnapshot?.shippingPostalCode || null,
+              : shippingSnapshot.shippingPostalCode || null,
             shippingGhnDistrictId: isInstantCounterSale
               ? null
-              : body?.shippingSnapshot?.ghnDistrictId || null,
+              : normalizedShippingGhnDistrictId,
             shippingGhnWardCode: isInstantCounterSale
               ? null
-              : body?.shippingSnapshot?.ghnWardCode || null,
+              : normalizedShippingGhnWardCode,
           },
         });
 

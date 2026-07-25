@@ -18,7 +18,6 @@ import { PermissionGuard } from "../auth/guards/permission.guard";
 import { RequirePermissions } from "../auth/decorators/require-permissions.decorator";
 import { OrderService } from "./order.service";
 import { UpdateOrderStatusDto } from "./dto/update-order-status.dto";
-import { CreateOrderDto } from "./dto/create-order.dto";
 
 @UseGuards(JwtGuard, PermissionGuard)
 @Controller("orders")
@@ -81,9 +80,14 @@ export class OrderController {
   @Post()
   @RequirePermissions("orders.create")
   async createOrder(
-    @Body() body: CreateOrderDto,
+    @Body() body: any,
     @Req() req: Request & { user?: any }
   ) {
+    // Không dùng CreateOrderDto tại đây vì ValidationPipe whitelist
+    // đang loại các field shippingSnapshot mở rộng như:
+    // shippingProvince, shippingDistrict, shippingWard,
+    // shippingGhnDistrictId, shippingGhnWardCode...
+    // OrderService vẫn chịu trách nhiệm validate nghiệp vụ.
     return this.orderService.createOrder(body, req.user);
   }
 

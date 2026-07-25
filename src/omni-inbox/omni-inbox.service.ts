@@ -1765,10 +1765,19 @@ export class OmniInboxService {
 
     let order: any = await this.orderService.createOrder(
       {
-        salesChannel: "FACEBOOK_MANUAL",
         customerName,
         customerPhone: phone,
         branchId: dto.branchId,
+
+        // Bắt buộc coi đơn nhanh là đơn giao hàng Facebook,
+        // không được rơi vào flow bán tại quầy / nhận tại cửa hàng.
+        salesChannel: "FACEBOOK_MANUAL",
+        isPosSale: false,
+        deliveryMethod: "DELIVERY",
+        shippingMethod: "GHN",
+        fulfillmentType: "DELIVERY",
+        shippingPartner: "ghn",
+
         shippingFee: 30000,
         note:
           safeText(dto.note) ||
@@ -1787,6 +1796,9 @@ export class OmniInboxService {
           shippingDistrict: district || undefined,
           shippingWard: ward || undefined,
           shippingPostalCode: postalCode || undefined,
+          shippingPartner: "ghn",
+          shippingMethod: "GHN",
+          fulfillmentType: "DELIVERY",
 
           // Gửi cả hai bộ key để tương thích các phiên bản order.service.
           ghnDistrictId,
@@ -1820,6 +1832,28 @@ export class OmniInboxService {
       },
       include: { items: true },
     });
+
+    const persistedOrder = await this.prisma.order.findUnique({
+      where: { id: order.id },
+      select: {
+        id: true,
+        shippingProvince: true,
+        shippingDistrict: true,
+        shippingWard: true,
+        shippingGhnDistrictId: true,
+        shippingGhnWardCode: true,
+      },
+    });
+
+    if (
+      !persistedOrder?.shippingProvince ||
+      !persistedOrder?.shippingDistrict ||
+      !persistedOrder?.shippingWard
+    ) {
+      throw new BadRequestException(
+        `Đơn đã tạo nhưng chưa lưu đủ địa chỉ cấu trúc: province="${persistedOrder?.shippingProvince || ""}", district="${persistedOrder?.shippingDistrict || ""}", ward="${persistedOrder?.shippingWard || ""}".`,
+      );
+    }
 
     await this.prisma.omniCustomer.updateMany({
       where: { id: conversation.customerId || "" },

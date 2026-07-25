@@ -81,6 +81,16 @@ class ShippingSnapshotDto {
   @IsOptional()
   @IsString()
   shippingGhnWardIdV2?: string;
+
+  // Alias đang được create-order-api và Omni sử dụng.
+  // Phải khai báo để ValidationPipe whitelist không loại khỏi payload.
+  @IsOptional()
+  @IsInt()
+  ghnDistrictId?: number;
+
+  @IsOptional()
+  @IsString()
+  ghnWardCode?: string;
 }
 
 export class CreateOrderDto {
