@@ -51,6 +51,7 @@ export class OmniInboxService {
   private lastStaleAssignmentSweepAt = 0;
   private lastMorningQueueSweepAt = 0;
   private readonly logger = new Logger(OmniInboxService.name);
+  private readonly facebookPostSourceCache = new Map<string, { expiresAt: number; data: any }>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -1527,6 +1528,92 @@ export class OmniInboxService {
     };
   }
 
+  private parseFacebookCommentThreadId(providerThreadId?: string | null) {
+    const raw = safeText(providerThreadId);
+    if (!raw.startsWith("FACEBOOK_COMMENT:")) return null;
+    const parts = raw.split(":");
+    const pageId = safeText(parts[1]);
+    const postId = safeText(parts[2]);
+    const commentId = safeText(parts.slice(3).join(":"));
+    if (!pageId || !postId || postId === "post" || !commentId) return null;
+    return { pageId, postId, commentId };
+  }
+
+  private async getFacebookCommentSource(providerThreadId?: string | null) {
+    const parsed = this.parseFacebookCommentThreadId(providerThreadId);
+    if (!parsed) return null;
+
+    const cached = this.facebookPostSourceCache.get(parsed.postId);
+    if (cached && cached.expiresAt > Date.now()) {
+      return { ...cached.data, commentId: parsed.commentId };
+    }
+
+    try {
+      const post: any = await this.metaFetch(parsed.postId, {
+        fields: [
+          "id",
+          "message",
+          "permalink_url",
+          "full_picture",
+          "created_time",
+          "attachments{media_type,media,url,target,subattachments}",
+          "from{id,name}",
+        ].join(","),
+      });
+
+      const attachment = Array.isArray(post?.attachments?.data)
+        ? post.attachments.data[0]
+        : null;
+      const subAttachment = Array.isArray(attachment?.subattachments?.data)
+        ? attachment.subattachments.data[0]
+        : null;
+      const imageUrl = safeText(
+        post?.full_picture ||
+          attachment?.media?.image?.src ||
+          subAttachment?.media?.image?.src,
+      );
+      const videoUrl = safeText(
+        attachment?.media_type === "video"
+          ? attachment?.url || attachment?.target?.url
+          : "",
+      );
+
+      const data = {
+        postId: parsed.postId,
+        pageId: parsed.pageId,
+        pageName: safeText(post?.from?.name) || "The 1970",
+        message: safeText(post?.message),
+        permalinkUrl: safeText(post?.permalink_url),
+        imageUrl: imageUrl || null,
+        videoUrl: videoUrl || null,
+        mediaType: safeText(attachment?.media_type) || null,
+        createdTime: safeText(post?.created_time) || null,
+      };
+
+      this.facebookPostSourceCache.set(parsed.postId, {
+        expiresAt: Date.now() + 10 * 60_000,
+        data,
+      });
+      return { ...data, commentId: parsed.commentId };
+    } catch (error: any) {
+      this.logger.warn(
+        `[META_COMMENT_SOURCE_SKIP] post=${parsed.postId} | ${error?.message || error}`,
+      );
+      return {
+        postId: parsed.postId,
+        pageId: parsed.pageId,
+        commentId: parsed.commentId,
+        pageName: "The 1970",
+        message: "",
+        permalinkUrl: "",
+        imageUrl: null,
+        videoUrl: null,
+        mediaType: null,
+        createdTime: null,
+      };
+    }
+  }
+
   async getConversation(id: string, staff?: any) {
     await this.assertCanAccessConversation(id, staff);
     const item = await this.prisma.omniConversation.findUnique({
@@ -1562,6 +1649,12 @@ export class OmniInboxService {
     (item as any).messages = Array.isArray((item as any).messages)
       ? [...(item as any).messages].reverse()
       : [];
+
+    if (safeText((item as any).providerThreadId).startsWith("FACEBOOK_COMMENT:")) {
+      (item as any).commentSource = await this.getFacebookCommentSource(
+        (item as any).providerThreadId,
+      );
+    }
 
     return item;
   }
