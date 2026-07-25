@@ -236,27 +236,45 @@ export class ShipmentController {
     return this.shipmentService.cancelShipmentByOrderId(orderId, req.user);
   }
 
-  @Post(":orderId/cod/verify-and-update")
-  verifyAndUpdateCod(
+  @Post(":orderId/cod/verify")
+  verifyCodEditSession(
     @Param("orderId") orderId: string,
-    @Body() body: { codAmount: number; code: string },
-    @Req() req: any
+    @Body() body: { code: string },
+    @Req() req: any,
+  ) {
+    if (!body?.code || !String(body.code).trim()) {
+      throw new BadRequestException("Thiếu mã authen.");
+    }
+
+    return this.shipmentService.verifyCodEditSession(
+      orderId,
+      String(body.code).trim(),
+      req.user,
+    );
+  }
+
+  @Post(":orderId/cod/update")
+  updateCodWithSession(
+    @Param("orderId") orderId: string,
+    @Body() body: { codAmount: number; sessionToken: string },
+    @Req() req: any,
   ) {
     if (typeof body?.codAmount !== "number" || Number.isNaN(body.codAmount)) {
       throw new BadRequestException("codAmount không hợp lệ.");
     }
 
-    if (!body?.code || !String(body.code).trim()) {
-      throw new BadRequestException("Thiếu mã authen.");
+    if (!body?.sessionToken || !String(body.sessionToken).trim()) {
+      throw new BadRequestException("Thiếu phiên xác thực sửa COD.");
     }
 
-    return this.shipmentService.verifyAndUpdateCod(
+    return this.shipmentService.updateCodWithSession(
       orderId,
       body.codAmount,
-      String(body.code).trim(),
-      req.user
+      String(body.sessionToken).trim(),
+      req.user,
     );
   }
+
 
   @Post("ghn/track")
   track(@Body() dto: TrackShipmentDto) {

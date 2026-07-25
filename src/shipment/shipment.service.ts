@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { createHmac, timingSafeEqual } from "crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { GhnClient } from "./ghn.client";
 import { AhamoveClient } from "./ahamove.client";
@@ -3303,101 +3304,171 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     return result.order;
   }
 
-  async verifyAndUpdateCod(
-    orderId: string,
-    codAmount: number,
-    code: string,
-    user: any
-  ) {
-    const order = await this.prisma.order.findUnique({
-      where: { id: orderId },
-      include: {
-        shipment: true,
-      },
-    });
+  private resolveCodActor(user: any) {
+    return String(user?.id || user?.sub || "").trim();
+  }
 
-    this.assertCanEditCod(order);
+  private codSessionSecret() {
+    const secret = String(
+      process.env.COD_EDIT_SESSION_SECRET ||
+      process.env.JWT_SECRET ||
+      process.env.AUTH_JWT_SECRET ||
+      "",
+    ).trim();
 
-    const nextCod = Math.max(0, Math.round(Number(codAmount || 0)));
-    if (Number.isNaN(nextCod)) {
-      throw new BadRequestException("COD không hợp lệ");
+    if (!secret) {
+      throw new BadRequestException(
+        "Backend chưa cấu hình COD_EDIT_SESSION_SECRET hoặc JWT_SECRET.",
+      );
     }
+
+    return secret;
+  }
+
+  private signCodSession(payloadPart: string) {
+    return createHmac("sha256", this.codSessionSecret())
+      .update(payloadPart)
+      .digest("base64url");
+  }
+
+  private assertValidCodSession(token: string, orderId: string, user: any) {
+    const raw = String(token || "").trim();
+    const [payloadPart, signature] = raw.split(".");
+
+    if (!payloadPart || !signature) {
+      throw new BadRequestException("Phiên xác thực sửa COD không hợp lệ.");
+    }
+
+    const expected = this.signCodSession(payloadPart);
+    const actualBuffer = Buffer.from(signature);
+    const expectedBuffer = Buffer.from(expected);
+
+    if (
+      actualBuffer.length !== expectedBuffer.length ||
+      !timingSafeEqual(actualBuffer, expectedBuffer)
+    ) {
+      throw new BadRequestException("Phiên xác thực sửa COD không hợp lệ.");
+    }
+
+    let payload: any;
+    try {
+      payload = JSON.parse(Buffer.from(payloadPart, "base64url").toString("utf8"));
+    } catch {
+      throw new BadRequestException("Phiên xác thực sửa COD không hợp lệ.");
+    }
+
+    const actorId = this.resolveCodActor(user);
+    if (!actorId || payload?.actorId !== actorId || payload?.orderId !== orderId) {
+      throw new BadRequestException("Phiên sửa COD không thuộc người dùng hoặc đơn hàng này.");
+    }
+
+    if (Number(payload?.expiresAt || 0) <= Date.now()) {
+      throw new BadRequestException("Phiên xác thực sửa COD đã hết hạn. Hãy nhập mã authen mới.");
+    }
+
+    return payload;
+  }
+
+  private async assertCodActorPermission(user: any) {
+    const actorId = this.resolveCodActor(user);
+    if (!actorId) throw new BadRequestException("Không xác định được người sửa COD.");
 
     const adminActor = await this.prisma.adminUser.findUnique({
-      where: { id: user.id || user.sub },
-      select: {
-        id: true,
-        role: true,
-        fullName: true,
-      },
+      where: { id: actorId },
+      select: { id: true, role: true, fullName: true },
     });
 
-    let actorRole = "";
-    let actorName = "";
-
     if (adminActor) {
-      actorRole = String(adminActor.role || "").toLowerCase();
-      actorName = adminActor.fullName || adminActor.id;
-    } else {
-      const staffActor = await this.prisma.staffUser.findUnique({
-        where: { id: user.id || user.sub },
-        select: {
-          id: true,
-          role: true,
-          name: true,
-        },
-      });
-
-      actorRole = String(staffActor?.role || "").toLowerCase();
-      actorName = staffActor?.name || staffActor?.id || "";
+      const role = String(adminActor.role || "").toLowerCase();
+      if (!["owner", "admin", "fulltime"].includes(role)) {
+        throw new BadRequestException("Bạn không có quyền sửa COD.");
+      }
+      return { actorId, actorName: adminActor.fullName || adminActor.id, actorRole: role };
     }
 
-    console.log("verifyAndUpdateCod actorRole =", actorRole, "user =", user);
+    const staffActor = await this.prisma.staffUser.findUnique({
+      where: { id: actorId },
+      select: { id: true, role: true, name: true },
+    });
 
-    const canEditCod =
-      actorRole === "owner" ||
-      actorRole === "admin" ||
-      actorRole === "fulltime";
-
-    if (!canEditCod) {
+    const role = String(staffActor?.role || "").toLowerCase();
+    if (!["owner", "admin", "fulltime"].includes(role)) {
       throw new BadRequestException("Bạn không có quyền sửa COD.");
     }
 
-    let approveInfo: any;
+    return {
+      actorId,
+      actorName: staffActor?.name || staffActor?.id || actorId,
+      actorRole: role,
+    };
+  }
 
-    try {
-      approveInfo = await this.authTotpService.verifyOwnerCode(code);
-      console.log("verifyOwnerCode passed", approveInfo);
-    } catch (error) {
-      console.error("verifyOwnerCode failed", error);
-      throw error;
+  async verifyCodEditSession(orderId: string, code: string, user: any) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: { shipment: true },
+    });
+
+    this.assertCanEditCod(order);
+    const actor = await this.assertCodActorPermission(user);
+    const approveInfo = await this.authTotpService.verifyOwnerCode(code);
+
+    const expiresAt = Date.now() + 5 * 60 * 1000;
+    const payloadPart = Buffer.from(
+      JSON.stringify({
+        actorId: actor.actorId,
+        orderId,
+        expiresAt,
+        purpose: "EDIT_COD",
+      }),
+      "utf8",
+    ).toString("base64url");
+
+    const sessionToken = `${payloadPart}.${this.signCodSession(payloadPart)}`;
+
+    this.logger.log(
+      `[COD_AUTH_SESSION] actor=${actor.actorName} approver=${approveInfo.approverName} order=${orderId} expiresAt=${new Date(expiresAt).toISOString()}`,
+    );
+
+    return {
+      ok: true,
+      sessionToken,
+      expiresAt: new Date(expiresAt).toISOString(),
+      expiresInSeconds: 300,
+      message: "Xác thực thành công. Bạn có 5 phút để sửa COD.",
+    };
+  }
+
+  async updateCodWithSession(
+    orderId: string,
+    codAmount: number,
+    sessionToken: string,
+    user: any,
+  ) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: { shipment: true },
+    });
+
+    this.assertCanEditCod(order);
+    const actor = await this.assertCodActorPermission(user);
+    this.assertValidCodSession(sessionToken, orderId, user);
+
+    const nextCod = Math.max(0, Math.round(Number(codAmount || 0)));
+    if (!Number.isFinite(nextCod)) {
+      throw new BadRequestException("COD không hợp lệ");
     }
 
     const oldCod = Number(order!.shipment!.codAmount || 0);
-
-    try {
-      console.log("calling ghnClient.updateCod", {
-        trackingCode: order!.shipment!.trackingCode,
-        nextCod,
-      });
-
-      await this.ghnClient.updateCod(order!.shipment!.trackingCode!, nextCod);
-
-      console.log("ghnClient.updateCod passed");
-    } catch (error) {
-      console.error("ghnClient.updateCod failed", error);
-      throw error;
-    }
+    await this.ghnClient.updateCod(order!.shipment!.trackingCode!, nextCod);
 
     await this.prisma.shipment.update({
       where: { id: order!.shipment!.id },
-      data: {
-        codAmount: nextCod,
-      },
+      data: { codAmount: nextCod },
     });
 
     this.logger.warn(
-      `[COD_UPDATE] actor=${actorName} approver=${approveInfo.approverName} order=${orderId} oldCod=${oldCod} newCod=${nextCod}`
+      `[COD_UPDATE] actor=${actor.actorName} order=${orderId} oldCod=${oldCod} newCod=${nextCod}`,
     );
 
     return {
@@ -3405,9 +3476,9 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       message: "Đã cập nhật COD.",
       oldCod,
       newCod: nextCod,
-      approvedBy: approveInfo.approverName,
     };
   }
+
 
 
   private mapAhamoveShippingStatus(input?: string | null) {

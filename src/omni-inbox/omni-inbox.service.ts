@@ -1651,20 +1651,29 @@ export class OmniInboxService {
     if (conversation.channel === "FACEBOOK") {
       if (!recipientPsid)
         throw new BadRequestException("Hội thoại chưa có PSID khách Facebook.");
-      if (!text)
-        throw new BadRequestException(
-          "Hiện tại Messenger chỉ hỗ trợ gửi text trong màn này.",
-        );
+
+      const attachmentUrl = safeText(dto.attachmentUrl);
+      const metaMessage = attachmentUrl
+        ? {
+            attachment: {
+              type: "image",
+              payload: {
+                url: attachmentUrl,
+                is_reusable: true,
+              },
+            },
+          }
+        : { text };
 
       this.logger.log(
-        `[META_SEND] conversation=${id} psid=${last6(recipientPsid)} text="${text.slice(0, 120)}"`,
+        `[META_SEND] conversation=${id} psid=${last6(recipientPsid)} type=${attachmentUrl ? "IMAGE" : "TEXT"} ${attachmentUrl ? `url="${attachmentUrl.slice(0, 160)}"` : `text="${text.slice(0, 120)}"`}`,
       );
 
       try {
         const metaResult: any = await this.metaPost("me/messages", {
           recipient: { id: recipientPsid },
           messaging_type: "RESPONSE",
-          message: { text },
+          message: metaMessage,
         });
         metaProviderMessageId =
           safeText(metaResult?.message_id || metaResult?.messageId) || null;
@@ -1688,9 +1697,9 @@ export class OmniInboxService {
             ? metaProviderMessageId
             : null,
         direction: "OUT",
-        type: dto.attachmentUrl ? "IMAGE" : "TEXT",
+        type: safeText(dto.attachmentUrl) ? "IMAGE" : "TEXT",
         text,
-        attachmentUrl: dto.attachmentUrl || null,
+        attachmentUrl: safeText(dto.attachmentUrl) || null,
         senderId: staff?.id || staff?.sub || null,
         senderName: staff?.name || staff?.username || "Admin",
         sentAt: now,

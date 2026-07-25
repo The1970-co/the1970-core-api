@@ -132,15 +132,31 @@ export class AuthTotpService {
       throw new BadRequestException("Chủ chưa bật Google Authenticator.");
     }
 
-    const verified = speakeasy.totp.verify({
-      secret: owner.totpSecret,
-      encoding: "base32",
-      token: String(code).trim(),
-      window: 1,
-    });
+    const token = String(code || "").trim();
+    const nowSeconds = Math.floor(Date.now() / 1000);
+
+    // Mã Google Authenticator vẫn đổi mỗi 30 giây, nhưng riêng thao tác
+    // xác nhận sửa COD cho phép dùng mã hiện tại hoặc 9 mã trước đó.
+    // Tổng thời gian nhập tối đa xấp xỉ 5 phút và KHÔNG nhận mã tương lai.
+    let verified = false;
+    for (let step = 0; step <= 9; step += 1) {
+      const expectedToken = speakeasy.totp({
+        secret: owner.totpSecret,
+        encoding: "base32",
+        step: 30,
+        time: nowSeconds - step * 30,
+      });
+
+      if (expectedToken === token) {
+        verified = true;
+        break;
+      }
+    }
 
     if (!verified) {
-      throw new BadRequestException("Mã authen không đúng hoặc đã hết hạn.");
+      throw new BadRequestException(
+        "Mã authen không đúng hoặc đã quá thời hạn 5 phút.",
+      );
     }
 
     return {
