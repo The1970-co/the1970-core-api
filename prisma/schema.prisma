@@ -2442,6 +2442,18 @@ model OmniAssignmentSetting {
   shuffleEachRound           Boolean  @default(true)
   reassignUnreadEnabled      Boolean  @default(false)
   reassignAfterMinutes       Int      @default(10)
+
+  // Hàng chờ tin nhắn ngoài giờ / qua đêm
+  morningQueueEnabled               Boolean   @default(true)
+  morningQueueInitialBatchSize      Int       @default(20)
+  morningQueueRepeatIntervalMinutes Int       @default(2)
+  morningQueueRepeatBatchSize       Int       @default(3)
+
+  // Trạng thái vận hành nội bộ của hàng chờ đầu ca
+  morningQueueRunDate               String?
+  morningQueueInitialDone           Boolean   @default(false)
+  morningQueueLastRunAt             DateTime?
+  morningQueueLastOnlineCount       Int       @default(0)
   lastAssignedStaffId        String?
   updatedById                String?
   updatedByName              String?

@@ -49,6 +49,7 @@ type MetaFeedChange = {
 @Injectable()
 export class OmniInboxService {
   private lastStaleAssignmentSweepAt = 0;
+  private lastMorningQueueSweepAt = 0;
   private readonly logger = new Logger(OmniInboxService.name);
 
   constructor(
@@ -250,6 +251,15 @@ export class OmniInboxService {
         this.logger.warn(`[OMNI_ASSIGNMENT_SWEEP_SKIP] ${error?.message || error}`),
       );
     }
+
+    // Khi có heartbeat, kiểm tra hàng chờ qua đêm. Hàm có throttle riêng nên
+    // nhiều máy cùng online không làm chạy lặp liên tục.
+    if (Date.now() - this.lastMorningQueueSweepAt > 10_000) {
+      this.lastMorningQueueSweepAt = Date.now();
+      void this.processMorningQueue().catch((error: any) =>
+        this.logger.warn(`[OMNI_MORNING_QUEUE_SKIP] ${error?.message || error}`),
+      );
+    }
     return presence;
   }
 
@@ -308,6 +318,8 @@ export class OmniInboxService {
       "branchRoutingEnabled", "fallbackBranchId", "noCandidateMode",
       "onlyAssignedCanView", "managerCanViewBranch", "onlyAssignedCanReply",
       "shuffleEachRound", "reassignUnreadEnabled", "reassignAfterMinutes",
+      "morningQueueEnabled", "morningQueueInitialBatchSize",
+      "morningQueueRepeatIntervalMinutes", "morningQueueRepeatBatchSize",
     ];
     scalarKeys.forEach((key) => {
       if (dto[key] !== undefined) scalarData[key] = dto[key] === "" ? null : dto[key];
@@ -662,6 +674,117 @@ export class OmniInboxService {
     if (!workDays.includes(vnNow.getDay())) return false;
     const minute = vnNow.getHours() * 60 + vnNow.getMinutes();
     return minute >= Number(setting.workStartMinute || 480) && minute <= Number(setting.workEndMinute || 1320);
+  }
+
+  private getVietnamDateKey(now = new Date()) {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Ho_Chi_Minh",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(now);
+  }
+
+  private getVietnamShiftStart(workStartMinute: number, now = new Date()) {
+    const [year, month, day] = this.getVietnamDateKey(now).split("-").map(Number);
+    const minute = Math.max(0, Math.min(1439, Number(workStartMinute || 480)));
+    const hour = Math.floor(minute / 60);
+    const minuteOfHour = minute % 60;
+    // Việt Nam UTC+7: giờ địa phương trừ 7 giờ để ra UTC.
+    return new Date(Date.UTC(year, month - 1, day, hour - 7, minuteOfHour, 0, 0));
+  }
+
+  /**
+   * Chia hàng chờ ngoài giờ theo từng đợt:
+   * - Người/nhóm online đầu tiên nhận tối đa lô đầu (mặc định 20).
+   * - Sau mỗi khoảng cấu hình (mặc định 2 phút), chia tiếp lô nhỏ (mặc định 3).
+   * - Nếu có thêm nhân viên online trước khi đủ 2 phút, chạy ngay một lô nhỏ để
+   *   người mới vào ca được ưu tiên nhờ quy tắc tải hôm nay thấp nhất.
+   */
+  private async processMorningQueue() {
+    const setting: any = await (this.prisma as any).omniAssignmentSetting.findUnique({
+      where: { id: "default" },
+      include: { members: { where: { isActive: true, receiveMessages: true } } },
+    });
+    if (!setting?.isActive || setting.mode !== "AUTO" || !setting.morningQueueEnabled) return;
+    if (!this.isInsideWorkingHours(setting)) return;
+
+    const now = new Date();
+    const dateKey = this.getVietnamDateKey(now);
+    const onlineCutoff = new Date(
+      now.getTime() - Number(setting.onlineWindowSeconds || 180) * 1000,
+    );
+    const staffIds = (setting.members || []).map((item: any) => item.staffId).filter(Boolean);
+    if (!staffIds.length) return;
+
+    const onlinePresences: any[] = await (this.prisma as any).omniStaffPresence.findMany({
+      where: {
+        staffId: { in: staffIds },
+        manualAway: false,
+        lastHeartbeatAt: { gte: onlineCutoff },
+      },
+      select: { staffId: true },
+    });
+    const onlineCount = onlinePresences.length;
+    if (!onlineCount) return;
+
+    const sameDay = safeText(setting.morningQueueRunDate) === dateKey;
+    const lastRunAt = sameDay && setting.morningQueueLastRunAt
+      ? new Date(setting.morningQueueLastRunAt)
+      : null;
+    const previousOnlineCount = sameDay
+      ? Number(setting.morningQueueLastOnlineCount || 0)
+      : 0;
+    const initialDone = sameDay && Boolean(setting.morningQueueInitialDone);
+    const repeatIntervalMs = Math.max(
+      1,
+      Number(setting.morningQueueRepeatIntervalMinutes || 2),
+    ) * 60_000;
+    const hasNewOnlineStaff = initialDone && onlineCount > previousOnlineCount;
+    const repeatDue = Boolean(
+      initialDone && (!lastRunAt || now.getTime() - lastRunAt.getTime() >= repeatIntervalMs),
+    );
+
+    if (initialDone && !hasNewOnlineStaff && !repeatDue) return;
+
+    const batchSize = initialDone
+      ? Math.max(1, Number(setting.morningQueueRepeatBatchSize || 3))
+      : Math.max(1, Number(setting.morningQueueInitialBatchSize || 20));
+    const shiftStart = this.getVietnamShiftStart(setting.workStartMinute || 480, now);
+
+    const queued: any[] = await this.prisma.omniConversation.findMany({
+      where: {
+        assigneeId: null,
+        unreadCount: { gt: 0 },
+        status: { in: ["OPEN", "PROCESSING", "PENDING"] as any },
+        lastMessageAt: { lt: shiftStart },
+      },
+      orderBy: [{ lastMessageAt: "asc" }, { createdAt: "asc" }],
+      take: batchSize,
+      select: { id: true },
+    });
+
+    let assignedCount = 0;
+    for (const row of queued) {
+      const assigned = await this.autoAssignConversation(row.id, "MORNING_QUEUE");
+      if (assigned?.assigneeId) assignedCount += 1;
+    }
+
+    await (this.prisma as any).omniAssignmentSetting.update({
+      where: { id: "default" },
+      data: {
+        morningQueueRunDate: dateKey,
+        morningQueueInitialDone: true,
+        morningQueueLastRunAt: now,
+        morningQueueLastOnlineCount: onlineCount,
+      },
+    });
+
+    if (queued.length) {
+      this.logger.log(
+        `[OMNI_MORNING_QUEUE] date=${dateKey} online=${onlineCount} requested=${batchSize} assigned=${assignedCount}`,
+      );
+    }
   }
 
   private async reassignStaleUnreadConversations() {
