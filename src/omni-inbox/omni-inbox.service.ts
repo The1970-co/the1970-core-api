@@ -1802,46 +1802,80 @@ export class OmniInboxService {
 
     const now = new Date();
     const recipientPsid = safeText(conversation.customer?.providerUserId);
+    const providerThreadId = safeText(conversation.providerThreadId);
+    const isFacebookComment = providerThreadId.startsWith("FACEBOOK_COMMENT:");
     let metaProviderMessageId: string | null = null;
 
     if (conversation.channel === "FACEBOOK") {
-      if (!recipientPsid)
-        throw new BadRequestException("Hội thoại chưa có PSID khách Facebook.");
+      if (isFacebookComment) {
+        if (!text)
+          throw new BadRequestException("Nội dung trả lời bình luận trống.");
+        if (safeText(dto.attachmentUrl))
+          throw new BadRequestException("Trả lời bình luận công khai hiện chỉ hỗ trợ nội dung chữ.");
 
-      const attachmentUrl = safeText(dto.attachmentUrl);
-      const metaMessage = attachmentUrl
-        ? {
-            attachment: {
-              type: "image",
-              payload: {
-                url: attachmentUrl,
-                is_reusable: true,
-              },
-            },
-          }
-        : { text };
-
-      this.logger.log(
-        `[META_SEND] conversation=${id} psid=${last6(recipientPsid)} type=${attachmentUrl ? "IMAGE" : "TEXT"} ${attachmentUrl ? `url="${attachmentUrl.slice(0, 160)}"` : `text="${text.slice(0, 120)}"`}`,
-      );
-
-      try {
-        const metaResult: any = await this.metaPost("me/messages", {
-          recipient: { id: recipientPsid },
-          messaging_type: "RESPONSE",
-          message: metaMessage,
-        });
-        metaProviderMessageId =
-          safeText(metaResult?.message_id || metaResult?.messageId) || null;
+        const parts = providerThreadId.split(":");
+        const commentId = safeText(parts.slice(3).join(":"));
+        if (!commentId)
+          throw new BadRequestException("Không xác định được ID bình luận Facebook.");
 
         this.logger.log(
-          `[META_SEND_OK] conversation=${id} psid=${last6(recipientPsid)} result=${JSON.stringify(metaResult)}`,
+          `[META_COMMENT_REPLY] conversation=${id} comment=${commentId} text="${text.slice(0, 160)}"`,
         );
-      } catch (error: any) {
-        this.logger.error(
-          `[META_SEND_FAILED] conversation=${id} psid=${last6(recipientPsid)} error=${error?.message || error}`,
+
+        try {
+          const metaResult: any = await this.metaFormPost(`${commentId}/comments`, {
+            message: text,
+          });
+          metaProviderMessageId =
+            safeText(metaResult?.id || metaResult?.comment_id || metaResult?.message_id) || null;
+          this.logger.log(
+            `[META_COMMENT_REPLY_OK] conversation=${id} comment=${commentId} result=${JSON.stringify(metaResult)}`,
+          );
+        } catch (error: any) {
+          this.logger.error(
+            `[META_COMMENT_REPLY_FAILED] conversation=${id} comment=${commentId} error=${error?.message || error}`,
+          );
+          throw error;
+        }
+      } else {
+        if (!recipientPsid)
+          throw new BadRequestException("Hội thoại chưa có PSID khách Facebook.");
+
+        const attachmentUrl = safeText(dto.attachmentUrl);
+        const metaMessage = attachmentUrl
+          ? {
+              attachment: {
+                type: "image",
+                payload: {
+                  url: attachmentUrl,
+                  is_reusable: true,
+                },
+              },
+            }
+          : { text };
+
+        this.logger.log(
+          `[META_SEND] conversation=${id} psid=${last6(recipientPsid)} type=${attachmentUrl ? "IMAGE" : "TEXT"} ${attachmentUrl ? `url="${attachmentUrl.slice(0, 160)}"` : `text="${text.slice(0, 120)}"`}`,
         );
-        throw error;
+
+        try {
+          const metaResult: any = await this.metaPost("me/messages", {
+            recipient: { id: recipientPsid },
+            messaging_type: "RESPONSE",
+            message: metaMessage,
+          });
+          metaProviderMessageId =
+            safeText(metaResult?.message_id || metaResult?.messageId) || null;
+
+          this.logger.log(
+            `[META_SEND_OK] conversation=${id} psid=${last6(recipientPsid)} result=${JSON.stringify(metaResult)}`,
+          );
+        } catch (error: any) {
+          this.logger.error(
+            `[META_SEND_FAILED] conversation=${id} psid=${last6(recipientPsid)} error=${error?.message || error}`,
+          );
+          throw error;
+        }
       }
     }
 
@@ -1865,7 +1899,9 @@ export class OmniInboxService {
     const updated = await this.prisma.omniConversation.update({
       where: { id },
       data: {
-        lastMessageText: text || "[Ảnh]",
+        lastMessageText: isFacebookComment
+          ? `[Trả lời bình luận] ${text}`
+          : text || "[Ảnh]",
         lastMessageAt: now,
         status:
           conversation.status === "OPEN" ? "PROCESSING" : conversation.status,
