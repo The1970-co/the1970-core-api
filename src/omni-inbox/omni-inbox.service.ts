@@ -722,14 +722,47 @@ export class OmniInboxService {
     const targetBranchId = safeText(conversation.branchId || draftOrder?.branchId || setting.fallbackBranchId);
 
     const staffIds = candidates.map((item: any) => item.staffId);
+
+    // Giới hạn tải được tính theo ngày làm việc tại Việt Nam, không cộng dồn
+    // toàn bộ hội thoại OPEN/PROCESSING/PENDING từ các ngày trước.
+    // 00:00 Asia/Ho_Chi_Minh tương ứng 17:00 UTC của ngày hôm trước.
+    const now = new Date();
+    const vietnamDateParts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Ho_Chi_Minh",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(now);
+    const vietnamYear = Number(
+      vietnamDateParts.find((part) => part.type === "year")?.value,
+    );
+    const vietnamMonth = Number(
+      vietnamDateParts.find((part) => part.type === "month")?.value,
+    );
+    const vietnamDay = Number(
+      vietnamDateParts.find((part) => part.type === "day")?.value,
+    );
+    const startOfTodayVn = new Date(
+      Date.UTC(vietnamYear, vietnamMonth - 1, vietnamDay, -7, 0, 0, 0),
+    );
+
+    const todayLoadWhere = {
+      assigneeId: { in: staffIds },
+      status: { in: ["OPEN", "PROCESSING", "PENDING"] as any },
+      lastMessageAt: { gte: startOfTodayVn },
+    };
+
     const groupedLoads: any[] = await (this.prisma.omniConversation as any).groupBy({
       by: ["assigneeId"],
-      where: { assigneeId: { in: staffIds }, status: { in: ["OPEN", "PROCESSING", "PENDING"] as any } },
+      where: todayLoadWhere,
       _count: { _all: true },
     });
     const unreadLoads: any[] = await (this.prisma.omniConversation as any).groupBy({
       by: ["assigneeId"],
-      where: { assigneeId: { in: staffIds }, unreadCount: { gt: 0 }, status: { in: ["OPEN", "PROCESSING", "PENDING"] as any } },
+      where: {
+        ...todayLoadWhere,
+        unreadCount: { gt: 0 },
+      },
       _count: { _all: true },
     });
     const activeMap = new Map(groupedLoads.map((item: any) => [item.assigneeId, item._count._all]));
