@@ -1423,86 +1423,97 @@ export class OmniInboxService {
     const q = safeText(query.q);
     if (q) {
       const qDigits = q.replace(/\D/g, "");
-      const phoneCandidates = new Set<string>();
+      const isPhoneSearch = qDigits.length >= 8 && qDigits.length === q.replace(/[\s.+()-]/g, "").length;
 
-      if (qDigits.length >= 5) {
+      if (isPhoneSearch) {
+        // Tìm SĐT riêng trước, không nhét field phone vào một OR quan hệ lớn.
+        // Cách này tránh lỗi Prisma relation filter và nhẹ hơn nhiều khi người dùng nhập số.
+        const phoneCandidates = new Set<string>();
         phoneCandidates.add(qDigits);
 
-        // Cho phép tìm cùng một số ở dạng 0xxxxxxxxx, 84xxxxxxxxx hoặc +84xxxxxxxxx.
         if (qDigits.startsWith("84") && qDigits.length >= 10) {
           phoneCandidates.add(`0${qDigits.slice(2)}`);
+          phoneCandidates.add(qDigits.slice(2));
         } else if (qDigits.startsWith("0") && qDigits.length >= 9) {
           phoneCandidates.add(`84${qDigits.slice(1)}`);
           phoneCandidates.add(`+84${qDigits.slice(1)}`);
+          phoneCandidates.add(qDigits.slice(1));
         }
-      }
 
-      const searchConditions: any[] = [
-        { id: { contains: q, mode: "insensitive" } },
-        { providerThreadId: { contains: q, mode: "insensitive" } },
-        { lastMessageText: { contains: q, mode: "insensitive" } },
-        { assigneeName: { contains: q, mode: "insensitive" } },
-        { adId: { contains: q, mode: "insensitive" } },
-        { adPostId: { contains: q, mode: "insensitive" } },
-        { adTitle: { contains: q, mode: "insensitive" } },
-        { adBody: { contains: q, mode: "insensitive" } },
-        { referralRef: { contains: q, mode: "insensitive" } },
-        { customer: { is: { name: { contains: q, mode: "insensitive" } } } },
-        { customer: { is: { phone: { contains: q, mode: "insensitive" } } } },
-        { customer: { is: { address: { contains: q, mode: "insensitive" } } } },
-        {
-          customer: {
-            is: {
-              providerUserId: { contains: q, mode: "insensitive" },
-            },
-          },
-        },
-        {
-          messages: {
-            some: {
-              OR: [
-                { text: { contains: q, mode: "insensitive" } },
-                { senderName: { contains: q, mode: "insensitive" } },
-                {
-                  providerMessageId: {
-                    contains: q,
-                    mode: "insensitive",
-                  },
-                },
-              ],
-            },
-          },
-        },
-        {
-          notes: {
-            some: {
-              OR: [
-                { note: { contains: q, mode: "insensitive" } },
-                { staffName: { contains: q, mode: "insensitive" } },
-              ],
-            },
-          },
-        },
-        {
-          tags: {
-            some: {
-              tag: { contains: q, mode: "insensitive" },
-            },
-          },
-        },
-      ];
+        // Suffix 9 số giúp khớp dữ liệu có +84, 84, 0 hoặc khoảng trắng khác nhau.
+        if (qDigits.length >= 9) phoneCandidates.add(qDigits.slice(-9));
 
-      for (const phone of phoneCandidates) {
-        searchConditions.push({
-          customer: {
-            is: {
-              phone: { contains: phone, mode: "insensitive" },
-            },
+        const customers = await this.prisma.omniCustomer.findMany({
+          where: {
+            OR: Array.from(phoneCandidates).map((phone) => ({
+              phone: { contains: phone, mode: "insensitive" as const },
+            })),
           },
+          select: { id: true },
+          take: 500,
         });
-      }
 
-      where.OR = searchConditions;
+        const customerIds = customers.map((item) => item.id);
+        // Không tìm thấy thì ép kết quả rỗng, tránh query toàn bộ hội thoại.
+        where.customerId = customerIds.length
+          ? { in: customerIds }
+          : "__PHONE_NOT_FOUND__";
+      } else {
+        // Tìm chữ/tên/nội dung theo luồng tổng quát.
+        where.OR = [
+          { id: { contains: q, mode: "insensitive" } },
+          { providerThreadId: { contains: q, mode: "insensitive" } },
+          { lastMessageText: { contains: q, mode: "insensitive" } },
+          { assigneeName: { contains: q, mode: "insensitive" } },
+          { adId: { contains: q, mode: "insensitive" } },
+          { adPostId: { contains: q, mode: "insensitive" } },
+          { adTitle: { contains: q, mode: "insensitive" } },
+          { adBody: { contains: q, mode: "insensitive" } },
+          { referralRef: { contains: q, mode: "insensitive" } },
+          { customer: { is: { name: { contains: q, mode: "insensitive" } } } },
+          { customer: { is: { address: { contains: q, mode: "insensitive" } } } },
+          {
+            customer: {
+              is: {
+                providerUserId: { contains: q, mode: "insensitive" },
+              },
+            },
+          },
+          {
+            messages: {
+              some: {
+                OR: [
+                  { text: { contains: q, mode: "insensitive" } },
+                  { senderName: { contains: q, mode: "insensitive" } },
+                  {
+                    providerMessageId: {
+                      contains: q,
+                      mode: "insensitive",
+                    },
+                  },
+                ],
+              },
+            },
+          },
+          {
+            notes: {
+              some: {
+                OR: [
+                  { note: { contains: q, mode: "insensitive" } },
+                  { staffName: { contains: q, mode: "insensitive" } },
+                ],
+              },
+            },
+          },
+          {
+            tags: {
+              some: {
+                tag: { contains: q, mode: "insensitive" },
+              },
+            },
+          },
+        ];
+      }
     }
 
     const [items, total] = await this.prisma.$transaction([
