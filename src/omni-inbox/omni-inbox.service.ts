@@ -1447,12 +1447,14 @@ export class OmniInboxService {
         { adTitle: { contains: q, mode: "insensitive" } },
         { adBody: { contains: q, mode: "insensitive" } },
         { referralRef: { contains: q, mode: "insensitive" } },
-        { customer: { name: { contains: q, mode: "insensitive" } } },
-        { customer: { phone: { contains: q, mode: "insensitive" } } },
-        { customer: { address: { contains: q, mode: "insensitive" } } },
+        { customer: { is: { name: { contains: q, mode: "insensitive" } } } },
+        { customer: { is: { phone: { contains: q, mode: "insensitive" } } } },
+        { customer: { is: { address: { contains: q, mode: "insensitive" } } } },
         {
           customer: {
-            providerUserId: { contains: q, mode: "insensitive" },
+            is: {
+              providerUserId: { contains: q, mode: "insensitive" },
+            },
           },
         },
         {
@@ -1493,7 +1495,9 @@ export class OmniInboxService {
       for (const phone of phoneCandidates) {
         searchConditions.push({
           customer: {
-            phone: { contains: phone, mode: "insensitive" },
+            is: {
+              phone: { contains: phone, mode: "insensitive" },
+            },
           },
         });
       }
