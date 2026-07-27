@@ -1443,21 +1443,63 @@ export class OmniInboxService {
         // Suffix 9 số giúp khớp dữ liệu có +84, 84, 0 hoặc khoảng trắng khác nhau.
         if (qDigits.length >= 9) phoneCandidates.add(qDigits.slice(-9));
 
-        const customers = await this.prisma.omniCustomer.findMany({
-          where: {
-            OR: Array.from(phoneCandidates).map((phone) => ({
-              phone: { contains: phone, mode: "insensitive" as const },
-            })),
-          },
-          select: { id: true },
-          take: 500,
-        });
+        const phoneFilters = Array.from(phoneCandidates).map((phone) => ({
+          contains: phone,
+          mode: "insensitive" as const,
+        }));
 
-        const customerIds = customers.map((item) => item.id);
-        // Không tìm thấy thì ép kết quả rỗng, tránh query toàn bộ hội thoại.
-        where.customerId = customerIds.length
-          ? { in: customerIds }
-          : "__PHONE_NOT_FOUND__";
+        // Tìm ở cả hồ sơ OmniCustomer và đơn hàng. SĐT vừa nhập khi chốt đơn
+        // luôn nằm trong Order, còn OmniCustomer có thể chưa được cập nhật hoặc
+        // hội thoại cũ chưa có customerId, nên chỉ tìm OmniCustomer sẽ bỏ sót.
+        const [customers, linkedOrders] = await Promise.all([
+          this.prisma.omniCustomer.findMany({
+            where: {
+              OR: phoneFilters.map((phone) => ({ phone })),
+            },
+            select: { id: true },
+            take: 500,
+          }),
+          this.prisma.order.findMany({
+            where: {
+              omniConversationId: { not: null },
+              OR: [
+                ...phoneFilters.map((phone) => ({ customerPhone: phone })),
+                ...phoneFilters.map((phone) => ({ shippingPhone: phone })),
+              ],
+            },
+            select: { omniConversationId: true },
+            orderBy: { createdAt: "desc" },
+            take: 500,
+          }),
+        ]);
+
+        const customerIds = Array.from(
+          new Set(customers.map((item) => item.id).filter(Boolean)),
+        );
+        const conversationIds = Array.from(
+          new Set(
+            linkedOrders
+              .map((item) => safeText(item.omniConversationId))
+              .filter(Boolean),
+          ),
+        );
+
+        const phoneMatchConditions: any[] = [];
+        if (customerIds.length) {
+          phoneMatchConditions.push({ customerId: { in: customerIds } });
+        }
+        if (conversationIds.length) {
+          phoneMatchConditions.push({ id: { in: conversationIds } });
+        }
+
+        // Giữ nguyên các bộ lọc quyền/kênh/trạng thái hiện có, chỉ bổ sung
+        // điều kiện hội thoại khớp SĐT từ một trong hai nguồn.
+        where.AND = [
+          ...(Array.isArray(where.AND) ? where.AND : []),
+          phoneMatchConditions.length
+            ? { OR: phoneMatchConditions }
+            : { id: "__PHONE_NOT_FOUND__" },
+        ];
       } else {
         // Tìm chữ/tên/nội dung theo luồng tổng quát.
         where.OR = [
@@ -2361,7 +2403,10 @@ export class OmniInboxService {
     const messageId = safeText(event?.message?.mid);
     const text = safeText(event?.message?.text);
     const timestamp = Number(event?.timestamp || Date.now());
-    const attachment = event?.message?.attachments?.[0];
+    const attachments = Array.isArray(event?.message?.attachments)
+      ? event.message.attachments.filter((item: any) => safeText(item?.payload?.url))
+      : [];
+    const attachment = attachments[0];
     const adReferral = this.extractMetaAdReferral(event);
     const adReferralData = this.buildAdReferralUpdate(adReferral, timestamp);
 
@@ -2373,7 +2418,12 @@ export class OmniInboxService {
       const customerPsid = recipientId;
       const providerThreadId = `FACEBOOK:${pageId}:${customerPsid}`;
       const sentAt = new Date(timestamp);
-      const messageText = text || "[Tệp đính kèm]";
+      const messageText = text ||
+        (attachments.length > 1
+          ? `[${attachments.length} ảnh đính kèm]`
+          : attachments.length === 1
+            ? "[Ảnh đính kèm]"
+            : "[Tệp đính kèm]");
 
       if (messageId) {
         const existedEcho = await this.prisma.omniMessage.findUnique({
@@ -2439,24 +2489,74 @@ export class OmniInboxService {
         include: { customer: true, page: true, tags: true },
       });
 
-      const message = await this.prisma.omniMessage.create({
-        data: {
-          conversationId: conversation.id,
-          providerMessageId: messageId || null,
-          direction: "OUT",
-          type: attachment ? "IMAGE" : "TEXT",
-          text,
-          attachmentUrl: attachment?.payload?.url || null,
-          senderId: pageId,
-          senderName: page.pageName || "The 1970",
-          sentAt,
-        },
-      });
+      const createdMessages: any[] = [];
+
+      if (text) {
+        createdMessages.push(
+          await this.prisma.omniMessage.create({
+            data: {
+              conversationId: conversation.id,
+              providerMessageId: messageId || null,
+              direction: "OUT",
+              type: "TEXT",
+              text,
+              attachmentUrl: null,
+              senderId: pageId,
+              senderName: page.pageName || "The 1970",
+              sentAt,
+            },
+          }),
+        );
+      }
+
+      for (let index = 0; index < attachments.length; index += 1) {
+        const item = attachments[index];
+        createdMessages.push(
+          await this.prisma.omniMessage.create({
+            data: {
+              conversationId: conversation.id,
+              providerMessageId: messageId
+                ? text || index > 0
+                  ? `${messageId}:attachment:${index}`
+                  : messageId
+                : null,
+              direction: "OUT",
+              type: "IMAGE",
+              text: null,
+              attachmentUrl: safeText(item?.payload?.url) || null,
+              senderId: pageId,
+              senderName: page.pageName || "The 1970",
+              sentAt: new Date(sentAt.getTime() + index + (text ? 1 : 0)),
+            },
+          }),
+        );
+      }
+
+      // Trường hợp event không có text/attachment nhưng vẫn lọt vào echo.
+      if (!createdMessages.length) {
+        createdMessages.push(
+          await this.prisma.omniMessage.create({
+            data: {
+              conversationId: conversation.id,
+              providerMessageId: messageId || null,
+              direction: "OUT",
+              type: "TEXT",
+              text: messageText,
+              attachmentUrl: null,
+              senderId: pageId,
+              senderName: page.pageName || "The 1970",
+              sentAt,
+            },
+          }),
+        );
+      }
 
       this.logMetaDebug(
-        `[META_WEBHOOK_ECHO] page=${pageId} recipient=${last6(customerPsid)} text="${messageText.slice(0, 80)}"`,
+        `[META_WEBHOOK_ECHO] page=${pageId} recipient=${last6(customerPsid)} text="${messageText.slice(0, 80)}" attachments=${attachments.length}`,
       );
-      this.realtime.emit({ type: "message.created", payload: message });
+      createdMessages.forEach((message) =>
+        this.realtime.emit({ type: "message.created", payload: message }),
+      );
       this.realtime.emit({ type: "conversation.updated", payload: conversation });
       return { ok: true, echo: true };
     }
@@ -2540,7 +2640,12 @@ export class OmniInboxService {
     const hasMessage = Boolean(
       text || event?.message?.attachments?.length,
     );
-    const messageText = text || (attachment ? "[Tệp đính kèm]" : "");
+    const messageText = text ||
+      (attachments.length > 1
+        ? `[${attachments.length} ảnh đính kèm]`
+        : attachments.length === 1
+          ? "[Ảnh đính kèm]"
+          : "");
 
     const updateData: any = {
       pageId: page.id,
@@ -2575,21 +2680,48 @@ export class OmniInboxService {
       include: { customer: true, page: true, tags: true },
     });
 
-    let message: any = null;
+    const createdMessages: any[] = [];
     if (hasMessage) {
-      message = await this.prisma.omniMessage.create({
-        data: {
-          conversationId: conversation.id,
-          providerMessageId: messageId || null,
-          direction: "IN",
-          type: attachment ? "IMAGE" : "TEXT",
-          text,
-          attachmentUrl: attachment?.payload?.url || null,
-          senderId,
-          senderName: customer.name,
-          sentAt,
-        },
-      });
+      if (text) {
+        createdMessages.push(
+          await this.prisma.omniMessage.create({
+            data: {
+              conversationId: conversation.id,
+              providerMessageId: messageId || null,
+              direction: "IN",
+              type: "TEXT",
+              text,
+              attachmentUrl: null,
+              senderId,
+              senderName: customer.name,
+              sentAt,
+            },
+          }),
+        );
+      }
+
+      for (let index = 0; index < attachments.length; index += 1) {
+        const item = attachments[index];
+        createdMessages.push(
+          await this.prisma.omniMessage.create({
+            data: {
+              conversationId: conversation.id,
+              providerMessageId: messageId
+                ? text || index > 0
+                  ? `${messageId}:attachment:${index}`
+                  : messageId
+                : null,
+              direction: "IN",
+              type: "IMAGE",
+              text: null,
+              attachmentUrl: safeText(item?.payload?.url) || null,
+              senderId,
+              senderName: customer.name,
+              sentAt: new Date(sentAt.getTime() + index + (text ? 1 : 0)),
+            },
+          }),
+        );
+      }
     }
 
     if (adReferral) {
@@ -2602,9 +2734,9 @@ export class OmniInboxService {
       `[META_WEBHOOK_MESSAGE] page=${recipientId} sender=${last6(senderId)} customer="${customer.name}" text="${messageText.slice(0, 80)}"`,
     );
 
-    if (message) {
-      this.realtime.emit({ type: "message.created", payload: message });
-    }
+    createdMessages.forEach((message) =>
+      this.realtime.emit({ type: "message.created", payload: message }),
+    );
     this.realtime.emit({
       type: "conversation.updated",
       payload: conversation,
@@ -2620,7 +2752,7 @@ export class OmniInboxService {
     return {
       ok: true,
       referral: Boolean(adReferral),
-      message: Boolean(message),
+      message: hasMessage,
     };
   }
 }
