@@ -1423,180 +1423,122 @@ export class OmniInboxService {
     const q = safeText(query.q);
     if (q) {
       const qDigits = q.replace(/\D/g, "");
-      const isPhoneSearch = qDigits.length >= 8 && qDigits.length === q.replace(/[\s.+()-]/g, "").length;
+      const compactQuery = q.replace(/[\s.+()-]/g, "");
+      const isPhoneSearch = qDigits.length >= 8 && qDigits === compactQuery;
+
+      // Luôn tìm trong TOÀN BỘ lịch sử OmniMessage, không chỉ lastMessageText.
+      // Đây là nguồn chính cho khách cũ chưa từng tạo đơn qua Omni Inbox.
+      const messageConversationIds = new Set<string>();
 
       if (isPhoneSearch) {
-        // Tìm SĐT riêng trước, không nhét field phone vào một OR quan hệ lớn.
-        // Cách này tránh lỗi Prisma relation filter và nhẹ hơn nhiều khi người dùng nhập số.
-        const phoneCandidates = new Set<string>();
-        phoneCandidates.add(qDigits);
+        const normalizedPhone = qDigits.startsWith("84")
+          ? `0${qDigits.slice(2)}`
+          : qDigits;
+        const phoneSuffix = normalizedPhone.slice(-9);
 
-        if (qDigits.startsWith("84") && qDigits.length >= 10) {
-          phoneCandidates.add(`0${qDigits.slice(2)}`);
-          phoneCandidates.add(qDigits.slice(2));
-        } else if (qDigits.startsWith("0") && qDigits.length >= 9) {
-          phoneCandidates.add(`84${qDigits.slice(1)}`);
-          phoneCandidates.add(`+84${qDigits.slice(1)}`);
-          phoneCandidates.add(qDigits.slice(1));
+        // Chuẩn hoá cả nội dung tin trong PostgreSQL để khớp các dạng:
+        // 098..., +84 98..., 098...., 098-... hoặc có khoảng trắng.
+        const rows = await (this.prisma as any).$queryRawUnsafe(
+          `SELECT DISTINCT "conversationId"
+             FROM "OmniMessage"
+            WHERE regexp_replace(coalesce("text", ''), '\\D', '', 'g') LIKE $1
+            ORDER BY "conversationId"
+            LIMIT 2000`,
+          `%${phoneSuffix}%`,
+        );
+        for (const row of Array.isArray(rows) ? rows : []) {
+          const id = safeText(row?.conversationId);
+          if (id) messageConversationIds.add(id);
         }
 
-        // Suffix 9 số giúp khớp dữ liệu có +84, 84, 0 hoặc khoảng trắng khác nhau.
-        if (qDigits.length >= 9) phoneCandidates.add(qDigits.slice(-9));
-
-        const normalizedTargets = new Set(
-          Array.from(phoneCandidates)
-            .map((value) => value.replace(/\D/g, ""))
-            .filter(Boolean),
+        const customerRows = await (this.prisma as any).$queryRawUnsafe(
+          `SELECT DISTINCT c."id"
+             FROM "OmniCustomer" c
+            WHERE regexp_replace(coalesce(c."phone", ''), '\\D', '', 'g') LIKE $1
+            LIMIT 1000`,
+          `%${phoneSuffix}%`,
         );
-        const phoneSuffix = qDigits.slice(-3);
+        const customerIds = (Array.isArray(customerRows) ? customerRows : [])
+          .map((row: any) => safeText(row?.id))
+          .filter(Boolean);
 
-        // Lấy ứng viên bằng cả số đầy đủ và 3 số cuối, sau đó chuẩn hóa lại bằng
-        // JavaScript. Nhờ vậy vẫn khớp dữ liệu lưu dạng "0989 301 093",
-        // "+84 989..." hoặc có dấu chấm/gạch ngang.
-        const broadPhoneFilters = Array.from(phoneCandidates).map((phone) => ({
-          contains: phone,
-          mode: "insensitive" as const,
-        }));
-        if (phoneSuffix) {
-          broadPhoneFilters.push({
-            contains: phoneSuffix,
-            mode: "insensitive" as const,
-          });
+        // Đơn mới có omniConversationId sẽ được tìm thêm qua liên kết đơn.
+        // Đơn cũ không có liên kết vẫn không ảnh hưởng vì đã tìm trực tiếp trong tin nhắn.
+        const orderRows = await (this.prisma as any).$queryRawUnsafe(
+          `SELECT DISTINCT "omniConversationId"
+             FROM "Order"
+            WHERE "omniConversationId" IS NOT NULL
+              AND (
+                regexp_replace(coalesce("customerPhone", ''), '\\D', '', 'g') LIKE $1
+                OR regexp_replace(coalesce("shippingPhone", ''), '\\D', '', 'g') LIKE $1
+              )
+            LIMIT 1000`,
+          `%${phoneSuffix}%`,
+        );
+        const orderConversationIds = (Array.isArray(orderRows) ? orderRows : [])
+          .map((row: any) => safeText(row?.omniConversationId))
+          .filter(Boolean);
+
+        const phoneConditions: any[] = [];
+        if (messageConversationIds.size) {
+          phoneConditions.push({ id: { in: Array.from(messageConversationIds) } });
         }
-
-        const [customerCandidates, orderCandidates] = await Promise.all([
-          this.prisma.omniCustomer.findMany({
-            where: { OR: broadPhoneFilters.map((phone) => ({ phone })) },
-            select: { id: true, phone: true },
-            take: 1000,
-          }),
-          this.prisma.order.findMany({
-            where: {
-              OR: [
-                ...broadPhoneFilters.map((phone) => ({ customerPhone: phone })),
-                ...broadPhoneFilters.map((phone) => ({ shippingPhone: phone })),
-              ],
-            },
-            select: {
-              omniConversationId: true,
-              customerPhone: true,
-              shippingPhone: true,
-              note: true,
-            },
-            orderBy: { createdAt: "desc" },
-            take: 1000,
-          }),
-        ]);
-
-        const matchesPhone = (value?: string | null) => {
-          const digits = safeText(value).replace(/\D/g, "");
-          if (!digits) return false;
-          const forms = new Set([digits]);
-          if (digits.startsWith("84") && digits.length >= 10) {
-            forms.add(`0${digits.slice(2)}`);
-            forms.add(digits.slice(2));
-          } else if (digits.startsWith("0") && digits.length >= 9) {
-            forms.add(`84${digits.slice(1)}`);
-            forms.add(digits.slice(1));
-          }
-          if (digits.length >= 9) forms.add(digits.slice(-9));
-          return Array.from(forms).some((form) => normalizedTargets.has(form));
-        };
-
-        const customers = customerCandidates.filter((item) =>
-          matchesPhone(item.phone),
-        );
-        const linkedOrders = orderCandidates.filter(
-          (item) =>
-            matchesPhone(item.customerPhone) ||
-            matchesPhone(item.shippingPhone),
-        );
-
-        const customerIds = Array.from(
-          new Set(customers.map((item) => item.id).filter(Boolean)),
-        );
-        const conversationIds = Array.from(
-          new Set(
-            linkedOrders
-              .flatMap((item) => {
-                const directId = safeText(item.omniConversationId);
-                const noteId = safeText(item.note).match(
-                  /(?:hội thoại|hoi thoai)\s+([a-z0-9_-]+)/i,
-                )?.[1];
-                return [directId, safeText(noteId)].filter(Boolean);
-              }),
-          ),
-        );
-
-        const phoneMatchConditions: any[] = [];
         if (customerIds.length) {
-          phoneMatchConditions.push({ customerId: { in: customerIds } });
+          phoneConditions.push({ customerId: { in: customerIds } });
         }
-        if (conversationIds.length) {
-          phoneMatchConditions.push({ id: { in: conversationIds } });
+        if (orderConversationIds.length) {
+          phoneConditions.push({ id: { in: orderConversationIds } });
         }
 
-        // Giữ nguyên các bộ lọc quyền/kênh/trạng thái hiện có, chỉ bổ sung
-        // điều kiện hội thoại khớp SĐT từ một trong hai nguồn.
         where.AND = [
           ...(Array.isArray(where.AND) ? where.AND : []),
-          phoneMatchConditions.length
-            ? { OR: phoneMatchConditions }
+          phoneConditions.length
+            ? { OR: phoneConditions }
             : { id: "__PHONE_NOT_FOUND__" },
         ];
       } else {
-        // Tìm chữ/tên/nội dung theo luồng tổng quát.
-        where.OR = [
-          { id: { contains: q, mode: "insensitive" } },
-          { providerThreadId: { contains: q, mode: "insensitive" } },
-          { lastMessageText: { contains: q, mode: "insensitive" } },
-          { assigneeName: { contains: q, mode: "insensitive" } },
-          { adId: { contains: q, mode: "insensitive" } },
-          { adPostId: { contains: q, mode: "insensitive" } },
-          { adTitle: { contains: q, mode: "insensitive" } },
-          { adBody: { contains: q, mode: "insensitive" } },
-          { referralRef: { contains: q, mode: "insensitive" } },
-          { customer: { is: { name: { contains: q, mode: "insensitive" } } } },
-          { customer: { is: { address: { contains: q, mode: "insensitive" } } } },
-          {
-            customer: {
-              is: {
-                providerUserId: { contains: q, mode: "insensitive" },
-              },
-            },
+        const matchingMessages = await this.prisma.omniMessage.findMany({
+          where: {
+            OR: [
+              { text: { contains: q, mode: "insensitive" } },
+              { senderName: { contains: q, mode: "insensitive" } },
+              { providerMessageId: { contains: q, mode: "insensitive" } },
+            ],
           },
+          select: { conversationId: true },
+          distinct: ["conversationId"],
+          take: 2000,
+        });
+        for (const row of matchingMessages) {
+          const id = safeText(row.conversationId);
+          if (id) messageConversationIds.add(id);
+        }
+
+        where.AND = [
+          ...(Array.isArray(where.AND) ? where.AND : []),
           {
-            messages: {
-              some: {
-                OR: [
-                  { text: { contains: q, mode: "insensitive" } },
-                  { senderName: { contains: q, mode: "insensitive" } },
-                  {
-                    providerMessageId: {
-                      contains: q,
-                      mode: "insensitive",
-                    },
-                  },
-                ],
-              },
-            },
-          },
-          {
-            notes: {
-              some: {
-                OR: [
-                  { note: { contains: q, mode: "insensitive" } },
-                  { staffName: { contains: q, mode: "insensitive" } },
-                ],
-              },
-            },
-          },
-          {
-            tags: {
-              some: {
-                tag: { contains: q, mode: "insensitive" },
-              },
-            },
+            OR: [
+              ...(messageConversationIds.size
+                ? [{ id: { in: Array.from(messageConversationIds) } }]
+                : []),
+              { id: { contains: q, mode: "insensitive" } },
+              { providerThreadId: { contains: q, mode: "insensitive" } },
+              { lastMessageText: { contains: q, mode: "insensitive" } },
+              { assigneeName: { contains: q, mode: "insensitive" } },
+              { adId: { contains: q, mode: "insensitive" } },
+              { adPostId: { contains: q, mode: "insensitive" } },
+              { adTitle: { contains: q, mode: "insensitive" } },
+              { adBody: { contains: q, mode: "insensitive" } },
+              { referralRef: { contains: q, mode: "insensitive" } },
+              { customer: { is: { name: { contains: q, mode: "insensitive" } } } },
+              { customer: { is: { address: { contains: q, mode: "insensitive" } } } },
+              { customer: { is: { providerUserId: { contains: q, mode: "insensitive" } } } },
+              { notes: { some: { OR: [
+                { note: { contains: q, mode: "insensitive" } },
+                { staffName: { contains: q, mode: "insensitive" } },
+              ] } } },
+              { tags: { some: { tag: { contains: q, mode: "insensitive" } } } },
+            ],
           },
         ];
       }
@@ -2213,8 +2155,7 @@ export class OmniInboxService {
     order = await this.prisma.order.update({
       where: { id: order.id },
       data: {
-        // Ép giữ liên kết để tìm ngược hội thoại bằng SĐT luôn hoạt động,
-        // kể cả OrderService của phiên bản hiện tại bỏ qua các field mở rộng.
+        // Ép lưu liên kết để các đơn tạo từ thời điểm này có thể tìm ngược về hội thoại.
         omniConversationId: conversationId,
         customerPhone: phone,
         shippingRecipientName: customerName,
