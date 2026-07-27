@@ -1052,8 +1052,6 @@ export class OmniInboxService {
       event?.message?.referral ||
       event?.referral ||
       event?.postback?.referral ||
-      event?.optin?.referral ||
-      event?.messaging_referral ||
       null;
 
     if (!referral || typeof referral !== "object") return null;
@@ -1136,95 +1134,6 @@ export class OmniInboxService {
     );
 
     return hasUsefulData ? normalized : null;
-  }
-
-  private extractFacebookPostIdFromReferral(referral: any) {
-    const candidates = [
-      referral?.postId,
-      referral?.raw?.post_id,
-      referral?.raw?.ads_context_data?.post_id,
-      referral?.raw?.ads_context_data?.page_post_id,
-      referral?.ref,
-      referral?.url,
-      referral?.raw?.ref,
-      referral?.raw?.source_url,
-      referral?.raw?.url,
-    ]
-      .map((value) => safeText(value))
-      .filter(Boolean);
-
-    for (const value of candidates) {
-      // Graph post id thường có dạng PAGEID_POSTID.
-      const direct = value.match(/\b(\d{5,}_\d{5,})\b/);
-      if (direct?.[1]) return direct[1];
-
-      // URL bài viết dạng /posts/POSTID hoặc story_fbid=POSTID&id=PAGEID.
-      const posts = value.match(/\/posts\/(\d{5,})/i);
-      if (posts?.[1]) {
-        const pageId = value.match(/[?&]id=(\d{5,})/i)?.[1] || this.configuredPageId;
-        return pageId ? `${pageId}_${posts[1]}` : posts[1];
-      }
-      const story = value.match(/[?&]story_fbid=(\d{5,})/i)?.[1];
-      const page = value.match(/[?&]id=(\d{5,})/i)?.[1] || this.configuredPageId;
-      if (story) return page ? `${page}_${story}` : story;
-    }
-    return "";
-  }
-
-  private async enrichMetaReferral(referral: any) {
-    if (!referral) return null;
-    const postId = safeText(referral.postId) || this.extractFacebookPostIdFromReferral(referral);
-    if (!postId) return referral;
-
-    const next = { ...referral, postId };
-    if (next.title && next.body && next.imageUrl && next.url) return next;
-
-    try {
-      const post: any = await this.metaFetch(postId, {
-        fields: [
-          "id",
-          "message",
-          "permalink_url",
-          "full_picture",
-          "attachments{media_type,media,url,target,subattachments}",
-        ].join(","),
-      });
-      const attachment = Array.isArray(post?.attachments?.data)
-        ? post.attachments.data[0]
-        : null;
-      const subAttachment = Array.isArray(attachment?.subattachments?.data)
-        ? attachment.subattachments.data[0]
-        : null;
-      return {
-        ...next,
-        body: next.body || safeText(post?.message) || null,
-        imageUrl:
-          next.imageUrl ||
-          safeText(
-            post?.full_picture ||
-              attachment?.media?.image?.src ||
-              subAttachment?.media?.image?.src,
-          ) ||
-          null,
-        videoUrl:
-          next.videoUrl ||
-          safeText(
-            attachment?.media_type === "video"
-              ? attachment?.url || attachment?.target?.url
-              : "",
-          ) ||
-          null,
-        url: next.url || safeText(post?.permalink_url) || `https://www.facebook.com/${postId}`,
-      };
-    } catch (error: any) {
-      this.logMetaDebug(
-        `[META_REFERRAL_SOURCE_SKIP] post=${postId} | ${error?.message || error}`,
-      );
-      return {
-        ...next,
-        url: next.url || `https://www.facebook.com/${postId}`,
-      };
-    }
   }
 
   private buildAdReferralUpdate(referral: any, timestamp: number) {
@@ -1534,41 +1443,38 @@ export class OmniInboxService {
         // Suffix 9 số giúp khớp dữ liệu có +84, 84, 0 hoặc khoảng trắng khác nhau.
         if (qDigits.length >= 9) phoneCandidates.add(qDigits.slice(-9));
 
-        const phoneFilters = Array.from(phoneCandidates).map((phone) => ({
+        const normalizedTargets = new Set(
+          Array.from(phoneCandidates)
+            .map((value) => value.replace(/\D/g, ""))
+            .filter(Boolean),
+        );
+        const phoneSuffix = qDigits.slice(-3);
+
+        // Lấy ứng viên bằng cả số đầy đủ và 3 số cuối, sau đó chuẩn hóa lại bằng
+        // JavaScript. Nhờ vậy vẫn khớp dữ liệu lưu dạng "0989 301 093",
+        // "+84 989..." hoặc có dấu chấm/gạch ngang.
+        const broadPhoneFilters = Array.from(phoneCandidates).map((phone) => ({
           contains: phone,
           mode: "insensitive" as const,
         }));
-
-        // Tìm ở cả hồ sơ OmniCustomer và đơn hàng. SĐT vừa nhập khi chốt đơn
-        // luôn nằm trong Order, còn OmniCustomer có thể chưa được cập nhật hoặc
-        // hội thoại cũ chưa có customerId, nên chỉ tìm OmniCustomer sẽ bỏ sót.
-        // Dữ liệu cũ có thể lưu SĐT với khoảng trắng/dấu chấm/+84. Tìm sơ bộ
-        // bằng 4-6 số cuối rồi chuẩn hóa chỉ còn chữ số trong Node để đối chiếu.
-        const phoneSuffix = qDigits.slice(-Math.min(6, qDigits.length));
-        const normalizedTargets = new Set(
-          Array.from(phoneCandidates).map((value) => value.replace(/\D/g, "").slice(-9)),
-        );
-        const matchesPhone = (value: any) => {
-          const digits = safeText(value).replace(/\D/g, "");
-          if (!digits) return false;
-          const suffix9 = digits.slice(-9);
-          return normalizedTargets.has(suffix9) || Array.from(phoneCandidates).some((candidate) => {
-            const target = candidate.replace(/\D/g, "");
-            return digits === target || digits.endsWith(target) || target.endsWith(digits);
+        if (phoneSuffix) {
+          broadPhoneFilters.push({
+            contains: phoneSuffix,
+            mode: "insensitive" as const,
           });
-        };
+        }
 
-        const [customerCandidates, orderCandidates, noteCandidates] = await Promise.all([
+        const [customerCandidates, orderCandidates] = await Promise.all([
           this.prisma.omniCustomer.findMany({
-            where: { phone: { contains: phoneSuffix, mode: "insensitive" } },
+            where: { OR: broadPhoneFilters.map((phone) => ({ phone })) },
             select: { id: true, phone: true },
             take: 1000,
           }),
           this.prisma.order.findMany({
             where: {
               OR: [
-                { customerPhone: { contains: phoneSuffix, mode: "insensitive" } },
-                { shippingPhone: { contains: phoneSuffix, mode: "insensitive" } },
+                ...broadPhoneFilters.map((phone) => ({ customerPhone: phone })),
+                ...broadPhoneFilters.map((phone) => ({ shippingPhone: phone })),
               ],
             },
             select: {
@@ -1580,38 +1486,54 @@ export class OmniInboxService {
             orderBy: { createdAt: "desc" },
             take: 1000,
           }),
-          this.prisma.omniConversationNote.findMany({
-            where: { note: { contains: phoneSuffix, mode: "insensitive" } },
-            select: { conversationId: true, note: true },
-            orderBy: { createdAt: "desc" },
-            take: 500,
-          }),
         ]);
 
-        const customers = customerCandidates.filter((item) => matchesPhone(item.phone));
+        const matchesPhone = (value?: string | null) => {
+          const digits = safeText(value).replace(/\D/g, "");
+          if (!digits) return false;
+          const forms = new Set([digits]);
+          if (digits.startsWith("84") && digits.length >= 10) {
+            forms.add(`0${digits.slice(2)}`);
+            forms.add(digits.slice(2));
+          } else if (digits.startsWith("0") && digits.length >= 9) {
+            forms.add(`84${digits.slice(1)}`);
+            forms.add(digits.slice(1));
+          }
+          if (digits.length >= 9) forms.add(digits.slice(-9));
+          return Array.from(forms).some((form) => normalizedTargets.has(form));
+        };
+
+        const customers = customerCandidates.filter((item) =>
+          matchesPhone(item.phone),
+        );
         const linkedOrders = orderCandidates.filter(
-          (item) => matchesPhone(item.customerPhone) || matchesPhone(item.shippingPhone),
+          (item) =>
+            matchesPhone(item.customerPhone) ||
+            matchesPhone(item.shippingPhone),
         );
 
-        const customerIds = Array.from(new Set(customers.map((item) => item.id).filter(Boolean)));
-        const conversationIds = new Set<string>();
-        linkedOrders.forEach((item) => {
-          const linked = safeText(item.omniConversationId);
-          if (linked) conversationIds.add(linked);
-          // Fallback cho đơn cũ: ghi chú mặc định có "hội thoại <id>".
-          const fromNote = safeText(item.note).match(/hội thoại\s+([a-z0-9_-]+)/i)?.[1];
-          if (fromNote) conversationIds.add(fromNote);
-        });
-        noteCandidates.forEach((item) => {
-          if (matchesPhone(item.note)) conversationIds.add(item.conversationId);
-        });
+        const customerIds = Array.from(
+          new Set(customers.map((item) => item.id).filter(Boolean)),
+        );
+        const conversationIds = Array.from(
+          new Set(
+            linkedOrders
+              .flatMap((item) => {
+                const directId = safeText(item.omniConversationId);
+                const noteId = safeText(item.note).match(
+                  /(?:hội thoại|hoi thoai)\s+([a-z0-9_-]+)/i,
+                )?.[1];
+                return [directId, safeText(noteId)].filter(Boolean);
+              }),
+          ),
+        );
 
         const phoneMatchConditions: any[] = [];
         if (customerIds.length) {
           phoneMatchConditions.push({ customerId: { in: customerIds } });
         }
-        if (conversationIds.size) {
-          phoneMatchConditions.push({ id: { in: Array.from(conversationIds) } });
+        if (conversationIds.length) {
+          phoneMatchConditions.push({ id: { in: conversationIds } });
         }
 
         // Giữ nguyên các bộ lọc quyền/kênh/trạng thái hiện có, chỉ bổ sung
@@ -2291,6 +2213,8 @@ export class OmniInboxService {
     order = await this.prisma.order.update({
       where: { id: order.id },
       data: {
+        // Ép giữ liên kết để tìm ngược hội thoại bằng SĐT luôn hoạt động,
+        // kể cả OrderService của phiên bản hiện tại bỏ qua các field mở rộng.
         omniConversationId: conversationId,
         customerPhone: phone,
         shippingRecipientName: customerName,
@@ -2330,17 +2254,10 @@ export class OmniInboxService {
       );
     }
 
-    const customerUpdate = conversation.customerId
-      ? await this.prisma.omniCustomer.updateMany({
-          where: { id: conversation.customerId },
-          data: { phone, address: fullAddress || addressLine1 },
-        })
-      : { count: 0 };
-    if (!customerUpdate.count) {
-      this.logger.warn(
-        `[OMNI_QUICK_ORDER_PHONE_LINK_MISSING] conversation=${conversationId} customerId=${conversation.customerId || "-"} order=${order.id}`,
-      );
-    }
+    await this.prisma.omniCustomer.updateMany({
+      where: { id: conversation.customerId || "" },
+      data: { phone, address: fullAddress || addressLine1 },
+    });
     const note = await this.prisma.omniConversationNote.create({
       data: { conversationId, staffId: staff?.id || staff?.sub || null, staffName: staff?.name || staff?.username || null, note: `Đã tạo đơn nháp ${order.orderCode}.` },
     });
@@ -2538,8 +2455,7 @@ export class OmniInboxService {
       ? event.message.attachments.filter((item: any) => safeText(item?.payload?.url))
       : [];
     const attachment = attachments[0];
-    const rawReferral = this.extractMetaAdReferral(event);
-    const adReferral = await this.enrichMetaReferral(rawReferral);
+    const adReferral = this.extractMetaAdReferral(event);
     const adReferralData = this.buildAdReferralUpdate(adReferral, timestamp);
 
     if (!senderId || !recipientId)
