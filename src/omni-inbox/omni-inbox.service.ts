@@ -3,6 +3,8 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
 } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { OmniInboxRealtimeService } from "./omni-inbox.realtime";
@@ -47,9 +49,12 @@ type MetaFeedChange = {
 };
 
 @Injectable()
-export class OmniInboxService {
+export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
   private lastStaleAssignmentSweepAt = 0;
   private lastMorningQueueSweepAt = 0;
+  private lastUnassignedSweepAt = 0;
+  private unassignedSweepRunning = false;
+  private unassignedSweepTimer: ReturnType<typeof setInterval> | null = null;
   private readonly logger = new Logger(OmniInboxService.name);
   private readonly facebookPostSourceCache = new Map<string, { expiresAt: number; data: any }>();
 
@@ -58,6 +63,37 @@ export class OmniInboxService {
     private readonly realtime: OmniInboxRealtimeService,
     private readonly orderService: OrderService,
   ) {}
+
+  onModuleInit() {
+    // Chạy một lượt ngay sau khi backend khởi động để xử lý hội thoại tồn đọng.
+    const initialTimer = setTimeout(() => {
+      void this.sweepUnassignedConversations("SERVER_START").catch((error: any) =>
+        this.logger.warn(
+          `[OMNI_UNASSIGNED_SWEEP_START_SKIP] ${error?.message || error}`,
+        ),
+      );
+    }, 5_000);
+    initialTimer.unref?.();
+
+    // Sau đó tự quét mỗi phút. Không cần admin bấm gán tay và cũng không phụ
+    // thuộc việc có webhook/tin nhắn mới đi vào.
+    this.unassignedSweepTimer = setInterval(() => {
+      void this.sweepUnassignedConversations("SCHEDULED_SWEEP").catch(
+        (error: any) =>
+          this.logger.warn(
+            `[OMNI_UNASSIGNED_SWEEP_SKIP] ${error?.message || error}`,
+          ),
+      );
+    }, 60_000);
+    this.unassignedSweepTimer.unref?.();
+  }
+
+  onModuleDestroy() {
+    if (this.unassignedSweepTimer) {
+      clearInterval(this.unassignedSweepTimer);
+      this.unassignedSweepTimer = null;
+    }
+  }
 
   private get pageAccessToken() {
     return safeText(
@@ -253,6 +289,19 @@ export class OmniInboxService {
       );
     }
 
+    // Nhân viên vừa online có thể làm các hội thoại từng bị "không có nhân viên
+    // phù hợp" trở nên đủ điều kiện. Quét bù ngay, có throttle để nhiều máy
+    // heartbeat cùng lúc không tạo tải thừa.
+    if (Date.now() - this.lastUnassignedSweepAt > 10_000) {
+      this.lastUnassignedSweepAt = Date.now();
+      void this.sweepUnassignedConversations("STAFF_ONLINE").catch(
+        (error: any) =>
+          this.logger.warn(
+            `[OMNI_UNASSIGNED_HEARTBEAT_SKIP] ${error?.message || error}`,
+          ),
+      );
+    }
+
     // Khi có heartbeat, kiểm tra hàng chờ qua đêm. Hàm có throttle riêng nên
     // nhiều máy cùng online không làm chạy lặp liên tục.
     if (Date.now() - this.lastMorningQueueSweepAt > 10_000) {
@@ -381,6 +430,15 @@ export class OmniInboxService {
         }
       }
     });
+
+    // Cấu hình hoặc danh sách nhân viên vừa thay đổi có thể mở khóa hàng loạt
+    // hội thoại đang chưa gán. Chạy quét bù ngay sau khi transaction hoàn tất.
+    void this.sweepUnassignedConversations("SETTINGS_UPDATED").catch(
+      (error: any) =>
+        this.logger.warn(
+          `[OMNI_UNASSIGNED_SETTINGS_SKIP] ${error?.message || error}`,
+        ),
+    );
 
     return this.getAssignmentSettings();
   }
@@ -785,6 +843,96 @@ export class OmniInboxService {
       this.logger.log(
         `[OMNI_MORNING_QUEUE] date=${dateKey} online=${onlineCount} requested=${batchSize} assigned=${assignedCount}`,
       );
+    }
+  }
+
+  /**
+   * Tự động xử lý các hội thoại chưa có người phụ trách.
+   *
+   * Chạy khi:
+   * - Backend khởi động.
+   * - Mỗi phút.
+   * - Có nhân viên heartbeat/online.
+   * - Admin lưu lại cấu hình chia tin.
+   *
+   * Chỉ lấy hội thoại còn cần xử lý và có tin chưa đọc. Mỗi lượt tối đa 100
+   * hội thoại để không làm nghẽn webhook; lượt sau tiếp tục phần còn lại.
+   */
+  private async sweepUnassignedConversations(triggerType: string) {
+    if (this.unassignedSweepRunning) return {
+      skipped: true,
+      reason: "SWEEP_ALREADY_RUNNING",
+    };
+
+    this.unassignedSweepRunning = true;
+    this.lastUnassignedSweepAt = Date.now();
+
+    try {
+      const setting: any = await (this.prisma as any).omniAssignmentSetting.findUnique({
+        where: { id: "default" },
+        select: {
+          isActive: true,
+          mode: true,
+          outsideHoursMode: true,
+          workingHoursOnly: true,
+          workStartMinute: true,
+          workEndMinute: true,
+          workDays: true,
+        },
+      });
+
+      if (!setting?.isActive || setting.mode !== "AUTO") {
+        return { skipped: true, reason: "AUTO_ASSIGNMENT_DISABLED" };
+      }
+
+      if (
+        !this.isInsideWorkingHours(setting) &&
+        setting.outsideHoursMode === "QUEUE"
+      ) {
+        return { skipped: true, reason: "OUTSIDE_WORKING_HOURS" };
+      }
+
+      const rows = await this.prisma.omniConversation.findMany({
+        where: {
+          assigneeId: null,
+          unreadCount: { gt: 0 },
+          status: {
+            in: ["OPEN", "PROCESSING", "PENDING"] as any,
+          },
+        },
+        orderBy: [
+          { lastMessageAt: "asc" },
+          { createdAt: "asc" },
+        ],
+        take: 100,
+        select: { id: true },
+      });
+
+      let assignedCount = 0;
+      let noCandidateCount = 0;
+
+      for (const row of rows) {
+        const assigned = await this.autoAssignConversation(
+          row.id,
+          triggerType,
+        );
+        if (assigned?.assigneeId) assignedCount += 1;
+        else noCandidateCount += 1;
+      }
+
+      if (rows.length) {
+        this.logger.log(
+          `[OMNI_UNASSIGNED_SWEEP] trigger=${triggerType} checked=${rows.length} assigned=${assignedCount} pending=${noCandidateCount}`,
+        );
+      }
+
+      return {
+        checked: rows.length,
+        assigned: assignedCount,
+        pending: noCandidateCount,
+      };
+    } finally {
+      this.unassignedSweepRunning = false;
     }
   }
 
@@ -1775,6 +1923,144 @@ export class OmniInboxService {
     const item = await this.getConversation(id);
     this.realtime.emit({ type: "conversation.tagged", payload: item });
     return item;
+  }
+
+  private normalizeTagTemplateName(value: string) {
+    return safeText(value).toLocaleLowerCase("vi-VN").replace(/\s+/g, " ");
+  }
+
+  async listTagTemplates(includeInactive = false) {
+    const templates = await (this.prisma as any).omniTagTemplate.findMany({
+      where: includeInactive ? {} : { isActive: true },
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+    });
+
+    const usageRows: any[] = await (this.prisma.omniConversationTag as any).groupBy({
+      by: ["tag"],
+      where: {
+        tag: { in: templates.map((item: any) => item.name) },
+      },
+      _count: { _all: true },
+    });
+    const usageMap = new Map(
+      usageRows.map((item: any) => [item.tag, Number(item?._count?._all || 0)]),
+    );
+
+    return templates.map((item: any) => ({
+      ...item,
+      conversationCount: Number(usageMap.get(item.name) || 0),
+    }));
+  }
+
+  async createTagTemplate(dto: any, staff?: any) {
+    const name = safeText(dto.name);
+    if (!name) throw new BadRequestException("Tên nhãn trống.");
+
+    const normalizedName = this.normalizeTagTemplateName(name);
+    const existed = await (this.prisma as any).omniTagTemplate.findUnique({
+      where: { normalizedName },
+    });
+    if (existed) {
+      if (!existed.isActive) {
+        return (this.prisma as any).omniTagTemplate.update({
+          where: { id: existed.id },
+          data: {
+            name,
+            color: safeText(dto.color) || existed.color || null,
+            sortOrder:
+              dto.sortOrder === undefined
+                ? existed.sortOrder
+                : Number(dto.sortOrder || 0),
+            isActive: true,
+          },
+        });
+      }
+      throw new BadRequestException("Nhãn hội thoại này đã tồn tại.");
+    }
+
+    return (this.prisma as any).omniTagTemplate.create({
+      data: {
+        name,
+        normalizedName,
+        color: safeText(dto.color) || null,
+        sortOrder: Number(dto.sortOrder || 0),
+        createdById: safeText(staff?.id || staff?.sub) || null,
+        createdByName: safeText(staff?.name || staff?.username) || null,
+      },
+    });
+  }
+
+  async updateTagTemplate(id: string, dto: any) {
+    const current = await (this.prisma as any).omniTagTemplate.findUnique({
+      where: { id },
+    });
+    if (!current) throw new NotFoundException("Không tìm thấy nhãn hội thoại.");
+
+    const name = dto.name === undefined ? current.name : safeText(dto.name);
+    if (!name) throw new BadRequestException("Tên nhãn trống.");
+
+    const normalizedName = this.normalizeTagTemplateName(name);
+    const duplicate = await (this.prisma as any).omniTagTemplate.findFirst({
+      where: {
+        normalizedName,
+        id: { not: id },
+      },
+    });
+    if (duplicate) throw new BadRequestException("Nhãn hội thoại này đã tồn tại.");
+
+    return (this.prisma as any).$transaction(async (tx: any) => {
+      if (name !== current.name) {
+        await tx.omniConversationTag.updateMany({
+          where: { tag: current.name },
+          data: { tag: name },
+        });
+      }
+
+      const updated = await tx.omniTagTemplate.update({
+        where: { id },
+        data: {
+          name,
+          normalizedName,
+          color:
+            dto.color === undefined
+              ? current.color
+              : safeText(dto.color) || null,
+          sortOrder:
+            dto.sortOrder === undefined
+              ? current.sortOrder
+              : Number(dto.sortOrder || 0),
+          isActive:
+            dto.isActive === undefined
+              ? current.isActive
+              : Boolean(dto.isActive),
+        },
+      });
+
+      const conversationCount = await tx.omniConversationTag.count({
+        where: { tag: name },
+      });
+
+      return { ...updated, conversationCount };
+    });
+  }
+
+  async deleteTagTemplate(id: string) {
+    const current = await (this.prisma as any).omniTagTemplate.findUnique({
+      where: { id },
+    });
+    if (!current) throw new NotFoundException("Không tìm thấy nhãn hội thoại.");
+
+    return (this.prisma as any).$transaction(async (tx: any) => {
+      const removed = await tx.omniConversationTag.deleteMany({
+        where: { tag: current.name },
+      });
+      await tx.omniTagTemplate.delete({ where: { id } });
+      return {
+        success: true,
+        id,
+        removedConversationTags: Number(removed?.count || 0),
+      };
+    });
   }
 
   private normalizeNoteTemplateName(value: string) {

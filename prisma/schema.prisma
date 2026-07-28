@@ -2619,6 +2619,21 @@ model OmniMessage {
   @@index([direction, sentAt])
 }
 
+model OmniTagTemplate {
+  id             String   @id @default(cuid())
+  name           String
+  normalizedName String   @unique
+  color          String?
+  sortOrder      Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdById    String?
+  createdByName  String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
+}
+
 model OmniConversationTag {
   id String @id @default(cuid())
 
