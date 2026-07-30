@@ -958,55 +958,79 @@ export class OrderService implements OnModuleInit {
   ) {
     if (!branchId) return;
 
-    const items = await tx.orderItem.findMany({
-      where: { orderId },
-      select: {
-        variantId: true,
-        qty: true,
+    // Một đơn chỉ được hoàn tồn đúng 1 lần, bất kể hủy nội bộ trước
+    // hay hủy vận đơn GHN/AhaMove/ViettelPost/SPX trước.
+    const existingRestore = await tx.inventoryMovement.findFirst({
+      where: {
+        refId: orderId,
+        type: InventoryMovementType.CANCEL,
+        OR: [
+          { refType: "ORDER_CANCEL_RESTORE" },
+          { refType: "ORDER" },
+          { refType: "GHN_CANCEL_RESTORE" },
+          { refType: "AHAMOVE_CANCEL_RESTORE" },
+          { refType: "VIETTELPOST_CANCEL_RESTORE" },
+          { refType: "SPX_CANCEL_RESTORE" },
+        ],
       },
+      select: { id: true },
     });
 
-    for (const item of items) {
-      if (!item.variantId) continue;
+    if (existingRestore) return;
+
+    // Chỉ hoàn đúng số lượng thực tế đã từng xuất kho của đơn.
+    const saleMovements = await tx.inventoryMovement.findMany({
+      where: {
+        refType: "ORDER",
+        refId: orderId,
+        type: InventoryMovementType.SALE,
+      },
+      select: { variantId: true, branchId: true, qty: true },
+    });
+
+    for (const movement of saleMovements) {
+      const variantId = String(movement.variantId || "").trim();
+      const movementBranchId = String(movement.branchId || branchId || "").trim();
+      const qty = Math.abs(Math.trunc(Number(movement.qty || 0)));
+      if (!variantId || !movementBranchId || !qty) continue;
 
       const inventory = await tx.inventoryItem.findUnique({
         where: {
           variantId_branchId: {
-            variantId: item.variantId,
-            branchId,
+            variantId,
+            branchId: movementBranchId,
           },
         },
       });
 
-      if (!inventory) continue;
-
-      const qty = Number(item.qty || 0);
-
-      const beforeQty = Number(inventory.availableQty || 0);
+      const beforeQty = Number(inventory?.availableQty || 0);
       const afterQty = beforeQty + qty;
 
-      await tx.inventoryItem.update({
+      await tx.inventoryItem.upsert({
         where: {
           variantId_branchId: {
-            variantId: item.variantId,
-            branchId,
+            variantId,
+            branchId: movementBranchId,
           },
         },
-        data: {
+        update: { availableQty: afterQty },
+        create: {
+          variantId,
+          branchId: movementBranchId,
           availableQty: afterQty,
         },
       });
 
       await this.logInventoryMovement(tx, {
-        variantId: item.variantId,
+        variantId,
         type: InventoryMovementType.CANCEL,
         qty,
         beforeQty,
         afterQty,
         note: "Hoàn kho khi hủy đơn",
-        refType: "ORDER",
+        refType: "ORDER_CANCEL_RESTORE",
         refId: orderId,
-        branchId,
+        branchId: movementBranchId,
       });
     }
   }
@@ -2646,6 +2670,23 @@ export class OrderService implements OnModuleInit {
     };
   }
 
+  private parseVietnamDateBoundary(value: string, boundary: "start" | "end") {
+    const normalized = String(value || "").trim();
+    if (!normalized) return null;
+
+    // Query từ UI dùng YYYY-MM-DD. Phải hiểu theo ngày Việt Nam, không phải UTC.
+    // Ví dụ 29/07 tại Việt Nam tương ứng 28/07 17:00Z -> 29/07 16:59:59.999Z.
+    if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+      const suffix = boundary === "start" ? "T00:00:00.000+07:00" : "T23:59:59.999+07:00";
+      const parsed = new Date(`${normalized}${suffix}`);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    const parsed = new Date(normalized);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed;
+  }
+
   private buildOrderBaseWhereForList(params: Pick<GetOrdersParams, "branchId" | "orderStatus" | "paymentStatus" | "dateFrom" | "dateTo">) {
     const baseWhere: Prisma.OrderWhereInput = {};
     const { branchId = "", orderStatus = "", paymentStatus = "", dateFrom = "", dateTo = "" } = params;
@@ -2663,12 +2704,17 @@ export class OrderService implements OnModuleInit {
     }
 
     if (dateFrom || dateTo) {
-      baseWhere.createdAt = {};
-      if (dateFrom) {
-        (baseWhere.createdAt as Prisma.DateTimeFilter).gte = new Date(`${dateFrom}T00:00:00.000Z`);
-      }
-      if (dateTo) {
-        (baseWhere.createdAt as Prisma.DateTimeFilter).lte = new Date(`${dateTo}T23:59:59.999Z`);
+      const fromBoundary = this.parseVietnamDateBoundary(dateFrom, "start");
+      const toBoundary = this.parseVietnamDateBoundary(dateTo, "end");
+
+      if (fromBoundary || toBoundary) {
+        baseWhere.createdAt = {};
+        if (fromBoundary) {
+          (baseWhere.createdAt as Prisma.DateTimeFilter).gte = fromBoundary;
+        }
+        if (toBoundary) {
+          (baseWhere.createdAt as Prisma.DateTimeFilter).lte = toBoundary;
+        }
       }
     }
 

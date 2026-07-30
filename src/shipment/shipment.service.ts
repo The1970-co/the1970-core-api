@@ -3012,6 +3012,9 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         shipment,
         stockOut: stockOutResult,
       };
+    }, {
+      maxWait: Number(process.env.PRISMA_TRANSACTION_MAX_WAIT_MS || 10000),
+      timeout: Number(process.env.PRISMA_TRANSACTION_TIMEOUT_MS || 30000),
     });
   }
 
@@ -3191,85 +3194,16 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
 
     const result = await this.prisma.$transaction(
       async (tx) => {
-        const existingRestore = await (tx as any).inventoryMovement.findFirst({
-          where: {
-            refType: "GHN_CANCEL_RESTORE",
-            refId: orderId,
+        const inventoryRestore = await this.restoreOrderStockForShipmentCancel(
+          tx,
+          order,
+          shipment,
+          {
+            carrier: "GHN",
+            actorName,
+            restoreRefType: "ORDER_CANCEL_RESTORE",
           },
-          select: { id: true },
-        });
-
-        const restoredItems: Array<{ variantId: string; qty: number; beforeQty: number; afterQty: number }> = [];
-
-        if (!existingRestore) {
-          const saleMovements = await (tx as any).inventoryMovement.findMany({
-            where: {
-              refType: "ORDER",
-              refId: orderId,
-              type: "SALE",
-            },
-            select: {
-              variantId: true,
-              branchId: true,
-              qty: true,
-            },
-          });
-
-          for (const movement of saleMovements as any[]) {
-            const restoreQty = Math.abs(Math.trunc(Number(movement?.qty || 0)));
-            const variantId = String(movement?.variantId || "").trim();
-            const branchId = String(movement?.branchId || (order as any).branchId || "").trim();
-
-            if (!restoreQty || !variantId || !branchId) continue;
-
-            const inventoryItem = await (tx as any).inventoryItem.findUnique({
-              where: {
-                variantId_branchId: {
-                  variantId,
-                  branchId,
-                },
-              },
-            });
-
-            const beforeQty = Number(inventoryItem?.availableQty || 0);
-            const afterQty = beforeQty + restoreQty;
-
-            if (inventoryItem) {
-              await (tx as any).inventoryItem.update({
-                where: { id: inventoryItem.id },
-                data: { availableQty: afterQty },
-              });
-            } else {
-              await (tx as any).inventoryItem.create({
-                data: {
-                  variantId,
-                  branchId,
-                  availableQty: afterQty,
-                  reservedQty: 0,
-                  incomingQty: 0,
-                },
-              });
-            }
-
-            await (tx as any).inventoryMovement.create({
-              data: {
-                variantId,
-                branchId,
-                type: "CANCEL",
-                qty: restoreQty,
-                beforeQty,
-                afterQty,
-                note: `Hoàn tồn kho do huỷ GHN từ đơn ${order.orderCode}${shipment.trackingCode ? ` - MVD ${shipment.trackingCode}` : ""} | Người huỷ: ${actorName}`,
-                refType: "GHN_CANCEL_RESTORE",
-                refId: orderId,
-                createdById: null,
-                createdAt: new Date(),
-              },
-            });
-
-            restoredItems.push({ variantId, qty: restoreQty, beforeQty, afterQty });
-          }
-        }
+        );
 
         const [updatedShipment, updatedOrder] = await Promise.all([
           tx.shipment.update({
@@ -3291,8 +3225,9 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         return {
           order: updatedOrder,
           shipment: updatedShipment,
-          inventoryRestored: !existingRestore,
-          restoredItems,
+          inventoryRestored: inventoryRestore.inventoryRestored,
+          inventoryRestoreAlreadyApplied: inventoryRestore.inventoryRestoreAlreadyApplied,
+          restoredItems: inventoryRestore.restoredItems,
         };
       },
       {

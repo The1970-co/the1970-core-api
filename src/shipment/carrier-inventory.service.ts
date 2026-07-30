@@ -178,15 +178,24 @@ export class CarrierInventoryService {
 
     const carrier = this.normalizeCarrier(input?.carrier || shipment?.carrier);
     const carrierLabel = this.carrierLabel(carrier);
-    const restoreRefType = String(input?.restoreRefType || `${carrier}_CANCEL_RESTORE`).trim();
+    const restoreRefType = String(input?.restoreRefType || "ORDER_CANCEL_RESTORE").trim();
     const actorName = String(input?.actorName || "system").trim() || "system";
     const trackingCode = String(shipment?.trackingCode || shipment?.ahamoveOrderId || "").trim();
     const notePrefix = String(input?.notePrefix || `Hoàn tồn kho do huỷ ${carrierLabel}`).trim();
 
     const existingRestore = await tx.inventoryMovement.findFirst({
       where: {
-        refType: restoreRefType,
         refId: orderId,
+        type: "CANCEL",
+        OR: [
+          { refType: "ORDER_CANCEL_RESTORE" },
+          { refType: "ORDER" },
+          { refType: "GHN_CANCEL_RESTORE" },
+          { refType: "AHAMOVE_CANCEL_RESTORE" },
+          { refType: "VIETTELPOST_CANCEL_RESTORE" },
+          { refType: "SPX_CANCEL_RESTORE" },
+          { refType: restoreRefType },
+        ],
       },
       select: { id: true },
     });
