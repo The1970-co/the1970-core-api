@@ -161,6 +161,19 @@ export class ProductController {
     return this.productService.getProductById(id);
   }
 
+  @Patch(":id/variants/sku/bulk")
+  @RequirePermissions("products.master_data.manage")
+  updateVariantSkusBulk(
+    @Param("id") productId: string,
+    @Body()
+    body: { items?: Array<{ variantId?: string; sku?: string }> },
+  ) {
+    return this.productService.updateVariantSkusBulk(
+      productId,
+      body?.items || [],
+    );
+  }
+
   @Patch(":id/variants/:variantId/sku")
   @RequirePermissions("products.master_data.manage")
   updateVariantSku(

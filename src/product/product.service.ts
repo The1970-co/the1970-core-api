@@ -2344,6 +2344,94 @@ export class ProductService {
     return { success: true, updated };
   }
 
+  async updateVariantSkusBulk(
+    productId: string,
+    itemsInput: Array<{ variantId?: string; sku?: string }>,
+  ) {
+    const items = (Array.isArray(itemsInput) ? itemsInput : [])
+      .map((item) => ({
+        variantId: String(item?.variantId || "").trim(),
+        sku: String(item?.sku || "").trim().toUpperCase(),
+      }))
+      .filter((item) => item.variantId || item.sku);
+
+    if (!items.length) {
+      throw new BadRequestException("Thiếu danh sách SKU cần cập nhật");
+    }
+
+    if (items.some((item) => !item.variantId || !item.sku)) {
+      throw new BadRequestException("Variant và SKU không được để trống");
+    }
+
+    if (items.some((item) => item.sku.length > 120)) {
+      throw new BadRequestException("Có SKU quá dài");
+    }
+
+    const variantIds = items.map((item) => item.variantId);
+    if (new Set(variantIds).size !== variantIds.length) {
+      throw new BadRequestException("Danh sách có variant bị lặp");
+    }
+
+    const normalizedSkus = items.map((item) => item.sku.toLowerCase());
+    if (new Set(normalizedSkus).size !== normalizedSkus.length) {
+      throw new BadRequestException("Danh sách SKU mới đang bị trùng nhau");
+    }
+
+    const variants = await this.prisma.productVariant.findMany({
+      where: {
+        productId,
+        id: { in: variantIds },
+      },
+      select: { id: true, sku: true },
+    });
+
+    if (variants.length !== items.length) {
+      throw new BadRequestException(
+        "Có variant không tồn tại hoặc không thuộc sản phẩm này",
+      );
+    }
+
+    const duplicated = await this.prisma.productVariant.findFirst({
+      where: {
+        id: { notIn: variantIds },
+        OR: items.map((item) => ({
+          sku: { equals: item.sku, mode: "insensitive" as const },
+        })),
+      },
+      select: { sku: true },
+    });
+
+    if (duplicated) {
+      throw new BadRequestException(`SKU ${duplicated.sku} đã tồn tại`);
+    }
+
+    await this.prisma.$transaction(
+      async (tx) => {
+        // Đổi tạm trước để vẫn xử lý được trường hợp các SKU trong cùng nhóm
+        // hoán đổi cho nhau mà không vướng unique constraint.
+        for (const item of items) {
+          await tx.productVariant.update({
+            where: { id: item.variantId },
+            data: { sku: `__SKU_EDIT_${item.variantId}_${Date.now()}` },
+          });
+        }
+
+        for (const item of items) {
+          await tx.productVariant.update({
+            where: { id: item.variantId },
+            data: { sku: item.sku },
+          });
+        }
+      },
+      {
+        maxWait: 10000,
+        timeout: 20000,
+      },
+    );
+
+    return { success: true, updated: items.length };
+  }
+
   async updateVariantSku(
     productId: string,
     variantId: string,
