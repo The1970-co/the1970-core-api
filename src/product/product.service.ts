@@ -948,8 +948,31 @@ export class ProductService {
   }
 
   async getProductById(id: string) {
-    const product = await this.prisma.product.findUnique({
-      where: { id },
+    const lookupKey = String(id || "").trim();
+
+    if (!lookupKey) {
+      return null;
+    }
+
+    // Mobile/PWA cũ có thể truyền slug, variantId hoặc SKU thay vì Product.id.
+    // Resolve tất cả về đúng sản phẩm cha để màn chi tiết luôn mở được.
+    const product = await this.prisma.product.findFirst({
+      where: {
+        OR: [
+          { id: lookupKey },
+          { slug: { equals: lookupKey, mode: "insensitive" } },
+          {
+            variants: {
+              some: {
+                OR: [
+                  { id: lookupKey },
+                  { sku: { equals: lookupKey, mode: "insensitive" } },
+                ],
+              },
+            },
+          },
+        ],
+      },
       include: {
         categoryRel: true,
         variants: {
@@ -2319,6 +2342,55 @@ export class ProductService {
     }
 
     return { success: true, updated };
+  }
+
+  async updateVariantSku(
+    productId: string,
+    variantId: string,
+    skuInput: string,
+  ) {
+    const sku = String(skuInput || "").trim().toUpperCase();
+
+    if (!sku) {
+      throw new BadRequestException("SKU không được để trống");
+    }
+
+    if (sku.length > 120) {
+      throw new BadRequestException("SKU quá dài");
+    }
+
+    const variant = await this.prisma.productVariant.findFirst({
+      where: {
+        id: variantId,
+        productId,
+      },
+      select: { id: true, productId: true, sku: true },
+    });
+
+    if (!variant) {
+      throw new BadRequestException("Không tìm thấy variant của sản phẩm");
+    }
+
+    if (variant.sku === sku) {
+      return variant;
+    }
+
+    const duplicated = await this.prisma.productVariant.findFirst({
+      where: {
+        sku: { equals: sku, mode: "insensitive" },
+        NOT: { id: variantId },
+      },
+      select: { id: true, sku: true },
+    });
+
+    if (duplicated) {
+      throw new BadRequestException(`SKU ${sku} đã tồn tại`);
+    }
+
+    return this.prisma.productVariant.update({
+      where: { id: variantId },
+      data: { sku },
+    });
   }
 
   async addVariant(productId: string, data: AddVariantInput) {
