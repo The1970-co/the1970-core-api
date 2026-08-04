@@ -102,6 +102,7 @@ export class OrderController {
     @Query("paymentStatus") paymentStatus?: string,
     @Query("dateFrom") dateFrom?: string,
     @Query("dateTo") dateTo?: string,
+    @Query("datePreset") datePreset?: string,
     @Query("codReconciliationStatus") codReconciliationStatus?: string,
     @Query("codReconciliation") codReconciliation?: string,
     @Query("codReconciliationFilter") codReconciliationFilter?: string,
@@ -118,6 +119,7 @@ export class OrderController {
         paymentStatus: paymentStatus || "",
         dateFrom: dateFrom || "",
         dateTo: dateTo || "",
+        datePreset: datePreset || "",
         codReconciliationStatus:
           codReconciliationStatus ||
           codReconciliation ||

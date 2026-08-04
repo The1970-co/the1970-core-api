@@ -36,6 +36,7 @@ type GetOrdersParams = {
   paymentStatus?: string;
   dateFrom?: string;
   dateTo?: string;
+  datePreset?: "today" | "yesterday" | "7d" | "30d" | string;
   /**
    * Bộ lọc đối soát COD dùng cho danh sách đơn hàng.
    * Hỗ trợ: RECONCILED, NOT_RECONCILED, MISMATCH, NOT_FOUND, SAVED.
@@ -546,7 +547,17 @@ export class OrderService implements OnModuleInit {
   }
 
   private isOwner(user?: any) {
-    return user?.role === "owner" || user?.role === "admin";
+    const role = String(user?.role || "").trim().toLowerCase();
+    const roles = Array.isArray(user?.roles)
+      ? user.roles.map((item: any) => String(item || "").trim().toLowerCase())
+      : [];
+
+    return (
+      role === "owner" ||
+      role === "admin" ||
+      roles.includes("owner") ||
+      roles.includes("admin")
+    );
   }
 
   private resolveBranchIdFromUser(user?: any) {
@@ -2670,6 +2681,43 @@ export class OrderService implements OnModuleInit {
     };
   }
 
+  private resolveVietnamDatePreset(preset?: string | null) {
+    const key = String(preset || "").trim().toLowerCase();
+    if (!["today", "yesterday", "7d", "30d"].includes(key)) {
+      return { dateFrom: "", dateTo: "" };
+    }
+
+    // Tính ngày theo múi giờ Việt Nam ở backend, không phụ thuộc timezone của máy chạy app.
+    const now = new Date();
+    const vietnamNow = new Date(
+      now.toLocaleString("en-US", { timeZone: "Asia/Ho_Chi_Minh" }),
+    );
+
+    const from = new Date(vietnamNow);
+    const to = new Date(vietnamNow);
+
+    if (key === "yesterday") {
+      from.setDate(from.getDate() - 1);
+      to.setDate(to.getDate() - 1);
+    } else if (key === "7d") {
+      from.setDate(from.getDate() - 6);
+    } else if (key === "30d") {
+      from.setDate(from.getDate() - 29);
+    }
+
+    const ymd = (date: Date) =>
+      [
+        date.getFullYear(),
+        String(date.getMonth() + 1).padStart(2, "0"),
+        String(date.getDate()).padStart(2, "0"),
+      ].join("-");
+
+    return {
+      dateFrom: ymd(from),
+      dateTo: ymd(to),
+    };
+  }
+
   private parseVietnamDateBoundary(value: string, boundary: "start" | "end") {
     const normalized = String(value || "").trim();
     if (!normalized) return null;
@@ -2879,6 +2927,7 @@ export class OrderService implements OnModuleInit {
       paymentStatus = "",
       dateFrom = "",
       dateTo = "",
+      datePreset = "",
       codReconciliationStatus = "",
       quickStatus = "",
       exportMode = false,
@@ -2890,12 +2939,16 @@ export class OrderService implements OnModuleInit {
     const skip = (safePage - 1) * safePageSize;
     const keyword = this.normalizeOrderKeyword(q);
 
+    const presetRange = this.resolveVietnamDatePreset(datePreset);
+    const effectiveDateFrom = presetRange.dateFrom || dateFrom;
+    const effectiveDateTo = presetRange.dateTo || dateTo;
+
     const baseWhere = this.buildOrderBaseWhereForList({
       branchId,
       orderStatus,
       paymentStatus,
-      dateFrom,
-      dateTo,
+      dateFrom: effectiveDateFrom,
+      dateTo: effectiveDateTo,
     });
 
     const codReconciliationOrderIds = await this.findOrderIdsByCodReconciliationFilter(
