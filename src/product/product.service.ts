@@ -1276,6 +1276,253 @@ export class ProductService {
       data.colorImages || data.imagesByColor || data.colorImageMap,
     );
 
+    // Khi xoá toàn bộ màu, sản phẩm phải trở thành size-only THẬT SỰ:
+    // mỗi size chỉ còn đúng 1 variant. Dữ liệu cũ kiểu 6 "màu" x 6 size = 36
+    // variant sẽ được gộp về 6 variant, đồng thời cộng dồn tồn theo từng size/chi nhánh.
+    if (sizeOnlyMode) {
+      const normalizedSizes = Array.from(
+        new Set(sizes.map((size) => String(size || "").trim()).filter(Boolean)),
+      );
+
+      const result = await this.prisma.$transaction(
+        async (tx) => {
+          const updatedProduct = await tx.product.update({
+            where: { id: productId },
+            data: {
+              name: data.name?.trim() || undefined,
+              slug: nextSlug,
+              category:
+                categoryRecord?.name || data.category?.trim() || undefined,
+              categoryId:
+                data.categoryId !== undefined
+                  ? categoryRecord?.id || null
+                  : undefined,
+              brand: data.brand?.trim() || undefined,
+              weight:
+                data.weight !== undefined
+                  ? this.toNumber(data.weight)
+                  : undefined,
+              imageUrl:
+                data.imageUrl !== undefined
+                  ? String(data.imageUrl || "").trim() || null
+                  : undefined,
+              description:
+                data.description !== undefined
+                  ? String(data.description || "").trim() || null
+                  : undefined,
+            },
+          });
+
+          const currentVariants = await tx.productVariant.findMany({
+            where: { productId },
+            include: { inventoryItems: true },
+            orderBy: { createdAt: "asc" },
+          });
+
+          const keeperIds: string[] = [];
+
+          for (const size of normalizedSizes) {
+            const candidates = currentVariants.filter(
+              (variant) => String(variant.size || "").trim() === size,
+            );
+
+            // Ưu tiên giữ variant đang có tồn nhiều nhất để hạn chế thay đổi ID
+            // của variant thực tế đang được sử dụng.
+            const keeper =
+              [...candidates].sort((a, b) => {
+                const stockA = (a.inventoryItems || []).reduce(
+                  (sum, item) =>
+                    sum +
+                    Number(item.availableQty || 0) +
+                    Number(item.reservedQty || 0) +
+                    Number(item.incomingQty || 0),
+                  0,
+                );
+                const stockB = (b.inventoryItems || []).reduce(
+                  (sum, item) =>
+                    sum +
+                    Number(item.availableQty || 0) +
+                    Number(item.reservedQty || 0) +
+                    Number(item.incomingQty || 0),
+                  0,
+                );
+                return stockB - stockA;
+              })[0] || null;
+
+            const stockByBranch = new Map<
+              string,
+              { availableQty: number; reservedQty: number; incomingQty: number }
+            >();
+
+            for (const variant of candidates) {
+              for (const inventory of variant.inventoryItems || []) {
+                const branchId = String(inventory.branchId || "");
+                if (!branchId) continue;
+                const current = stockByBranch.get(branchId) || {
+                  availableQty: 0,
+                  reservedQty: 0,
+                  incomingQty: 0,
+                };
+                current.availableQty += Number(inventory.availableQty || 0);
+                current.reservedQty += Number(inventory.reservedQty || 0);
+                current.incomingQty += Number(inventory.incomingQty || 0);
+                stockByBranch.set(branchId, current);
+              }
+            }
+
+            let keeperId = keeper?.id || "";
+
+            if (!keeperId) {
+              const created = await tx.productVariant.create({
+                data: {
+                  productId,
+                  sku: this.buildSku(nextSlug, "", size),
+                  color: "",
+                  size,
+                  price: new Prisma.Decimal(this.toNumber(data.defaultPrice)),
+                  costPrice: new Prisma.Decimal(
+                    this.toNumber(data.defaultCostPrice),
+                  ),
+                  status: VariantStatus.ACTIVE,
+                },
+              });
+              keeperId = created.id;
+            } else {
+              const duplicateIds = candidates
+                .filter((variant) => variant.id !== keeperId)
+                .map((variant) => variant.id);
+
+              // Gộp tồn trước, sau đó xoá toàn bộ variant thừa của cùng size.
+              if (duplicateIds.length) {
+                await tx.inventoryItem.deleteMany({
+                  where: { variantId: { in: duplicateIds } },
+                });
+
+                await tx.productVariant.deleteMany({
+                  where: { id: { in: duplicateIds } },
+                });
+              }
+
+              // SKU mong muốn có thể đang nằm ở một duplicate vừa xoá,
+              // vì vậy đổi SKU keeper sau bước delete để tránh unique constraint.
+              await tx.productVariant.update({
+                where: { id: keeperId },
+                data: {
+                  sku: this.buildSku(nextSlug, "", size),
+                  color: "",
+                  size,
+                  status: VariantStatus.ACTIVE,
+                  ...(data.applyPriceToAllVariants &&
+                  data.defaultPrice !== undefined
+                    ? {
+                        price: new Prisma.Decimal(
+                          this.toNumber(data.defaultPrice),
+                        ),
+                      }
+                    : {}),
+                  ...(data.defaultCostPrice !== undefined
+                    ? {
+                        costPrice: new Prisma.Decimal(
+                          this.toNumber(data.defaultCostPrice),
+                        ),
+                      }
+                    : {}),
+                },
+              });
+            }
+
+            keeperIds.push(keeperId);
+
+            // Viết lại tồn của keeper bằng tổng tồn của tất cả variant cùng size.
+            for (const [branchId, qty] of stockByBranch.entries()) {
+              await tx.inventoryItem.upsert({
+                where: {
+                  variantId_branchId: {
+                    variantId: keeperId,
+                    branchId,
+                  },
+                },
+                update: {
+                  availableQty: qty.availableQty,
+                  reservedQty: qty.reservedQty,
+                  incomingQty: qty.incomingQty,
+                },
+                create: {
+                  variantId: keeperId,
+                  branchId,
+                  availableQty: qty.availableQty,
+                  reservedQty: qty.reservedQty,
+                  incomingQty: qty.incomingQty,
+                },
+              });
+            }
+          }
+
+          // Xoá mọi variant không còn thuộc danh sách size đang cấu hình.
+          // Sau block này product có đúng N variant = N size.
+          const obsoleteVariants = currentVariants.filter(
+            (variant) => !normalizedSizes.includes(String(variant.size || "").trim()),
+          );
+          const obsoleteIds = obsoleteVariants
+            .map((variant) => variant.id)
+            .filter((id) => !keeperIds.includes(id));
+
+          if (obsoleteIds.length) {
+            await tx.inventoryItem.deleteMany({
+              where: { variantId: { in: obsoleteIds } },
+            });
+            await tx.productVariant.deleteMany({
+              where: { id: { in: obsoleteIds } },
+            });
+          }
+
+          return {
+            updatedProduct,
+            inventoryVariantIds: keeperIds,
+          };
+        },
+        {
+          maxWait: 10000,
+          timeout: 30000,
+        },
+      );
+
+      // Nếu form có gửi tồn theo chi nhánh thì áp dụng lên 6 keeper sau khi gộp.
+      if (
+        Object.keys(branchStocks).length > 0 &&
+        result.inventoryVariantIds.length > 0
+      ) {
+        await Promise.all(
+          result.inventoryVariantIds.map((variantId) =>
+            Promise.all(
+              Object.entries(branchStocks).map(([branchId, qty]) =>
+                this.prisma.inventoryItem.upsert({
+                  where: {
+                    variantId_branchId: {
+                      variantId,
+                      branchId,
+                    },
+                  },
+                  update: {
+                    availableQty: this.toNumber(qty),
+                  },
+                  create: {
+                    variantId,
+                    branchId,
+                    availableQty: this.toNumber(qty),
+                    reservedQty: 0,
+                    incomingQty: 0,
+                  },
+                }),
+              ),
+            ),
+          ),
+        );
+      }
+
+      return result.updatedProduct;
+    }
+
     type WantedCombo = {
       key: string;
       color: string;
@@ -1423,7 +1670,24 @@ export class ProductService {
       },
     );
 
-    if (Object.keys(colorImages).length > 0) {
+    // Nếu người dùng chủ động xoá toàn bộ cấu hình màu (colors: []),
+    // phải xoá màu trên TẤT CẢ variant hiện có.
+    //
+    // Dữ liệu import cũ có thể đã tạo 36 variant theo ma trận giả
+    // 6 "màu" x 6 size, trong đó các giá trị màu thực chất là size.
+    // Chỉ sửa 1 variant/size sẽ vẫn còn các variant khác mang màu 29/30/...
+    // và frontend lại tổng hợp chúng thành "Cấu hình màu".
+    //
+    // Không xoá variant ở đây để tránh mất tồn kho / vướng foreign key lịch sử.
+    // Chỉ đưa color về chuỗi rỗng; size, SKU, inventory và reference vẫn giữ nguyên.
+    if (sizeOnlyMode) {
+      await this.prisma.productVariant.updateMany({
+        where: { productId },
+        data: { color: "" },
+      });
+    }
+
+    if (Object.keys(colorImages).length > 0 && !sizeOnlyMode) {
       await this.persistColorImagesToVariants(productId, colorImages);
     }
 
