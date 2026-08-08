@@ -1234,30 +1234,41 @@ export class ProductService {
       }
     }
 
-    const colors =
-      Array.isArray(data.colors) && data.colors.length
-        ? data.colors.map((x) => String(x).trim()).filter(Boolean)
-        : Array.from(
-            new Set(
-              existing.variants
-                .map((v) => String(v.color || "").trim())
-                .filter(Boolean),
-            ),
-          );
+    const colorsWereProvided = Array.isArray(data.colors);
+    const sizesWereProvided = Array.isArray(data.sizes);
 
-    const sizes =
-      Array.isArray(data.sizes) && data.sizes.length
-        ? data.sizes.map((x) => String(x).trim()).filter(Boolean)
-        : Array.from(
-            new Set(
-              existing.variants
-                .map((v) => String(v.size || "").trim())
-                .filter(Boolean),
-            ),
-          );
+    const requestedColors = colorsWereProvided
+      ? data.colors!.map((x) => String(x).trim()).filter(Boolean)
+      : Array.from(
+          new Set(
+            existing.variants
+              .map((v) => String(v.color || "").trim())
+              .filter(Boolean),
+          ),
+        );
 
-    if (!colors.length || !sizes.length) {
-      throw new BadRequestException("Cần ít nhất 1 màu và 1 size");
+    const sizes = sizesWereProvided
+      ? data.sizes!.map((x) => String(x).trim()).filter(Boolean)
+      : Array.from(
+          new Set(
+            existing.variants
+              .map((v) => String(v.size || "").trim())
+              .filter(Boolean),
+          ),
+        );
+
+    // Cho phép sản phẩm chỉ có size, không có màu.
+    // Nếu frontend gửi colors: [] thì đây là chủ đích xoá cấu hình màu,
+    // không được fallback về màu cũ trong variant.
+    const sizeOnlyMode = colorsWereProvided && requestedColors.length === 0;
+    const colors = sizeOnlyMode ? [""] : requestedColors;
+
+    if (!sizes.length) {
+      throw new BadRequestException("Cần ít nhất 1 size");
+    }
+
+    if (!sizeOnlyMode && !colors.length) {
+      throw new BadRequestException("Cần ít nhất 1 màu hoặc chuyển sản phẩm sang chế độ chỉ có size");
     }
 
     const branchStocks = this.normalizeBranchStocks(data.branchStocks);
@@ -1293,36 +1304,43 @@ export class ProductService {
       ]),
     );
 
-    const variantsToCreate = wantedCombos.filter(
-      (combo) => !existingByCombo.has(combo.key),
-    );
+    const matchedVariantIds = new Set<string>();
 
-    const variantsToUpdate = wantedCombos
-      .map((combo) => {
-        const found = existingByCombo.get(combo.key);
-        if (!found) return null;
-        return {
-          variantId: found.id,
-          color: combo.color,
-          size: combo.size,
-          sku: combo.sku,
-        };
-      })
-      .filter(Boolean) as Array<{
+    const variantsToCreate: WantedCombo[] = [];
+    const variantsToUpdate: Array<{
       variantId: string;
       color: string;
       size: string;
       sku: string;
-    }>;
+    }> = [];
 
-    const wantedKeys = new Set(wantedCombos.map((combo) => combo.key));
+    for (const combo of wantedCombos) {
+      let found = existingByCombo.get(combo.key);
 
-    const variantsToDelete = existing.variants.filter(
-      (variant) =>
-        !wantedKeys.has(
-          `${String(variant.color || "").trim()}__${String(variant.size || "").trim()}`,
-        ),
-    );
+      // Dữ liệu import cũ có thể bị color = size (29/29, 30/30...).
+      // Khi người dùng xoá toàn bộ màu, match theo size để giữ nguyên variantId
+      // và tồn kho, rồi chỉ sửa color về rỗng.
+      if (!found && sizeOnlyMode) {
+        found = existing.variants.find(
+          (variant) =>
+            !matchedVariantIds.has(variant.id) &&
+            String(variant.size || "").trim() === combo.size,
+        );
+      }
+
+      if (!found) {
+        variantsToCreate.push(combo);
+        continue;
+      }
+
+      matchedVariantIds.add(found.id);
+      variantsToUpdate.push({
+        variantId: found.id,
+        color: combo.color,
+        size: combo.size,
+        sku: combo.sku,
+      });
+    }
 
     const result = await this.prisma.$transaction(
       async (tx) => {
@@ -1556,7 +1574,9 @@ export class ProductService {
     }
 
     return {
-      color: this.normalizeVariantOption(color, "DEFAULT"),
+      // Không tự gán DEFAULT hay lấy size làm màu.
+      // Sản phẩm size-only phải được lưu color = "".
+      color: String(color || "").trim(),
       size: this.normalizeVariantOption(size, "DEFAULT"),
       variantName,
       hasExplicitColor: Boolean(String(explicitColor || "").trim()),
@@ -2085,8 +2105,17 @@ export class ProductService {
             fixedSkuVariants += 1;
           }
 
-          if (variantSeed.hasExplicitColor && variantSeed.color.trim())
+          if (variantSeed.hasExplicitColor && variantSeed.color.trim()) {
             variantUpdateData.color = variantSeed.color.trim();
+          } else if (
+            variantSeed.hasExplicitSize &&
+            !variantSeed.color.trim()
+          ) {
+            // File size-only: có size thật nhưng không xác định được màu từ
+            // cột màu / variant name / SKU => xoá màu cũ bị import sai.
+            variantUpdateData.color = "";
+          }
+
           if (variantSeed.hasExplicitSize && variantSeed.size.trim())
             variantUpdateData.size = variantSeed.size.trim();
           if (hasRetailPrice) {
