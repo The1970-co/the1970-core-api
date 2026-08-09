@@ -1903,7 +1903,11 @@ export class OrderService implements OnModuleInit {
           paymentStatus = PaymentStatus.PAID;
         }
 
-        const shouldCompleteCounterSale = isInstantCounterSale;
+        // POS / nhận tại cửa hàng chỉ tự hoàn thành khi đây là giao dịch thực sự.
+        // Nếu người dùng bấm "Tạo nháp" thì phải giữ NEW + UNFULFILLED
+        // và tuyệt đối chưa trừ kho.
+        const shouldCompleteCounterSale =
+          isInstantCounterSale && mode !== "draft";
 
         const initialPaymentStatus = paymentStatus;
 
@@ -2604,8 +2608,6 @@ export class OrderService implements OnModuleInit {
           productName: true,
           color: true,
           size: true,
-          unitPrice: true,
-          lineTotal: true,
         },
       },
       shipment: {
