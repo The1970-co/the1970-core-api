@@ -2604,6 +2604,8 @@ export class OrderService implements OnModuleInit {
           productName: true,
           color: true,
           size: true,
+          unitPrice: true,
+          lineTotal: true,
         },
       },
       shipment: {
