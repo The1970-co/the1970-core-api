@@ -63,12 +63,8 @@ export class OmniInboxController {
     "omni_inbox.view",
     PERMISSIONS.MENU_OMNI_MESSAGES,
   )
-  listConversations(
-    @Query() query: ListConversationsDto,
-    @Query("tag") tag?: string,
-    @Query("unread") unread?: string,
-  ) {
-    return this.service.listConversations({ ...query, tag, unread });
+  listConversations(@Query() query: ListConversationsDto) {
+    return this.service.listConversations(query);
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
@@ -139,16 +135,6 @@ export class OmniInboxController {
   )
   markRead(@Param("id") id: string) {
     return this.service.markRead(id);
-  }
-
-  @UseGuards(JwtGuard, PermissionGuard)
-  @Patch("conversations/:id/unread")
-  @RequireAnyPermissions(
-    "omni_inbox.view",
-    PERMISSIONS.MENU_OMNI_MESSAGES,
-  )
-  markUnread(@Param("id") id: string) {
-    return this.service.markUnread(id);
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
