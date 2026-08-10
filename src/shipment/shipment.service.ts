@@ -5508,6 +5508,15 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     const fromName = ahamoveSender.fromName;
     const fromPhone = ahamoveSender.fromPhone;
     const fromAddress = ahamoveSender.fromAddress;
+    const pickupInfo = {
+      id: ahamoveSender.pickupLocationId || null,
+      branchId: body?.branchId || body?.warehouseId || body?.fromWarehouseId || body?.sourceWarehouseId || null,
+      name: fromName || "",
+      phone: fromPhone || "",
+      address: fromAddress || "",
+    };
+    // Với AhaMove, kho hoàn/trả mặc định chính là kho lấy hàng đã map cho chi nhánh.
+    const returnInfo = { ...pickupInfo };
 
     if (!fromPhone || !fromAddress) {
       throw new BadRequestException("Thiếu cấu hình AhaMove đầu gửi");
@@ -5628,6 +5637,8 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
             _quoteKey: `ahamove-${rawServiceId}`,
             _serviceName: rawServiceId,
             _ahamoveServiceId: rawServiceId,
+            _pickup: pickupInfo,
+            _return: returnInfo,
           });
         }
       } catch (err) {
@@ -5653,6 +5664,8 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
           _disabled: true,
           _disabledReason: message || "AhaMove chưa trả về gói cước phù hợp.",
           _applyFeeToInput: false,
+          _pickup: pickupInfo,
+          _return: returnInfo,
         });
       }
     }
@@ -5770,6 +5783,20 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         item_value: itemValue,
         requests: this.buildAhamoveRequestPayloads(serviceId, dto),
         ahamoveSpecialRequests: this.normalizeAhamoveSpecialRequests(dto),
+        pickup: {
+          id: ahamoveSender.pickupLocationId || null,
+          branchId: dto?.branchId || order.branchId || null,
+          name: fromName || "",
+          phone: fromPhone || "",
+          address: fromAddress || "",
+        },
+        returnWarehouse: {
+          id: ahamoveSender.pickupLocationId || null,
+          branchId: dto?.branchId || order.branchId || null,
+          name: fromName || "",
+          phone: fromPhone || "",
+          address: fromAddress || "",
+        },
       };
 
       const shipment = await tx.shipment.upsert({

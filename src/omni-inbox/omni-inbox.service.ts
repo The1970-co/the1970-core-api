@@ -1746,17 +1746,55 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     return { pageId, postId, commentId };
   }
 
-  private async getFacebookCommentSource(providerThreadId?: string | null) {
-    const parsed = this.parseFacebookCommentThreadId(providerThreadId);
-    if (!parsed) return null;
+  private async resolveFacebookCommentPostId(
+    commentId: string,
+    fallbackPostId?: string | null,
+  ) {
+    const fallback = safeText(fallbackPostId);
 
-    const cached = this.facebookPostSourceCache.get(parsed.postId);
-    if (cached && cached.expiresAt > Date.now()) {
-      return { ...cached.data, commentId: parsed.commentId };
+    // Webhook đôi khi trả post_id không phải object bài viết có thể GET trực tiếp
+    // (đặc biệt photo/dark-post). Comment object lại giữ quan hệ parent chuẩn hơn.
+    // Đi ngược tối đa 2 cấp: reply -> comment gốc -> post.
+    let currentId = safeText(commentId);
+    for (let depth = 0; depth < 2 && currentId; depth += 1) {
+      try {
+        const node: any = await this.metaFetch(currentId, {
+          fields: "id,parent{id}",
+        });
+        const parentId = safeText(node?.parent?.id);
+        if (!parentId) break;
+
+        // Page post id thường có dạng PAGEID_POSTID. Nếu gặp thì dùng ngay.
+        if (parentId.includes("_")) return parentId;
+        currentId = parentId;
+      } catch (error: any) {
+        this.logMetaDebug(
+          `[META_COMMENT_POST_RESOLVE_SKIP] comment=${commentId} node=${currentId} | ${error?.message || error}`,
+        );
+        break;
+      }
     }
 
-    try {
-      const post: any = await this.metaFetch(parsed.postId, {
+    return fallback && fallback !== "post" ? fallback : "";
+  }
+
+  private async getFacebookCommentSource(providerThreadId?: string | null) {
+    const raw = safeText(providerThreadId);
+    if (!raw.startsWith("FACEBOOK_COMMENT:")) return null;
+
+    const parts = raw.split(":");
+    const pageId = safeText(parts[1]);
+    const storedPostId = safeText(parts[2]);
+    const commentId = safeText(parts.slice(3).join(":"));
+    if (!pageId || !commentId) return null;
+
+    const buildSource = async (postId: string) => {
+      const cached = this.facebookPostSourceCache.get(postId);
+      if (cached && cached.expiresAt > Date.now()) {
+        return { ...cached.data, commentId };
+      }
+
+      const post: any = await this.metaFetch(postId, {
         fields: [
           "id",
           "message",
@@ -1786,8 +1824,8 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       );
 
       const data = {
-        postId: parsed.postId,
-        pageId: parsed.pageId,
+        postId,
+        pageId,
         pageName: safeText(post?.from?.name) || "The 1970",
         message: safeText(post?.message),
         permalinkUrl: safeText(post?.permalink_url),
@@ -1797,28 +1835,52 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
         createdTime: safeText(post?.created_time) || null,
       };
 
-      this.facebookPostSourceCache.set(parsed.postId, {
+      this.facebookPostSourceCache.set(postId, {
         expiresAt: Date.now() + 10 * 60_000,
         data,
       });
-      return { ...data, commentId: parsed.commentId };
-    } catch (error: any) {
-      this.logger.warn(
-        `[META_COMMENT_SOURCE_SKIP] post=${parsed.postId} | ${error?.message || error}`,
-      );
-      return {
-        postId: parsed.postId,
-        pageId: parsed.pageId,
-        commentId: parsed.commentId,
-        pageName: "The 1970",
-        message: "",
-        permalinkUrl: "",
-        imageUrl: null,
-        videoUrl: null,
-        mediaType: null,
-        createdTime: null,
-      };
+      return { ...data, commentId };
+    };
+
+    // 1) Giữ hành vi cũ: ưu tiên post id đã lưu trong providerThreadId.
+    if (storedPostId && storedPostId !== "post") {
+      try {
+        return await buildSource(storedPostId);
+      } catch (error: any) {
+        this.logMetaDebug(
+          `[META_COMMENT_SOURCE_DIRECT_SKIP] post=${storedPostId} comment=${commentId} | ${error?.message || error}`,
+        );
+      }
     }
+
+    // 2) Nếu post id cũ sai/thiếu, tự lần parent từ comment để tìm post thật.
+    const resolvedPostId = await this.resolveFacebookCommentPostId(
+      commentId,
+      storedPostId,
+    );
+    if (resolvedPostId && resolvedPostId !== storedPostId) {
+      try {
+        return await buildSource(resolvedPostId);
+      } catch (error: any) {
+        this.logMetaDebug(
+          `[META_COMMENT_SOURCE_RESOLVED_SKIP] post=${resolvedPostId} comment=${commentId} | ${error?.message || error}`,
+        );
+      }
+    }
+
+    // Không làm mất card nguồn nếu Meta tạm thời không cho load chi tiết.
+    return {
+      postId: resolvedPostId || (storedPostId !== "post" ? storedPostId : ""),
+      pageId,
+      commentId,
+      pageName: "The 1970",
+      message: "",
+      permalinkUrl: "",
+      imageUrl: null,
+      videoUrl: null,
+      mediaType: null,
+      createdTime: null,
+    };
   }
 
   private async syncFacebookCommentReplies(conversation: any) {
@@ -2874,7 +2936,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       safeText(value?.page_id) ||
       safeText(entry?.id) ||
       this.configuredPageId;
-    const postId = safeText(value?.post_id);
+    const rawPostId = safeText(value?.post_id);
     const webhookParentId =
       safeText(value?.parent_id) ||
       safeText(value?.parent?.id) ||
@@ -2883,6 +2945,11 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       safeText(value?.comment_id) ||
       safeText(value?.id) ||
       safeText(value?.comment?.id);
+    // Với comment gốc, một số payload chỉ có parent_id là post id.
+    // Giữ fallback cũ để không làm mất Nguồn bình luận. Với reply của Page,
+    // parent_id vẫn được xử lý riêng ở webhookParentId phía dưới.
+    const postId = rawPostId ||
+      (webhookParentId && webhookParentId !== commentId ? webhookParentId : "");
     const senderId =
       safeText(value?.from?.id) ||
       safeText(value?.sender_id) ||
