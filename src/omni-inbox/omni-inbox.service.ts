@@ -1551,7 +1551,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     return items;
   }
 
-  async listConversations(query: ListConversationsDto, staff?: any) {
+  async listConversations(query: ListConversationsDto & { tag?: string; unread?: string | boolean }, staff?: any) {
     const page = Number(query.page || 1);
     const limit = Math.min(Math.max(Number(query.limit || 30), 10), 100);
     const skip = (page - 1) * limit;
@@ -1583,6 +1583,16 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     if (query.channel && query.channel !== "ALL") where.channel = query.channel;
     if (query.assigneeId && access.unrestricted) where.assigneeId = query.assigneeId;
     if (query.branchId) where.branchId = query.branchId;
+
+    const tag = safeText((query as any).tag);
+    if (tag) {
+      where.tags = { some: { tag: { equals: tag, mode: "insensitive" } } };
+    }
+
+    const unreadRaw = safeText((query as any).unread).toLowerCase();
+    if (["1", "true", "yes"].includes(unreadRaw)) {
+      where.unreadCount = { gt: 0 };
+    }
 
     const q = safeText(query.q);
     if (q) {
@@ -2370,6 +2380,23 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     const item = await this.prisma.omniConversation.update({
       where: { id },
       data: { unreadCount: 0 },
+      include: { customer: true, page: true, tags: true },
+    });
+
+    this.realtime.emit({ type: "conversation.updated", payload: item });
+    return item;
+  }
+
+  async markUnread(id: string) {
+    const current = await this.prisma.omniConversation.findUnique({
+      where: { id },
+      select: { unreadCount: true },
+    });
+    if (!current) throw new NotFoundException("Không tìm thấy hội thoại.");
+
+    const item = await this.prisma.omniConversation.update({
+      where: { id },
+      data: { unreadCount: Math.max(1, Number(current.unreadCount || 0)) },
       include: { customer: true, page: true, tags: true },
     });
 
