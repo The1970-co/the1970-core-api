@@ -4476,20 +4476,22 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     const mappedPickup = this.getAhamovePickupFromSettings(settings, branchId);
 
     return {
+      // Khi có mapping theo chi nhánh trong DB, luôn lấy kho đó làm nguồn chuẩn.
+      // Chỉ dùng dữ liệu truyền thẳng / env khi chi nhánh chưa được map.
       fromName:
-        input?.fromName ||
         mappedPickup?.name ||
         mappedPickup?.label ||
+        input?.fromName ||
         process.env.AHAMOVE_FROM_NAME ||
         this.returnName,
       fromPhone:
-        input?.fromPhone ||
         mappedPickup?.phone ||
+        input?.fromPhone ||
         process.env.AHAMOVE_FROM_PHONE ||
         this.returnPhone,
       fromAddress:
-        input?.fromAddress ||
         mappedPickup?.address ||
+        input?.fromAddress ||
         process.env.AHAMOVE_FROM_ADDRESS ||
         this.returnAddress,
       paymentMethod: this.normalizeAhamovePaymentMethod(

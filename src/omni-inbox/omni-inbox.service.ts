@@ -1557,6 +1557,22 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     const skip = (page - 1) * limit;
 
     const where: any = {};
+    const configuredPageId = this.configuredPageId;
+    if (configuredPageId) {
+      // Các bản cũ từng hiểu nhầm reply của chính Page là một "khách The 1970"
+      // và tạo conversation riêng. Ẩn các conversation rác này khỏi danh sách;
+      // khi mở thread khách thật, syncFacebookCommentReplies() sẽ chuyển message
+      // lịch sử về đúng thread.
+      where.NOT = {
+        providerThreadId: {
+          startsWith: `FACEBOOK_COMMENT:${configuredPageId}:`,
+        },
+        customer: {
+          is: { providerUserId: configuredPageId },
+        },
+      };
+    }
+
     const access: any = await this.getAssignmentAccessRule(staff);
     if (!access.unrestricted) {
       if (access.onlyAssigned) where.assigneeId = access.staffId || "__NO_STAFF__";
@@ -1805,6 +1821,134 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private async syncFacebookCommentReplies(conversation: any) {
+    const parsed = this.parseFacebookCommentThreadId(
+      conversation?.providerThreadId,
+    );
+    if (!parsed) return null;
+
+    let response: any = null;
+    try {
+      response = await this.metaFetch(`${parsed.commentId}/comments`, {
+        fields: "id,message,from{id,name},created_time",
+        limit: "100",
+      });
+    } catch (error: any) {
+      this.logMetaDebug(
+        `[META_COMMENT_THREAD_SYNC_SKIP] conversation=${conversation?.id || "-"} comment=${parsed.commentId} | ${error?.message || error}`,
+      );
+      return null;
+    }
+
+    const replies = Array.isArray(response?.data) ? response.data : [];
+    const pageReplies = replies.filter((reply: any) => {
+      const senderId = safeText(reply?.from?.id);
+      return (
+        senderId === parsed.pageId ||
+        (Boolean(this.configuredPageId) &&
+          senderId === this.configuredPageId)
+      );
+    });
+
+    if (!pageReplies.length) return null;
+
+    let newestReplyAt: Date | null = null;
+    let newestReplyText = "";
+
+    for (const reply of pageReplies) {
+      const replyId = safeText(reply?.id);
+      if (!replyId) continue;
+
+      const replyText = safeText(reply?.message) || "[Bình luận]";
+      const parsedSentAt = reply?.created_time
+        ? new Date(reply.created_time)
+        : new Date();
+      const replySentAt = Number.isNaN(parsedSentAt.getTime())
+        ? new Date()
+        : parsedSentAt;
+
+      const existing = await this.prisma.omniMessage.findUnique({
+        where: { providerMessageId: replyId },
+      });
+
+      if (existing) {
+        // Nếu reply này từng bị ingest sai thành conversation "The 1970",
+        // chuyển thẳng message về thread khách và sửa direction thành OUT.
+        if (
+          existing.conversationId !== conversation.id ||
+          existing.direction !== "OUT"
+        ) {
+          await this.prisma.omniMessage.update({
+            where: { id: existing.id },
+            data: {
+              conversationId: conversation.id,
+              direction: "OUT",
+              text: replyText,
+              senderId: parsed.pageId,
+              senderName:
+                safeText(reply?.from?.name) ||
+                safeText(conversation?.page?.pageName) ||
+                "The 1970",
+              sentAt: replySentAt,
+            },
+          });
+        }
+      } else {
+        await this.prisma.omniMessage.create({
+          data: {
+            conversationId: conversation.id,
+            providerMessageId: replyId,
+            direction: "OUT",
+            type: "TEXT",
+            text: replyText,
+            attachmentUrl: null,
+            senderId: parsed.pageId,
+            senderName:
+              safeText(reply?.from?.name) ||
+              safeText(conversation?.page?.pageName) ||
+              "The 1970",
+            sentAt: replySentAt,
+          },
+        });
+      }
+
+      if (!newestReplyAt || replySentAt.getTime() > newestReplyAt.getTime()) {
+        newestReplyAt = replySentAt;
+        newestReplyText = replyText;
+      }
+    }
+
+    if (!newestReplyAt) return null;
+
+    const currentLastAt = conversation?.lastMessageAt
+      ? new Date(conversation.lastMessageAt)
+      : null;
+    const replyIsNewest =
+      !currentLastAt ||
+      Number.isNaN(currentLastAt.getTime()) ||
+      newestReplyAt.getTime() >= currentLastAt.getTime();
+
+    const updated = await this.prisma.omniConversation.update({
+      where: { id: conversation.id },
+      data: {
+        ...(replyIsNewest
+          ? {
+              lastMessageText: `[Trả lời bình luận] ${newestReplyText}`,
+              lastMessageAt: newestReplyAt,
+            }
+          : {}),
+        status:
+          conversation.status === "OPEN"
+            ? "PROCESSING"
+            : conversation.status,
+      },
+      include: { customer: true, page: true, tags: true },
+    });
+
+    this.realtime.emit({ type: "conversation.updated", payload: updated });
+    return updated;
+  }
+
   async getConversation(id: string, staff?: any) {
     await this.assertCanAccessConversation(id, staff);
     const item = await this.prisma.omniConversation.findUnique({
@@ -1837,15 +1981,38 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    (item as any).messages = Array.isArray((item as any).messages)
-      ? [...(item as any).messages].reverse()
-      : [];
-
     if (safeText((item as any).providerThreadId).startsWith("FACEBOOK_COMMENT:")) {
+      try {
+        const synced = await this.syncFacebookCommentReplies(item as any);
+        if (synced) {
+          Object.assign(item as any, synced, {
+            messages: (item as any).messages,
+            notes: (item as any).notes,
+            orders: (item as any).orders,
+          });
+        }
+
+        // Sync có thể vừa tạo hoặc chuyển các reply lịch sử từ Pancake/Facebook
+        // về đúng conversation, nên lấy lại message trước khi trả frontend.
+        (item as any).messages = await this.prisma.omniMessage.findMany({
+          where: { conversationId: id },
+          orderBy: { sentAt: "desc" },
+          take: 200,
+        });
+      } catch (error: any) {
+        this.logger.warn(
+          `[META_COMMENT_THREAD_SYNC_FAILED] conversation=${id} | ${error?.message || error}`,
+        );
+      }
+
       (item as any).commentSource = await this.getFacebookCommentSource(
         (item as any).providerThreadId,
       );
     }
+
+    (item as any).messages = Array.isArray((item as any).messages)
+      ? [...(item as any).messages].reverse()
+      : [];
 
     return item;
   }
@@ -2519,6 +2686,176 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     return result;
   }
 
+  private async findFacebookCommentConversation(
+    pageId: string,
+    commentId: string,
+  ) {
+    const normalizedPageId = safeText(pageId);
+    const normalizedCommentId = safeText(commentId);
+    if (!normalizedPageId || !normalizedCommentId) return null;
+
+    const message = await this.prisma.omniMessage.findUnique({
+      where: { providerMessageId: normalizedCommentId },
+      include: {
+        conversation: {
+          include: { customer: true, page: true, tags: true },
+        },
+      },
+    });
+    if (
+      message?.conversation &&
+      safeText(message.conversation.providerThreadId).startsWith(
+        `FACEBOOK_COMMENT:${normalizedPageId}:`,
+      )
+    ) {
+      return message.conversation;
+    }
+
+    return this.prisma.omniConversation.findFirst({
+      where: {
+        providerThreadId: {
+          startsWith: `FACEBOOK_COMMENT:${normalizedPageId}:`,
+          endsWith: `:${normalizedCommentId}`,
+        },
+      },
+      include: { customer: true, page: true, tags: true },
+    });
+  }
+
+  private async resolveFacebookReplyParentId(
+    replyCommentId: string,
+    webhookParentId: string,
+    postId: string,
+  ) {
+    const normalizedParentId = safeText(webhookParentId);
+    const normalizedPostId = safeText(postId);
+
+    if (
+      normalizedParentId &&
+      (!normalizedPostId || normalizedParentId !== normalizedPostId)
+    ) {
+      return normalizedParentId;
+    }
+
+    try {
+      const detail: any = await this.metaFetch(replyCommentId, {
+        fields: "id,parent{id}",
+      });
+      return safeText(detail?.parent?.id) || normalizedParentId;
+    } catch (error: any) {
+      this.logMetaDebug(
+        `[META_COMMENT_PARENT_LOOKUP_SKIP] comment=${replyCommentId} | ${error?.message || error}`,
+      );
+      return normalizedParentId;
+    }
+  }
+
+  private async ensureFacebookParentCommentConversation(params: {
+    page: any;
+    pageId: string;
+    postId: string;
+    parentCommentId: string;
+    fallbackSentAt: Date;
+  }) {
+    const existing = await this.findFacebookCommentConversation(
+      params.pageId,
+      params.parentCommentId,
+    );
+    if (existing) return existing;
+
+    let parent: any = null;
+    try {
+      parent = await this.metaFetch(params.parentCommentId, {
+        fields: "id,message,from{id,name},created_time",
+      });
+    } catch (error: any) {
+      this.logMetaDebug(
+        `[META_COMMENT_PARENT_FETCH_SKIP] comment=${params.parentCommentId} | ${error?.message || error}`,
+      );
+      return null;
+    }
+
+    const parentSenderId = safeText(parent?.from?.id);
+    if (!parentSenderId || parentSenderId === params.pageId) return null;
+
+    const parentText = safeText(parent?.message) || "[Bình luận]";
+    const parentNameFromWebhook = safeText(parent?.from?.name);
+    const profile = await this.getFacebookCommentProfile(
+      parentSenderId,
+      parentNameFromWebhook,
+    );
+
+    const existingCustomer = await this.prisma.omniCustomer.findUnique({
+      where: { providerUserId: parentSenderId },
+    });
+    const nextCustomerName = profile.isFallback
+      ? existingCustomer?.name || profile.name
+      : profile.name;
+    const nextAvatarUrl =
+      profile.avatarUrl || existingCustomer?.avatarUrl || null;
+
+    const customer = await this.prisma.omniCustomer.upsert({
+      where: { providerUserId: parentSenderId },
+      update: {
+        name: nextCustomerName,
+        avatarUrl: nextAvatarUrl,
+      },
+      create: {
+        providerUserId: parentSenderId,
+        name: nextCustomerName,
+        avatarUrl: nextAvatarUrl,
+      },
+    });
+
+    const parentSentAt = parent?.created_time
+      ? new Date(parent.created_time)
+      : params.fallbackSentAt;
+    const validParentSentAt = Number.isNaN(parentSentAt.getTime())
+      ? params.fallbackSentAt
+      : parentSentAt;
+
+    const providerThreadId = `FACEBOOK_COMMENT:${params.pageId}:${params.postId || "post"}:${params.parentCommentId}`;
+    const conversation = await this.prisma.omniConversation.upsert({
+      where: { providerThreadId },
+      update: {
+        pageId: params.page.id,
+        customerId: customer.id,
+      },
+      create: {
+        providerThreadId,
+        channel: "FACEBOOK",
+        pageId: params.page.id,
+        customerId: customer.id,
+        lastMessageText: `[Bình luận] ${parentText}`,
+        lastMessageAt: validParentSentAt,
+        unreadCount: 0,
+        status: "PROCESSING",
+      },
+      include: { customer: true, page: true, tags: true },
+    });
+
+    const existedParentMessage = await this.prisma.omniMessage.findUnique({
+      where: { providerMessageId: params.parentCommentId },
+    });
+    if (!existedParentMessage) {
+      await this.prisma.omniMessage.create({
+        data: {
+          conversationId: conversation.id,
+          providerMessageId: params.parentCommentId,
+          direction: "IN",
+          type: "TEXT",
+          text: parentText,
+          attachmentUrl: null,
+          senderId: parentSenderId,
+          senderName: customer.name,
+          sentAt: validParentSentAt,
+        },
+      });
+    }
+
+    return conversation;
+  }
+
   async ingestMetaFeedChange(change: MetaFeedChange, entry?: any) {
     const field = safeText(change?.field);
     const value = change?.value || {};
@@ -2526,7 +2863,8 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     const verb = safeText(value?.verb);
 
     if (field !== "feed") return { skipped: true, reason: "not_feed_change" };
-    if (item !== "comment") return { skipped: true, reason: `not_comment_${item || "unknown"}` };
+    if (item !== "comment")
+      return { skipped: true, reason: `not_comment_${item || "unknown"}` };
     if (verb && !["add", "edited"].includes(verb)) {
       return { skipped: true, reason: `comment_${verb}` };
     }
@@ -2536,7 +2874,11 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       safeText(value?.page_id) ||
       safeText(entry?.id) ||
       this.configuredPageId;
-    const postId = safeText(value?.post_id) || safeText(value?.parent_id);
+    const postId = safeText(value?.post_id);
+    const webhookParentId =
+      safeText(value?.parent_id) ||
+      safeText(value?.parent?.id) ||
+      safeText(value?.comment?.parent?.id);
     const commentId =
       safeText(value?.comment_id) ||
       safeText(value?.id) ||
@@ -2553,8 +2895,12 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       safeText(value?.photo_url) ||
       safeText(value?.attachment?.media?.image?.src) ||
       safeText(value?.attachment?.url);
-    const createdTime = Number(value?.created_time || value?.timestamp || Date.now());
-    const sentAt = new Date(createdTime > 10_000_000_000 ? createdTime : createdTime * 1000);
+    const createdTime = Number(
+      value?.created_time || value?.timestamp || Date.now(),
+    );
+    const sentAt = new Date(
+      createdTime > 10_000_000_000 ? createdTime : createdTime * 1000,
+    );
 
     if (!pageId || !senderId || !commentId) {
       this.logMetaDebug(
@@ -2567,35 +2913,114 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       return { skipped: true, reason: "empty_comment" };
     }
 
+    // Meta dùng comment id làm object id. Dedupe ở đây xử lý cả reply gửi từ Omni:
+    // sendMessage() đã lưu providerMessageId trước khi webhook feed quay về.
     const existed = await this.prisma.omniMessage.findUnique({
       where: { providerMessageId: commentId },
     });
     if (existed) return { duplicated: true };
-
-    const profile = await this.getFacebookCommentProfile(
-      senderId,
-      senderNameFromWebhook,
-    );
 
     const page = await this.prisma.omniInboxPage.upsert({
       where: { providerPageId: pageId },
       update: {
         lastWebhookAt: new Date(),
         pageName:
-          pageId === this.configuredPageId
-            ? "The 1970"
-            : `Page ${pageId}`,
+          pageId === this.configuredPageId ? "The 1970" : `Page ${pageId}`,
       },
       create: {
         providerPageId: pageId,
         pageName:
-          pageId === this.configuredPageId
-            ? "The 1970"
-            : `Page ${pageId}`,
+          pageId === this.configuredPageId ? "The 1970" : `Page ${pageId}`,
         channel: "FACEBOOK",
         lastWebhookAt: new Date(),
       },
     });
+
+    const isPageAuthored =
+      senderId === pageId ||
+      (Boolean(this.configuredPageId) && senderId === this.configuredPageId);
+
+    if (isPageAuthored) {
+      // Reply được gửi từ Facebook/Meta Business Suite/Pancake phải quay về
+      // đúng thread comment của khách và được lưu là OUT, không tạo một
+      // "khách hàng The 1970" / conversation giả.
+      const parentCommentId = await this.resolveFacebookReplyParentId(
+        commentId,
+        webhookParentId,
+        postId,
+      );
+
+      if (!parentCommentId || parentCommentId === postId) {
+        this.logger.warn(
+          `[META_FEED_PAGE_COMMENT_SKIP] Không xác định được parent comment. page=${pageId} post=${postId || "-"} comment=${commentId}`,
+        );
+        return { skipped: true, reason: "page_comment_without_customer_parent" };
+      }
+
+      let conversation = await this.findFacebookCommentConversation(
+        pageId,
+        parentCommentId,
+      );
+
+      if (!conversation) {
+        conversation = await this.ensureFacebookParentCommentConversation({
+          page,
+          pageId,
+          postId,
+          parentCommentId,
+          fallbackSentAt: sentAt,
+        });
+      }
+
+      if (!conversation) {
+        this.logger.warn(
+          `[META_FEED_PAGE_REPLY_ORPHAN] page=${pageId} post=${postId || "-"} parent=${parentCommentId} comment=${commentId}`,
+        );
+        return { skipped: true, reason: "page_reply_parent_conversation_missing" };
+      }
+
+      const messageText = text || "[Bình luận có tệp đính kèm]";
+      const message = await this.prisma.omniMessage.create({
+        data: {
+          conversationId: conversation.id,
+          providerMessageId: commentId,
+          direction: "OUT",
+          type: attachmentUrl ? "IMAGE" : "TEXT",
+          text: messageText,
+          attachmentUrl: attachmentUrl || null,
+          senderId: pageId,
+          senderName: page.pageName || "The 1970",
+          sentAt,
+        },
+      });
+
+      const updated = await this.prisma.omniConversation.update({
+        where: { id: conversation.id },
+        data: {
+          lastMessageText: `[Trả lời bình luận] ${messageText}`,
+          lastMessageAt: sentAt,
+          status:
+            conversation.status === "OPEN"
+              ? "PROCESSING"
+              : conversation.status,
+        },
+        include: { customer: true, page: true, tags: true },
+      });
+
+      this.logger.log(
+        `[META_FEED_COMMENT_OUT] page=${pageId} post=${postId || "-"} parent=${parentCommentId} comment=${commentId} text="${messageText.slice(0, 80)}"`,
+      );
+      this.realtime.emit({ type: "message.created", payload: message });
+      this.realtime.emit({ type: "conversation.updated", payload: updated });
+
+      return { ok: true, direction: "OUT", conversationId: conversation.id };
+    }
+
+    // Comment của khách: tạo/đưa vào thread riêng của chính comment gốc.
+    const profile = await this.getFacebookCommentProfile(
+      senderId,
+      senderNameFromWebhook,
+    );
 
     const existingCustomer = await this.prisma.omniCustomer.findUnique({
       where: { providerUserId: senderId },
@@ -2662,14 +3087,14 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     });
 
     this.logger.log(
-      `[META_FEED_COMMENT] page=${pageId} post=${postId || "-"} comment=${commentId} sender=${last6(senderId)} customer="${customer.name}" text="${messageText.slice(0, 80)}"`,
+      `[META_FEED_COMMENT_IN] page=${pageId} post=${postId || "-"} comment=${commentId} sender=${last6(senderId)} customer="${customer.name}" text="${messageText.slice(0, 80)}"`,
     );
 
     this.realtime.emit({ type: "message.created", payload: message });
     this.realtime.emit({ type: "conversation.updated", payload: conversation });
     await this.autoAssignConversation(conversation.id, "INCOMING_MESSAGE");
 
-    return { ok: true };
+    return { ok: true, direction: "IN" };
   }
 
   async ingestMetaWebhookEvent(event: any) {
