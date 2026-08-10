@@ -179,38 +179,6 @@ export class OmniInboxController {
 
 
   @UseGuards(JwtGuard, PermissionGuard)
-  @Get("tag-templates")
-  @RequireAnyPermissions("omni_inbox.tags.manage", "omni_inbox.settings")
-  listTagTemplates(@Query("includeInactive") includeInactive?: string) {
-    return this.service.listTagTemplates(
-      ["1", "true", "yes"].includes(
-        String(includeInactive || "").toLowerCase(),
-      ),
-    );
-  }
-
-  @UseGuards(JwtGuard, PermissionGuard)
-  @Post("tag-templates")
-  @RequireAnyPermissions("omni_inbox.tags.manage", "omni_inbox.settings")
-  createTagTemplate(@Body() dto: any, @Request() req: any) {
-    return this.service.createTagTemplate(dto, req.user);
-  }
-
-  @UseGuards(JwtGuard, PermissionGuard)
-  @Patch("tag-templates/:id")
-  @RequireAnyPermissions("omni_inbox.tags.manage", "omni_inbox.settings")
-  updateTagTemplate(@Param("id") id: string, @Body() dto: any) {
-    return this.service.updateTagTemplate(id, dto);
-  }
-
-  @UseGuards(JwtGuard, PermissionGuard)
-  @Delete("tag-templates/:id")
-  @RequireAnyPermissions("omni_inbox.tags.manage", "omni_inbox.settings")
-  deleteTagTemplate(@Param("id") id: string) {
-    return this.service.deleteTagTemplate(id);
-  }
-
-  @UseGuards(JwtGuard, PermissionGuard)
   @Get("note-templates")
   @RequireAnyPermissions("omni_inbox.notes.manage", "omni_inbox.settings")
   listNoteTemplates(@Query("includeInactive") includeInactive?: string) {
