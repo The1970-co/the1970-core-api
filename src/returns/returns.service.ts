@@ -539,6 +539,11 @@ export class ReturnsService {
             code: this.voucherCode("OUT"),
             direction: "OUT",
             voucherType: "RETURN_REFUND",
+            status: "CONFIRMED",
+            confirmedAt: new Date(),
+            confirmedById: user?.id || null,
+            confirmedByName:
+              user?.name || user?.code || user?.username || null,
             amount: new Prisma.Decimal(refundAmount),
             paymentSourceId: body.refundPaymentSourceId,
             branchId: receiveBranchId,
@@ -559,6 +564,11 @@ export class ReturnsService {
             code: this.voucherCode("IN"),
             direction: "IN",
             voucherType: "RETURN_EXTRA_CHARGE",
+            status: "CONFIRMED",
+            confirmedAt: new Date(),
+            confirmedById: user?.id || null,
+            confirmedByName:
+              user?.name || user?.code || user?.username || null,
             amount: new Prisma.Decimal(extraChargeAmount),
             paymentSourceId: body.extraChargePaymentSourceId,
             branchId: receiveBranchId,
