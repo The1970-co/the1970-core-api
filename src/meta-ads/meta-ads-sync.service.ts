@@ -210,6 +210,127 @@ export class MetaAdsSyncService {
     return json;
   }
 
+  private async graphPost<T>(path: string, params: Record<string, string>) {
+    if (!this.accessToken) {
+      throw new Error('META_ACCESS_TOKEN is missing');
+    }
+
+    const url = new URL(`https://graph.facebook.com/${this.version}${path}`);
+    const body = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== '') body.set(key, value);
+    });
+    body.set('access_token', this.accessToken);
+
+    const res = await fetch(url.toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+    const json = (await res.json()) as T & { error?: any };
+
+    if (!res.ok || (json as any).error) {
+      this.logger.error(`[MetaAdsSync] POST API error: ${JSON.stringify((json as any).error || json)}`);
+      throw new Error((json as any).error?.message || 'Meta Ads API write error');
+    }
+
+    return json;
+  }
+
+  async setAdStatus(metaAdId: string, status: 'PAUSED' | 'ACTIVE') {
+    const adId = String(metaAdId || '').trim();
+    if (!adId) throw new Error('Thiếu metaAdId');
+    if (status !== 'PAUSED' && status !== 'ACTIVE') throw new Error('Meta ad status không hợp lệ');
+
+    const result = await this.graphPost<{ success?: boolean }>(`/${adId}`, { status });
+
+    try {
+      await (this.prisma as any).metaAd.updateMany({
+        where: { metaAdId: adId },
+        data: {
+          status,
+          effectiveStatus: status,
+          lastSyncedAt: new Date(),
+        },
+      });
+    } catch (error: any) {
+      // Graph đã nhận lệnh; lỗi cập nhật cache DB không được làm rollback lệnh Meta.
+      this.logger.warn(`[META_AD_STATUS_DB_CACHE] ${adId}: ${error?.message || error}`);
+    }
+
+    return { ok: result?.success !== false, metaAdId: adId, status };
+  }
+
+  async getAdSetForAutopilot(metaAdSetId: string) {
+    const id = String(metaAdSetId || '').trim();
+    if (!id) throw new Error('Thiếu metaAdSetId');
+    return this.graphGet<any>(`/${id}`, {
+      fields: 'id,name,campaign_id,status,effective_status,configured_status,daily_budget,lifetime_budget',
+    });
+  }
+
+  async setAdSetDailyBudget(metaAdSetId: string, dailyBudget: number) {
+    const id = String(metaAdSetId || '').trim();
+    const budget = Math.round(Number(dailyBudget || 0));
+    if (!id) throw new Error('Thiếu metaAdSetId');
+    if (!Number.isFinite(budget) || budget <= 0) throw new Error('dailyBudget không hợp lệ');
+
+    const result = await this.graphPost<{ success?: boolean }>(`/${id}`, {
+      daily_budget: String(budget),
+    });
+
+    try {
+      await (this.prisma as any).metaAdSet.updateMany({
+        where: { metaAdSetId: id },
+        data: { dailyBudget: budget, lastSyncedAt: new Date() },
+      });
+    } catch (error: any) {
+      this.logger.warn(`[META_ADSET_BUDGET_DB_CACHE] ${id}: ${error?.message || error}`);
+    }
+
+    return { ok: result?.success !== false, metaAdSetId: id, dailyBudget: budget };
+  }
+
+  async getLiveAdsForAutopilot(limit = 5000) {
+    const accountId = this.normalizeAccountId(this.defaultAdAccountId);
+    const pageLimit = String(Math.min(Math.max(Number(limit || 5000), 50), 1000));
+
+    const [ads, campaigns, adSets] = await Promise.all([
+      this.graphList<any>(`/${accountId}/ads`, {
+        fields: 'id,name,campaign_id,adset_id,status,effective_status,configured_status,updated_time',
+        limit: pageLimit,
+      }, 100),
+      this.graphList<any>(`/${accountId}/campaigns`, {
+        fields: 'id,name,status,effective_status',
+        limit: '1000',
+      }, 20),
+      this.graphList<any>(`/${accountId}/adsets`, {
+        fields: 'id,name,campaign_id,status,effective_status',
+        limit: '1000',
+      }, 50),
+    ]);
+
+    const campaignMap = new Map(campaigns.map((row: any) => [String(row.id), row]));
+    const adSetMap = new Map(adSets.map((row: any) => [String(row.id), row]));
+
+    return ads.map((row: any) => {
+      const campaign = campaignMap.get(String(row.campaign_id || '')) as any;
+      const adSet = adSetMap.get(String(row.adset_id || '')) as any;
+      return {
+        id: String(row.id || ''),
+        metaAdId: String(row.id || ''),
+        name: row.name || '',
+        campaignId: row.campaign_id || null,
+        campaignName: campaign?.name || null,
+        adSetId: row.adset_id || null,
+        adSetName: adSet?.name || null,
+        status: row.status || row.configured_status || null,
+        effectiveStatus: row.effective_status || row.status || row.configured_status || null,
+        updatedTime: row.updated_time || null,
+      };
+    });
+  }
+
   private async graphList<T>(path: string, params: Record<string, string>, maxPages = 20) {
     const first = new URL(`https://graph.facebook.com/${this.version}${path}`);
     Object.entries(params).forEach(([key, value]) => {

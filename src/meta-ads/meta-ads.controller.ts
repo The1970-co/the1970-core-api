@@ -2,6 +2,8 @@ import { Body, Controller, Get, Post, Query, Req } from '@nestjs/common';
 import { MetaAdsService } from './meta-ads.service';
 import { MetaAdsSyncService } from './meta-ads-sync.service';
 import { MetaAdsOrderAttributionService } from './meta-ads-order-attribution.service';
+import { MetaAdsInventoryAutopilotService } from './meta-ads-inventory-autopilot.service';
+import { MetaAdsPerformanceAutopilotService } from './meta-ads-performance-autopilot.service';
 import { SyncMetaAdsDto } from './dto/sync-meta-ads.dto';
 import type { MetaInsightLevel } from './dto/sync-meta-ads.dto';
 
@@ -65,6 +67,8 @@ export class MetaAdsController {
     private readonly metaAdsService: MetaAdsService,
     private readonly metaAdsSyncService: MetaAdsSyncService,
     private readonly metaAdsOrderAttributionService: MetaAdsOrderAttributionService,
+    private readonly metaAdsInventoryAutopilotService: MetaAdsInventoryAutopilotService,
+    private readonly metaAdsPerformanceAutopilotService: MetaAdsPerformanceAutopilotService,
   ) {}
 
   @Get('test')
@@ -206,6 +210,50 @@ export class MetaAdsController {
       },
     };
   }
+  @Get('autopilot/inventory/status')
+  getInventoryAutopilotStatus() {
+    return this.metaAdsInventoryAutopilotService.getStatus();
+  }
+
+  @Post('autopilot/inventory/config')
+  setInventoryAutopilotConfig(@Body() body: { enabled?: boolean; dryRun?: boolean } = {}) {
+    return this.metaAdsInventoryAutopilotService.setRuntimeConfig(body);
+  }
+
+  @Post('autopilot/inventory/run')
+  runInventoryAutopilot(@Body() body: { dryRun?: boolean } = {}) {
+    return this.metaAdsInventoryAutopilotService.runNow({ source: 'api', dryRun: body?.dryRun });
+  }
+
+  @Post('actions/pause-ad')
+  pauseSingleAd(@Body() body: { metaAdId?: string }) {
+    return this.metaAdsSyncService.setAdStatus(String(body?.metaAdId || ''), 'PAUSED');
+  }
+
+  @Get('autopilot/performance/status')
+  getPerformanceAutopilotStatus() {
+    return this.metaAdsPerformanceAutopilotService.getStatus();
+  }
+
+  @Post('autopilot/performance/config')
+  setPerformanceAutopilotConfig(@Body() body: any = {}) {
+    return this.metaAdsPerformanceAutopilotService.setRuntimeConfig(body);
+  }
+
+  @Post('autopilot/performance/run')
+  runPerformanceAutopilot(@Body() body: { dryRun?: boolean } = {}) {
+    return this.metaAdsPerformanceAutopilotService.runNow({ source: 'api', dryRun: body?.dryRun });
+  }
+
+  @Post('actions/scale-adset')
+  scaleAdSet(@Body() body: { metaAdSetId?: string; percent?: number; dryRun?: boolean }) {
+    return this.metaAdsPerformanceAutopilotService.executeAdSetScale(
+      String(body?.metaAdSetId || ''),
+      Number(body?.percent || 20),
+      body?.dryRun !== false,
+    );
+  }
+
   @Get('live-insights')
   async getLiveInsights(
     @Query('range') range?: string,
