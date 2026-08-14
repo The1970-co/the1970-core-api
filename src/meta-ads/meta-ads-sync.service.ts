@@ -408,7 +408,7 @@ export class MetaAdsSyncService {
       // CHỈ 1 CALL META:
       // lấy đúng Ads effective_status=ACTIVE, không creative, không campaign/adset Graph GET riêng.
       const ads = await this.graphList<any>(`/${accountId}/ads`, {
-        fields: 'id,name,campaign_id,adset_id,status,effective_status,configured_status,created_time,updated_time,campaign{id,name,daily_budget,lifetime_budget},adset{id,name,campaign_id,daily_budget,lifetime_budget,start_time,updated_time}',
+        fields: 'id,name,campaign_id,adset_id,status,effective_status,configured_status,created_time,updated_time,adset{id,name,campaign_id,daily_budget,lifetime_budget,start_time,updated_time,campaign{id,name,daily_budget,lifetime_budget}}',
         filtering: JSON.stringify([
           { field: 'effective_status', operator: 'IN', value: ['ACTIVE'] },
         ]),
@@ -486,8 +486,8 @@ export class MetaAdsSyncService {
       const rows = activeAds.map((row: any) => {
         const cachedCampaign = campaignMap.get(String(row.campaign_id || '')) as any;
         const cachedAdSet = adSetMap.get(String(row.adset_id || '')) as any;
-        const liveCampaign = row?.campaign || {};
         const liveAdSet = row?.adset || {};
+        const liveCampaign = liveAdSet?.campaign || row?.campaign || {};
         const metaAdId = String(row.id || '');
 
         return {
@@ -510,6 +510,18 @@ export class MetaAdsSyncService {
           thumbnailUrl: thumbMap.get(metaAdId) || null,
           adSetDailyBudget: liveAdSet?.daily_budget != null ? this.n(liveAdSet.daily_budget) : (cachedAdSet?.dailyBudget ?? null),
           adSetLifetimeBudget: liveAdSet?.lifetime_budget != null ? this.n(liveAdSet.lifetime_budget) : (cachedAdSet?.lifetimeBudget ?? null),
+          budgetLevel:
+            this.n(liveAdSet?.daily_budget ?? cachedAdSet?.dailyBudget) > 0
+              ? 'ADSET'
+              : this.n(liveCampaign?.daily_budget ?? cachedCampaign?.dailyBudget) > 0
+                ? 'CAMPAIGN'
+                : null,
+          currentBudget:
+            this.n(liveAdSet?.daily_budget ?? cachedAdSet?.dailyBudget) > 0
+              ? this.n(liveAdSet?.daily_budget ?? cachedAdSet?.dailyBudget)
+              : this.n(liveCampaign?.daily_budget ?? cachedCampaign?.dailyBudget) > 0
+                ? this.n(liveCampaign?.daily_budget ?? cachedCampaign?.dailyBudget)
+                : null,
           adSetStartTime: liveAdSet?.start_time || cachedAdSet?.startTime || null,
           adSetUpdatedTime: liveAdSet?.updated_time || cachedAdSet?.updatedAt || null,
           source: 'META_ACTIVE_ONLY_ONE_CALL',
