@@ -247,14 +247,20 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
     });
   }
 
-  private matchAdsForGroup(group: ColorStockGroup, ads: any[], productColorCount: number) {
+  private matchAdsForGroup(
+    group: ColorStockGroup,
+    ads: any[],
+    productColorCount: number,
+    options: { activeOnly?: boolean } = {},
+  ) {
+    const activeOnly = options.activeOnly !== false;
     const productToken = compactText(group.productCode);
     const colorPhrase = normalizeText(group.color);
     const colorCompact = compactText(group.color);
     const skuAliases = group.skuAliases.map(compactText).filter(Boolean);
 
     return ads.filter((ad) => {
-      if (!isMetaAdActive(ad)) return false;
+      if (activeOnly && !isMetaAdActive(ad)) return false;
 
       const raw = [ad?.name, ad?.adSetName, ad?.campaignName].filter(Boolean).join(' ');
       const text = normalizeText(raw);
@@ -275,6 +281,11 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
     });
   }
 
+  private pushAction(action: AutopilotAction) {
+    this.recentActions = [action, ...this.recentActions].slice(0, 100);
+  }
+
+
   async assessAdsForScale(ads: any[]) {
     const groups = await this.loadInventoryGroups();
     const colorCountByProduct = new Map<string, number>();
@@ -283,48 +294,66 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
     }
 
     return (ads || []).map((ad: any) => {
-      const matchedGroups = groups.filter((group) =>
-        this.matchAdsForGroup(group, [{ ...ad, status: 'ACTIVE', effectiveStatus: 'ACTIVE' }], colorCountByProduct.get(group.productCode) || 1).length > 0,
+      // Control Center cần map tồn cả ad ACTIVE lẫn PAUSED để admin vẫn xem được đúng mã + màu.
+      // Việc auto-pause thật ở runNow() vẫn chỉ match ad ACTIVE.
+      const matches = groups.filter((group) =>
+        this.matchAdsForGroup(
+          group,
+          [ad],
+          colorCountByProduct.get(group.productCode) || 1,
+          { activeOnly: false },
+        ).length > 0,
       );
 
-      if (matchedGroups.length !== 1) {
+      if (!matches.length) {
         return {
           metaAdId: String(ad?.metaAdId || ad?.id || ''),
           safe: false,
-          level: matchedGroups.length > 1 ? 'AMBIGUOUS' : 'UNMAPPED',
+          level: 'UNMAPPED',
           sizes: [],
-          reason: matchedGroups.length > 1 ? 'Match tồn kho bị trùng nhiều mã + màu' : 'Chưa match được tồn kho đúng mã + màu',
+          reason: 'Chưa match chắc chắn mã + màu với tồn kho',
+          groups: [],
         };
       }
 
-      const group = matchedGroups[0];
-      const critical = group.sizes.some((row) => row.qty < this.pauseThreshold);
-      const low = group.sizes.some((row) => row.qty < this.warnThreshold);
+      // Một ad chỉ nên đại diện cho một mã + màu. Nếu match nhiều nhóm thì fail closed,
+      // không cho Auto Scale vì mapping chưa đủ chắc chắn.
+      if (matches.length > 1) {
+        return {
+          metaAdId: String(ad?.metaAdId || ad?.id || ''),
+          safe: false,
+          level: 'AMBIGUOUS',
+          sizes: [],
+          reason: `Match nhiều mã + màu (${matches.map((group) => group.colorKey).join(', ')}), cần kiểm tra mapping`,
+          groups: matches,
+        };
+      }
+
+      const group = matches[0];
+      const hasCritical = group.criticalSizes.length > 0;
+      const hasLow = group.lowSizes.length > 0;
+      const level = hasCritical ? 'CRITICAL' : hasLow ? 'LOW_STOCK' : 'NORMAL';
+
       return {
         metaAdId: String(ad?.metaAdId || ad?.id || ''),
-        safe: !low,
-        level: critical ? 'CRITICAL' : low ? 'LOW_STOCK' : 'SAFE',
+        safe: !hasLow,
+        level,
+        colorKey: group.colorKey,
         productId: group.productId,
         productCode: group.productCode,
         productName: group.productName,
         color: group.color,
-        colorKey: group.colorKey,
         sizes: group.sizes.map((row) => ({ size: row.size, qty: row.qty })),
         totalQty: group.totalQty,
         minQty: group.minQty,
         lowSizes: group.lowSizes,
         criticalSizes: group.criticalSizes,
-        reason: critical
-          ? `Có size ${group.criticalSizes.join(', ')} dưới ${this.pauseThreshold}`
-          : low
-            ? `Có size ${group.lowSizes.join(', ')} dưới ${this.warnThreshold}`
-            : 'Tồn tất cả size an toàn để scale',
+        reason: !hasLow
+          ? 'Tồn tất cả size >= ngưỡng an toàn'
+          : `${group.colorKey}: size ${group.lowSizes.join(', ')} dưới ${this.warnThreshold}`,
+        groups: matches,
       };
     });
-  }
-
-  private pushAction(action: AutopilotAction) {
-    this.recentActions = [action, ...this.recentActions].slice(0, 100);
   }
 
   async runNow(options: { source?: string; dryRun?: boolean } = {}) {
