@@ -169,6 +169,9 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
 
   private async persistScaleLog(input: {
     metaAdSetId: string;
+    metaCampaignId?: string;
+    budgetLevel?: 'ADSET' | 'CAMPAIGN';
+    budgetEntityId?: string;
     metaAdId?: string;
     source: string;
     percent: number;
@@ -193,6 +196,9 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
           message: `Scale Ad Set +${input.percent}%: ${input.oldBudget} -> ${input.newBudget}`,
           errorJson: {
             metaAdSetId: input.metaAdSetId,
+            metaCampaignId: input.metaCampaignId || null,
+            budgetLevel: input.budgetLevel || 'ADSET',
+            budgetEntityId: input.budgetEntityId || input.metaAdSetId,
             metaAdId: input.metaAdId || null,
             source: input.source,
             percent: input.percent,
@@ -228,16 +234,42 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
     }
 
     const adSet = await this.metaAdsSyncService.getAdSetForAutopilot(adSetId);
-    const currentBudget = n(adSet?.daily_budget ?? adSet?.dailyBudget);
-    if (!currentBudget) throw new Error('Ad Set không có daily_budget để scale');
+    const metaCampaignId = String(adSet?.campaign_id || adSet?.campaignId || '').trim();
+    const adSetBudget = n(adSet?.daily_budget ?? adSet?.dailyBudget);
+
+    let budgetLevel: 'ADSET' | 'CAMPAIGN' = 'ADSET';
+    let budgetEntityId = adSetId;
+    let currentBudget = adSetBudget;
+
+    // Nếu Ad Set không có daily_budget thì account đang dùng Advantage Campaign Budget / CBO.
+    // Khi đó phải scale ngân sách Campaign, không thể POST daily_budget vào Ad Set.
+    if (!currentBudget && metaCampaignId) {
+      const campaign = await this.metaAdsSyncService.getCampaignForAutopilot(metaCampaignId);
+      currentBudget = n(campaign?.daily_budget ?? campaign?.dailyBudget);
+      if (currentBudget) {
+        budgetLevel = 'CAMPAIGN';
+        budgetEntityId = metaCampaignId;
+      }
+    }
+
+    if (!currentBudget) {
+      throw new Error('Không tìm thấy daily_budget ở Ad Set hoặc Campaign. Có thể quảng cáo đang dùng lifetime budget.');
+    }
 
     const safePercent = Math.min(50, Math.max(1, Number(percent) || this.scalePercent));
     const nextBudget = Math.round(currentBudget * (1 + safePercent / 100));
 
     if (!dryRun) {
-      await this.metaAdsSyncService.setAdSetDailyBudget(adSetId, nextBudget);
+      if (budgetLevel === 'CAMPAIGN') {
+        await this.metaAdsSyncService.setCampaignDailyBudget(budgetEntityId, nextBudget);
+      } else {
+        await this.metaAdsSyncService.setAdSetDailyBudget(budgetEntityId, nextBudget);
+      }
       await this.persistScaleLog({
         metaAdSetId: adSetId,
+        metaCampaignId: metaCampaignId || undefined,
+        budgetLevel,
+        budgetEntityId,
         metaAdId: context.metaAdId,
         source: context.source || 'manual',
         percent: safePercent,
@@ -252,6 +284,9 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
       ok: true,
       dryRun,
       metaAdSetId: adSetId,
+      metaCampaignId: metaCampaignId || null,
+      budgetLevel,
+      budgetEntityId,
       oldBudget: currentBudget,
       newBudget: nextBudget,
       percent: safePercent,
@@ -260,13 +295,12 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
   }
 
   private runtimeHours(row: AnyRow) {
-    // Tuổi chạy phải tính từ lúc ad/ad set bắt đầu, không dùng updated_time.
-    // updated_time thay đổi khi chỉnh ngân sách/trạng thái và sẽ làm reset giả thời gian chạy.
-    const candidates = [row?.createdTime, row?.created_time, row?.adSetStartTime, row?.startTime, row?.start_time]
+    const candidates = [row?.createdTime, row?.created_time, row?.updatedTime, row?.updated_time]
       .map((x) => (x ? new Date(x).getTime() : NaN))
       .filter((x) => Number.isFinite(x));
     if (!candidates.length) return 999999;
-    const anchor = Math.min(...candidates);
+    // Conservative: sau một thay đổi Meta gần đây cũng chờ đủ 24h trước auto scale.
+    const anchor = Math.max(...candidates);
     return Math.max(0, (Date.now() - anchor) / 3_600_000);
   }
 
@@ -313,153 +347,97 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
     const now = new Date();
     const since = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
-    // Structure là nguồn chính để dựng danh sách điều khiển.
-    // Metrics/attribution/inventory có lỗi thì vẫn phải trả ads để admin bật/tắt thủ công.
-    let structure: AnyRow[] = [];
-    let structureError: string | null = null;
-    try {
-      structure = (await this.metaAdsSyncService.getLiveAdsForAutopilot(5000)) as AnyRow[];
-    } catch (error: any) {
-      structureError = error?.message || String(error);
-      this.logger.error(`[AUTOPILOT_CONTROL_STRUCTURE] ${structureError}`);
-    }
+    const [rollingRaw, structure, lastScaleMap] = await Promise.all([
+      this.metaAdsSyncService.getRolling24hAdInsights(1000),
+      this.metaAdsSyncService.getLiveAdsForAutopilot(5000),
+      this.lastScaleByAdSet(),
+    ]);
+    const rolling: any = rollingRaw;
 
-    let rolling: AnyRow = {
-      ok: false,
-      topAds: [],
-      exactRolling24h: false,
-      fallbackReason: 'Chưa tải được rolling 24h',
-    };
-    try {
-      rolling = (await this.metaAdsSyncService.getRolling24hAdInsights(1000)) as AnyRow;
-    } catch (error: any) {
-      rolling = {
-        ok: false,
-        topAds: [],
-        exactRolling24h: false,
-        fallbackReason: error?.message || String(error),
-      };
-      this.logger.warn(`[AUTOPILOT_CONTROL_ROLLING] ${rolling.fallbackReason}`);
-    }
+    const attributed = (await this.attributionService.attachProductOrdersToAds(
+      ((rolling?.topAds || []) as AnyRow[]),
+      {
+        since,
+        until: now,
+        sourceMode: 'facebook',
+        orderMode: 'valid',
+      },
+    )) as AnyRow[];
 
-    const lastScaleMap = await this.lastScaleByAdSet();
-
-    let attributed: AnyRow[] = ((rolling?.topAds || []) as AnyRow[]).map((row) => ({
+    const structureByAd = new Map((structure || []).map((row: AnyRow) => [String(row.metaAdId || row.id), row]));
+    const merged = attributed.map((row: AnyRow) => ({
       ...row,
-      metrics: row?.metrics || {},
-      productAttribution: row?.productAttribution || {},
+      ...(structureByAd.get(String(row.metaAdId || row.id)) || {}),
+      metrics: row.metrics || {},
+      productAttribution: row.productAttribution || {},
     }));
 
-    try {
-      attributed = (await this.attributionService.attachProductOrdersToAds(
-        ((rolling?.topAds || []) as AnyRow[]),
-        {
-          since,
-          until: now,
-          sourceMode: 'facebook',
-          orderMode: 'valid',
-        },
-      )) as AnyRow[];
-    } catch (error: any) {
-      // Attribution lỗi không được làm mất danh sách ads live.
-      this.logger.warn(`[AUTOPILOT_CONTROL_ATTRIBUTION] ${error?.message || error}`);
-    }
-
-    const structureByAd = new Map(
-      (structure || []).map((row: AnyRow) => [String(row.metaAdId || row.id), row]),
-    );
-
-    const merged = attributed.map((row: AnyRow) => {
-      const live = structureByAd.get(String(row.metaAdId || row.id)) || {};
-      return {
-        ...row,
-        ...live,
-        // Giữ metrics + attribution của rolling, không để structure ghi đè.
-        metrics: row?.metrics || {},
-        productAttribution: row?.productAttribution || {},
-      };
-    });
-
-    // Ads không có spend 24h vẫn phải xuất hiện để bật/tắt và scale thủ công.
+    // Ads ACTIVE nhưng không có spend 24h vẫn phải xuất hiện để người vận hành bật/tắt được.
     const known = new Set(merged.map((row: AnyRow) => String(row.metaAdId || row.id)));
     for (const row of structure || []) {
       const id = String((row as AnyRow).metaAdId || (row as AnyRow).id || '');
       if (!id || known.has(id)) continue;
-      merged.push({
-        ...(row as AnyRow),
-        metrics: { spend: 0 },
-        productAttribution: {},
+      merged.push({ ...(row as AnyRow), metrics: { spend: 0 }, productAttribution: {} });
+    }
+
+    const inventoryChecks = await this.inventoryAutopilotService.assessAdsForScale(merged);
+    const inventoryByAd = new Map(inventoryChecks.map((x: AnyRow) => [String(x.metaAdId), x]));
+
+    const ads = merged.map((row: AnyRow) => {
+      const adId = String(row?.metaAdId || row?.id || '');
+      const adSetId = String(row?.metaAdSetId || row?.adSetId || '');
+      const stock = inventoryByAd.get(adId) as AnyRow | undefined;
+      const evaluation = this.evaluateCandidate({
+        row,
+        stock,
+        lastScale: lastScaleMap.get(adSetId),
+        exactRolling24h: rolling?.exactRolling24h === true,
       });
-    }
+      const attr = evaluation.attribution;
+      const internalRevenue = n(attr?.revenue || attr?.orderRevenue);
 
-    let inventoryChecks: AnyRow[] = [];
-    try {
-      inventoryChecks = (await this.inventoryAutopilotService.assessAdsForScale(merged)) as AnyRow[];
-    } catch (error: any) {
-      // Inventory lỗi cũng không được làm biến mất ads khỏi Control Center.
-      this.logger.warn(`[AUTOPILOT_CONTROL_INVENTORY] ${error?.message || error}`);
-    }
-    const inventoryByAd = new Map(
-      inventoryChecks.map((x: AnyRow) => [String(x.metaAdId), x]),
-    );
-
-    const ads = merged
-      .map((row: AnyRow) => {
-        const adId = String(row?.metaAdId || row?.id || '');
-        const adSetId = String(row?.metaAdSetId || row?.adSetId || '');
-        const stock = inventoryByAd.get(adId) as AnyRow | undefined;
-        const evaluation = this.evaluateCandidate({
-          row,
-          stock,
-          lastScale: lastScaleMap.get(adSetId),
-          exactRolling24h: rolling?.exactRolling24h === true,
-        });
-        const attr = evaluation.attribution;
-        const internalRevenue = n(attr?.revenue || attr?.orderRevenue);
-
-        return {
-          metaAdId: adId,
-          adName: row?.name || row?.adName || '',
-          metaAdSetId: adSetId,
-          adSetName: row?.adSetName || null,
-          metaCampaignId: row?.metaCampaignId || row?.campaignId || null,
-          campaignName: row?.campaignName || null,
-          status: row?.status || null,
-          effectiveStatus: row?.effectiveStatus || null,
-          thumbnailUrl: row?.thumbnailUrl || row?.imageUrl || null,
-          createdTime: row?.createdTime || row?.created_time || null,
-          updatedTime: row?.updatedTime || row?.updated_time || null,
-          adSetStartTime: row?.adSetStartTime || null,
-          runHours: evaluation.runHours,
-          budgetDaily: n(row?.adSetDailyBudget || row?.dailyBudget || row?.daily_budget),
-          spend24h: evaluation.spend,
-          revenue24h: internalRevenue,
-          roas24h: evaluation.roas,
-          orderCount24h: n(attr?.orderCount),
-          productId: attr?.productId || stock?.productId || null,
-          sku: attr?.sku || attr?.familySku || stock?.colorKey || null,
-          familySku: attr?.familySku || stock?.colorKey || null,
-          productName: attr?.productName || stock?.productName || null,
-          attributionConfidence: n(attr?.confidence),
-          allocationMode: attr?.allocationMode || null,
-          sizes: stock?.sizes || [],
-          stockSafe: Boolean(stock?.safe),
-          stockLevel: stock?.level || 'UNMAPPED',
-          stockReason: stock?.reason || 'Chưa match tồn kho',
-          autoScaleEligible: evaluation.eligible && isActive(row),
-          autoScaleReasons: evaluation.reasons,
-          nextScaleAt: evaluation.nextScaleAt,
-        };
-      })
-      .filter((row: AnyRow) => Boolean(row.metaAdId));
+      return {
+        metaAdId: adId,
+        adName: row?.name || row?.adName || '',
+        metaAdSetId: adSetId,
+        adSetName: row?.adSetName || null,
+        metaCampaignId: row?.metaCampaignId || row?.campaignId || null,
+        campaignName: row?.campaignName || null,
+        status: row?.status || null,
+        effectiveStatus: row?.effectiveStatus || null,
+        thumbnailUrl: row?.thumbnailUrl || row?.imageUrl || null,
+        createdTime: row?.createdTime || row?.created_time || null,
+        updatedTime: row?.updatedTime || row?.updated_time || null,
+        runHours: evaluation.runHours,
+        budgetDaily: n(row?.adSetDailyBudget || row?.campaignDailyBudget || row?.dailyBudget || row?.daily_budget),
+        budgetLevel: n(row?.adSetDailyBudget) > 0 ? 'ADSET' : n(row?.campaignDailyBudget) > 0 ? 'CAMPAIGN' : null,
+        budgetEntityId: n(row?.adSetDailyBudget) > 0 ? adSetId : n(row?.campaignDailyBudget) > 0 ? String(row?.metaCampaignId || row?.campaignId || '') : null,
+        spend24h: evaluation.spend,
+        revenue24h: internalRevenue,
+        roas24h: evaluation.roas,
+        orderCount24h: n(attr?.orderCount),
+        productId: attr?.productId || null,
+        sku: attr?.sku || attr?.familySku || null,
+        familySku: attr?.familySku || null,
+        productName: attr?.productName || null,
+        attributionConfidence: n(attr?.confidence),
+        allocationMode: attr?.allocationMode || null,
+        sizes: stock?.sizes || [],
+        stockSafe: Boolean(stock?.safe),
+        stockLevel: stock?.level || 'UNMAPPED',
+        stockReason: stock?.reason || 'Chưa match tồn kho',
+        autoScaleEligible: evaluation.eligible && isActive(row),
+        autoScaleReasons: evaluation.reasons,
+        nextScaleAt: evaluation.nextScaleAt,
+      };
+    });
 
     return {
-      ok: structure.length > 0 || ads.length > 0,
+      ok: true,
       generatedAt: new Date().toISOString(),
       window: { since: since.toISOString(), until: now.toISOString(), hours: 24 },
       exactRolling24h: rolling?.exactRolling24h === true,
       fallbackReason: rolling?.fallbackReason || null,
-      structureError,
       config: this.getStatus(),
       ads,
       summary: {
@@ -483,13 +461,14 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
       const center = await this.getControlCenter();
       const rows = (center.ads || []).filter((row: AnyRow) => String(row?.effectiveStatus || row?.status || '').toUpperCase() === 'ACTIVE');
 
-      // Một Ad Set có thể chứa nhiều ads; chỉ scale một lần, lấy ads có ROAS 24h cao nhất làm đại diện.
-      const bestByAdSet = new Map<string, AnyRow>();
+      // Một budget target có thể chứa nhiều ads/adsets. Với CBO, nhiều Ad Set dùng chung ngân sách Campaign,
+      // nên chỉ được scale Campaign một lần trong mỗi phiên.
+      const bestByBudgetTarget = new Map<string, AnyRow>();
       for (const row of rows) {
-        const adSetId = String(row?.metaAdSetId || '');
-        if (!adSetId) continue;
-        const old = bestByAdSet.get(adSetId);
-        if (!old || n(row?.roas24h) > n(old?.roas24h)) bestByAdSet.set(adSetId, row);
+        const targetId = String(row?.budgetEntityId || row?.metaAdSetId || '');
+        if (!targetId) continue;
+        const old = bestByBudgetTarget.get(targetId);
+        if (!old || n(row?.roas24h) > n(old?.roas24h)) bestByBudgetTarget.set(targetId, row);
       }
 
       let eligible = 0;
@@ -499,7 +478,8 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
       let failed = 0;
       const results: AnyRow[] = [];
 
-      for (const [adSetId, row] of bestByAdSet) {
+      for (const [, row] of bestByBudgetTarget) {
+        const adSetId = String(row?.metaAdSetId || '');
         if (!row.autoScaleEligible) {
           skipped += 1;
           const reason = Array.isArray(row.autoScaleReasons) ? row.autoScaleReasons.join(' · ') : 'Không đủ điều kiện';
@@ -582,7 +562,7 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
         source: options.source || 'manual',
         dryRun,
         exactRolling24h: center.exactRolling24h,
-        scannedAdSets: bestByAdSet.size,
+        scannedBudgetTargets: bestByBudgetTarget.size,
         eligible,
         suggested,
         scaled,

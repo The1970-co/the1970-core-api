@@ -271,7 +271,7 @@ export class MetaAdsSyncService {
         limit: pageLimit,
       }, 100),
       this.graphList<any>(`/${accountId}/campaigns`, {
-        fields: 'id,name,status,effective_status',
+        fields: 'id,name,status,effective_status,daily_budget,lifetime_budget,start_time,stop_time',
         limit: '1000',
       }, 20),
       this.graphList<any>(`/${accountId}/adsets`, {
@@ -293,6 +293,8 @@ export class MetaAdsSyncService {
         campaignId: row.campaign_id || null,
         metaCampaignId: row.campaign_id || null,
         campaignName: campaign?.name || null,
+        campaignDailyBudget: campaign?.daily_budget != null ? this.n(campaign.daily_budget) : null,
+        campaignLifetimeBudget: campaign?.lifetime_budget != null ? this.n(campaign.lifetime_budget) : null,
         adSetId: row.adset_id || null,
         metaAdSetId: row.adset_id || null,
         adSetName: adSet?.name || null,
@@ -316,6 +318,36 @@ export class MetaAdsSyncService {
     return this.graphGet<any>(`/${adSetId}`, {
       fields: 'id,name,status,effective_status,daily_budget,lifetime_budget,start_time,end_time,updated_time,campaign_id',
     });
+  }
+
+  async getCampaignForAutopilot(metaCampaignId: string) {
+    const campaignId = String(metaCampaignId || '').trim();
+    if (!campaignId) throw new Error('Thiếu metaCampaignId');
+    return this.graphGet<any>(`/${campaignId}`, {
+      fields: 'id,name,status,effective_status,daily_budget,lifetime_budget,start_time,stop_time,updated_time',
+    });
+  }
+
+  async setCampaignDailyBudget(metaCampaignId: string, dailyBudget: number) {
+    const campaignId = String(metaCampaignId || '').trim();
+    const budget = Math.round(Number(dailyBudget || 0));
+    if (!campaignId) throw new Error('Thiếu metaCampaignId');
+    if (!Number.isFinite(budget) || budget <= 0) throw new Error('daily_budget campaign không hợp lệ');
+
+    const result = await this.graphPost<{ success?: boolean }>(`/${campaignId}`, {
+      daily_budget: String(budget),
+    });
+
+    try {
+      await (this.prisma as any).metaCampaign.updateMany({
+        where: { metaCampaignId: campaignId },
+        data: { dailyBudget: budget, lastSyncedAt: new Date() },
+      });
+    } catch (error: any) {
+      this.logger.warn(`[META_CAMPAIGN_BUDGET_DB_CACHE] ${campaignId}: ${error?.message || error}`);
+    }
+
+    return { ok: result?.success !== false, metaCampaignId: campaignId, dailyBudget: budget };
   }
 
   async setAdSetDailyBudget(metaAdSetId: string, dailyBudget: number) {
