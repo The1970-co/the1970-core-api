@@ -210,6 +210,17 @@ export class MetaAdsController {
       },
     };
   }
+
+  @Get('autopilot/live-ads')
+  getAutopilotLiveAds(@Query('limit') limit?: string) {
+    return this.metaAdsSyncService.getLiveAdsForAutopilot(Number(limit || 5000));
+  }
+
+  @Get('autopilot/control-center')
+  getAutopilotControlCenter() {
+    return this.metaAdsPerformanceAutopilotService.getControlCenter();
+  }
+
   @Get('autopilot/performance/status')
   getPerformanceAutopilotStatus() {
     return this.metaAdsPerformanceAutopilotService.getStatus();
@@ -225,25 +236,29 @@ export class MetaAdsController {
     return this.metaAdsPerformanceAutopilotService.runNow({ source: 'api', dryRun: body?.dryRun });
   }
 
-  @Get('autopilot/control-center')
-  getAutopilotControlCenter() {
-    return this.metaAdsPerformanceAutopilotService.getControlCenter();
-  }
-
   @Post('actions/scale-adset')
-  scaleAdSet(@Body() body: { metaAdSetId?: string; percent?: number; dryRun?: boolean; metaAdId?: string } = {}) {
+  scaleAdSet(
+    @Body()
+    body: { metaAdSetId?: string; metaAdId?: string; percent?: number; dryRun?: boolean } = {},
+  ) {
     return this.metaAdsPerformanceAutopilotService.executeAdSetScale(
       String(body?.metaAdSetId || ''),
       Number(body?.percent || 20),
       Boolean(body?.dryRun),
-      { source: 'manual_ui', metaAdId: body?.metaAdId },
+      {
+        source: 'manual',
+        metaAdId: String(body?.metaAdId || ''),
+      },
     );
   }
 
   @Post('actions/ad-status')
   setSingleAdStatus(@Body() body: { metaAdId?: string; status?: 'PAUSED' | 'ACTIVE' } = {}) {
-    const status = String(body?.status || '').toUpperCase() as 'PAUSED' | 'ACTIVE';
-    return this.metaAdsSyncService.setAdStatus(String(body?.metaAdId || ''), status);
+    const status = String(body?.status || '').toUpperCase();
+    if (status !== 'PAUSED' && status !== 'ACTIVE') {
+      throw new Error('status phải là ACTIVE hoặc PAUSED');
+    }
+    return this.metaAdsSyncService.setAdStatus(String(body?.metaAdId || ''), status as 'PAUSED' | 'ACTIVE');
   }
 
   @Get('autopilot/inventory/status')
