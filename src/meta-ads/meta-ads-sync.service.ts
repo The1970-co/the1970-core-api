@@ -407,7 +407,7 @@ export class MetaAdsSyncService {
 
       // CALL 1: chỉ lấy Ads ACTIVE. Không lấy creative, không tải lịch sử ads.
       const ads = await this.graphList<any>(`/${accountId}/ads`, {
-        fields: 'id,name,campaign_id,adset_id,status,effective_status,configured_status,created_time,updated_time',
+        fields: 'id,name,campaign_id,adset_id,status,effective_status,configured_status,created_time,updated_time,creative{id,thumbnail_url,image_url}',
         filtering: JSON.stringify([
           { field: 'effective_status', operator: 'IN', value: ['ACTIVE'] },
         ]),
@@ -525,7 +525,8 @@ export class MetaAdsSyncService {
           effectiveStatus: row.effective_status || row.status || row.configured_status || null,
           createdTime: row.created_time || null,
           updatedTime: row.updated_time || null,
-          thumbnailUrl: thumbMap.get(metaAdId) || null,
+          liveThumbnailUrl: row?.creative?.thumbnail_url || row?.creative?.image_url || null,
+          thumbnailUrl: row?.creative?.thumbnail_url || row?.creative?.image_url || thumbMap.get(metaAdId) || null,
           adSetStartTime: liveAdSet?.start_time || cachedAdSet?.startTime || null,
           adSetUpdatedTime: liveAdSet?.updated_time || cachedAdSet?.updatedAt || null,
           source: 'META_ACTIVE_BULK',
@@ -536,8 +537,10 @@ export class MetaAdsSyncService {
       // Các shell/test ads kiểu “Thử nghiệm phân tách” thường không có thumbnail và không phải Ads bán hàng cần vận hành.
       const operationalRows = rows.filter((row: any) => {
         const active = String(row?.effectiveStatus || row?.status || '').toUpperCase() === 'ACTIVE';
-        const hasCreative = Boolean(String(row?.thumbnailUrl || '').trim());
-        return active && hasCreative;
+        // Chỉ coi là Ads vận hành nếu Meta LIVE hiện tại trả creative preview.
+        // Không dùng thumbnail DB cache để tránh lẫn ads test/split-test cũ.
+        const hasLiveCreative = Boolean(String(row?.liveThumbnailUrl || '').trim());
+        return active && hasLiveCreative;
       });
 
       this.autopilotActiveAdsCache = { at: Date.now(), rows: operationalRows };
