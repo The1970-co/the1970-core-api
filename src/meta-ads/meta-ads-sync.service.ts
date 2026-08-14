@@ -392,8 +392,8 @@ export class MetaAdsSyncService {
     const requested = Math.min(Math.max(Number(limit || 500), 1), 500);
     const now = Date.now();
 
-    // Nhiều nơi gọi cùng lúc: page web, control-center, inventory startup.
-    // Cache 60 giây + share cùng một Promise để tất cả dùng CHUNG 1 Meta request.
+    // Cache 60s + share request đang chạy để web/mobile/control-center/inventory
+    // không bắn trùng Meta cùng lúc.
     if (this.autopilotActiveAdsCache && now - this.autopilotActiveAdsCache.at < 60_000) {
       return this.autopilotActiveAdsCache.rows.slice(0, requested);
     }
@@ -405,10 +405,9 @@ export class MetaAdsSyncService {
     this.autopilotActiveAdsInFlight = (async () => {
       const accountId = this.normalizeAccountId(this.defaultAdAccountId);
 
-      // CHỈ 1 CALL META:
-      // lấy đúng Ads effective_status=ACTIVE, không creative, không campaign/adset Graph GET riêng.
+      // CALL 1: chỉ lấy Ads ACTIVE. Không lấy creative, không tải lịch sử ads.
       const ads = await this.graphList<any>(`/${accountId}/ads`, {
-        fields: 'id,name,campaign_id,adset_id,status,effective_status,configured_status,created_time,updated_time,adset{id,name,campaign_id,daily_budget,lifetime_budget,start_time,updated_time,campaign{id,name,daily_budget,lifetime_budget}}',
+        fields: 'id,name,campaign_id,adset_id,status,effective_status,configured_status,created_time,updated_time',
         filtering: JSON.stringify([
           { field: 'effective_status', operator: 'IN', value: ['ACTIVE'] },
         ]),
@@ -419,120 +418,133 @@ export class MetaAdsSyncService {
         .filter((row: any) =>
           String(row?.effective_status || row?.status || row?.configured_status || '').toUpperCase() === 'ACTIVE',
         )
-        .slice(0, 500);
+        .slice(0, requested);
 
       if (!activeAds.length) {
         const empty: any[] = [];
         this.autopilotActiveAdsCache = { at: Date.now(), rows: empty };
-        this.logger.log(`[META_AUTOPILOT_LIVE_ADS] account=${accountId} source=META_ACTIVE_ONLY_ONE_CALL ads=0`);
+        this.logger.log(`[META_AUTOPILOT_LIVE_ADS] account=${accountId} source=META_ACTIVE_BULK ads=0 metaCalls=1`);
         return empty;
       }
 
-      // Tên + budget Campaign/Ad Set + thumbnail đọc từ PostgreSQL cache.
-      // Tuyệt đối không gọi Meta từng campaign/adset.
-      const campaignIds = Array.from(
-        new Set(activeAds.map((row: any) => String(row?.campaign_id || '')).filter(Boolean)),
-      );
-      const adSetIds = Array.from(
-        new Set(activeAds.map((row: any) => String(row?.adset_id || '')).filter(Boolean)),
-      );
-      const adIds = activeAds.map((row: any) => String(row?.id || '')).filter(Boolean);
+      const adSetIds = Array.from(new Set(activeAds.map((x: any) => String(x?.adset_id || '')).filter(Boolean)));
+      const campaignIdsFromAds = Array.from(new Set(activeAds.map((x: any) => String(x?.campaign_id || '')).filter(Boolean)));
 
-      const [campaigns, adSets, cachedAds] = await Promise.all([
-        campaignIds.length
-          ? (this.prisma as any).metaCampaign.findMany({
-              where: { metaCampaignId: { in: campaignIds } },
-              select: {
-                metaCampaignId: true,
-                name: true,
-                dailyBudget: true,
-                lifetimeBudget: true,
-              },
+      // CALL 2: lấy TẤT CẢ Ad Set liên quan trong 1 bulk call.
+      // Không còn graphGet từng adset.
+      let liveAdSetsById: Record<string, any> = {};
+      if (adSetIds.length) {
+        try {
+          liveAdSetsById = await this.graphGet<Record<string, any>>('/', {
+            ids: adSetIds.join(','),
+            fields: 'id,name,campaign_id,daily_budget,lifetime_budget,start_time,updated_time',
+          });
+        } catch (error: any) {
+          this.logger.warn(`[META_AUTOPILOT_BULK_ADSETS] ${error?.message || error}`);
+        }
+      }
+
+      const campaignIds = Array.from(new Set([
+        ...campaignIdsFromAds,
+        ...Object.values(liveAdSetsById || {}).map((x: any) => String(x?.campaign_id || '')).filter(Boolean),
+      ]));
+
+      // CALL 3: lấy TẤT CẢ Campaign liên quan trong 1 bulk call.
+      // Đây là nguồn budget CBO đáng tin cậy cho các campaign như QSK925/QJ943.
+      let liveCampaignsById: Record<string, any> = {};
+      if (campaignIds.length) {
+        try {
+          liveCampaignsById = await this.graphGet<Record<string, any>>('/', {
+            ids: campaignIds.join(','),
+            fields: 'id,name,daily_budget,lifetime_budget,status,effective_status',
+          });
+        } catch (error: any) {
+          this.logger.warn(`[META_AUTOPILOT_BULK_CAMPAIGNS] ${error?.message || error}`);
+        }
+      }
+
+      // DB cache chỉ để thumbnail và fallback nếu bulk call thiếu field.
+      const adIds = activeAds.map((x: any) => String(x?.id || '')).filter(Boolean);
+      const [cachedAds, cachedAdSets, cachedCampaigns] = await Promise.all([
+        adIds.length
+          ? (this.prisma as any).metaAd.findMany({
+              where: { metaAdId: { in: adIds } },
+              select: { metaAdId: true, thumbnailUrl: true, imageUrl: true },
             })
           : Promise.resolve([]),
         adSetIds.length
           ? (this.prisma as any).metaAdSet.findMany({
               where: { metaAdSetId: { in: adSetIds } },
-              select: {
-                metaAdSetId: true,
-                metaCampaignId: true,
-                name: true,
-                dailyBudget: true,
-                lifetimeBudget: true,
-                startTime: true,
-                updatedAt: true,
-              },
+              select: { metaAdSetId: true, metaCampaignId: true, name: true, dailyBudget: true, lifetimeBudget: true, startTime: true, updatedAt: true },
             })
           : Promise.resolve([]),
-        adIds.length
-          ? (this.prisma as any).metaAd.findMany({
-              where: { metaAdId: { in: adIds } },
-              select: {
-                metaAdId: true,
-                thumbnailUrl: true,
-                imageUrl: true,
-              },
+        campaignIds.length
+          ? (this.prisma as any).metaCampaign.findMany({
+              where: { metaCampaignId: { in: campaignIds } },
+              select: { metaCampaignId: true, name: true, dailyBudget: true, lifetimeBudget: true },
             })
           : Promise.resolve([]),
       ]);
 
-      const campaignMap = new Map((campaigns || []).map((row: any) => [String(row.metaCampaignId), row]));
-      const adSetMap = new Map((adSets || []).map((row: any) => [String(row.metaAdSetId), row]));
-      const thumbMap = new Map((cachedAds || []).map((row: any) => [
-        String(row.metaAdId),
-        String(row.thumbnailUrl || row.imageUrl || '').trim() || null,
-      ]));
+      const thumbMap = new Map((cachedAds || []).map((x: any) => [String(x.metaAdId), x.thumbnailUrl || x.imageUrl || null]));
+      const cachedAdSetMap = new Map((cachedAdSets || []).map((x: any) => [String(x.metaAdSetId), x]));
+      const cachedCampaignMap = new Map((cachedCampaigns || []).map((x: any) => [String(x.metaCampaignId), x]));
 
       const rows = activeAds.map((row: any) => {
-        const cachedCampaign = campaignMap.get(String(row.campaign_id || '')) as any;
-        const cachedAdSet = adSetMap.get(String(row.adset_id || '')) as any;
-        const liveAdSet = row?.adset || {};
-        const liveCampaign = liveAdSet?.campaign || row?.campaign || {};
         const metaAdId = String(row.id || '');
+        const adSetId = String(row.adset_id || '');
+        const campaignId = String(row.campaign_id || '');
+        const liveAdSet = liveAdSetsById?.[adSetId] || {};
+        const liveCampaign = liveCampaignsById?.[campaignId] || {};
+        const cachedAdSet = cachedAdSetMap.get(adSetId) as any;
+        const cachedCampaign = cachedCampaignMap.get(campaignId) as any;
+
+        const adSetDailyBudget = this.n(liveAdSet?.daily_budget ?? cachedAdSet?.dailyBudget);
+        const campaignDailyBudget = this.n(liveCampaign?.daily_budget ?? cachedCampaign?.dailyBudget);
+        const currentBudget = adSetDailyBudget > 0 ? adSetDailyBudget : campaignDailyBudget > 0 ? campaignDailyBudget : null;
+        const budgetLevel = adSetDailyBudget > 0 ? 'ADSET' : campaignDailyBudget > 0 ? 'CAMPAIGN' : null;
 
         return {
           id: metaAdId,
           metaAdId,
           name: row.name || '',
           adName: row.name || '',
-          campaignId: row.campaign_id || liveCampaign?.id || null,
-          metaCampaignId: row.campaign_id || liveCampaign?.id || null,
+          campaignId: campaignId || null,
+          metaCampaignId: campaignId || null,
           campaignName: liveCampaign?.name || cachedCampaign?.name || null,
-          campaignDailyBudget: liveCampaign?.daily_budget != null ? this.n(liveCampaign.daily_budget) : (cachedCampaign?.dailyBudget ?? null),
-          campaignLifetimeBudget: liveCampaign?.lifetime_budget != null ? this.n(liveCampaign.lifetime_budget) : (cachedCampaign?.lifetimeBudget ?? null),
-          adSetId: row.adset_id || liveAdSet?.id || null,
-          metaAdSetId: row.adset_id || liveAdSet?.id || null,
+          campaignDailyBudget: campaignDailyBudget || null,
+          campaignLifetimeBudget: this.n(liveCampaign?.lifetime_budget ?? cachedCampaign?.lifetimeBudget) || null,
+          adSetId: adSetId || null,
+          metaAdSetId: adSetId || null,
           adSetName: liveAdSet?.name || cachedAdSet?.name || null,
+          adSetDailyBudget: adSetDailyBudget || null,
+          adSetLifetimeBudget: this.n(liveAdSet?.lifetime_budget ?? cachedAdSet?.lifetimeBudget) || null,
+          budgetLevel,
+          currentBudget,
           status: row.status || row.configured_status || null,
           effectiveStatus: row.effective_status || row.status || row.configured_status || null,
           createdTime: row.created_time || null,
           updatedTime: row.updated_time || null,
           thumbnailUrl: thumbMap.get(metaAdId) || null,
-          adSetDailyBudget: liveAdSet?.daily_budget != null ? this.n(liveAdSet.daily_budget) : (cachedAdSet?.dailyBudget ?? null),
-          adSetLifetimeBudget: liveAdSet?.lifetime_budget != null ? this.n(liveAdSet.lifetime_budget) : (cachedAdSet?.lifetimeBudget ?? null),
-          budgetLevel:
-            this.n(liveAdSet?.daily_budget ?? cachedAdSet?.dailyBudget) > 0
-              ? 'ADSET'
-              : this.n(liveCampaign?.daily_budget ?? cachedCampaign?.dailyBudget) > 0
-                ? 'CAMPAIGN'
-                : null,
-          currentBudget:
-            this.n(liveAdSet?.daily_budget ?? cachedAdSet?.dailyBudget) > 0
-              ? this.n(liveAdSet?.daily_budget ?? cachedAdSet?.dailyBudget)
-              : this.n(liveCampaign?.daily_budget ?? cachedCampaign?.dailyBudget) > 0
-                ? this.n(liveCampaign?.daily_budget ?? cachedCampaign?.dailyBudget)
-                : null,
           adSetStartTime: liveAdSet?.start_time || cachedAdSet?.startTime || null,
           adSetUpdatedTime: liveAdSet?.updated_time || cachedAdSet?.updatedAt || null,
-          source: 'META_ACTIVE_ONLY_ONE_CALL',
+          source: 'META_ACTIVE_BULK',
         };
       });
 
-      this.autopilotActiveAdsCache = { at: Date.now(), rows };
+      // Autopilot vận hành chỉ hiển thị Ads ACTIVE có creative thật.
+      // Các shell/test ads kiểu “Thử nghiệm phân tách” thường không có thumbnail và không phải Ads bán hàng cần vận hành.
+      const operationalRows = rows.filter((row: any) => {
+        const active = String(row?.effectiveStatus || row?.status || '').toUpperCase() === 'ACTIVE';
+        const hasCreative = Boolean(String(row?.thumbnailUrl || '').trim());
+        return active && hasCreative;
+      });
+
+      this.autopilotActiveAdsCache = { at: Date.now(), rows: operationalRows };
       this.logger.log(
-        `[META_AUTOPILOT_LIVE_ADS] account=${accountId} source=META_ACTIVE_ONLY_ONE_CALL ads=${rows.length} metaCalls=1 nestedCampaignAdSet=1 cacheTtlSec=60`,
+        `[META_AUTOPILOT_LIVE_ADS] account=${accountId} source=META_ACTIVE_BULK rawActive=${rows.length} operational=${operationalRows.length} adsets=${adSetIds.length} campaigns=${campaignIds.length} metaCalls<=3 cacheTtlSec=60`,
       );
-      return rows;
+      return operationalRows;
     })();
 
     try {

@@ -320,12 +320,14 @@ export class MetaAdsController {
   }
 
   @Post('autopilot/launch/run')
-  runPostLaunchAutopilot(@Body() body: { dryRun?: boolean; postId?: string; force?: boolean } = {}) {
+  runPostLaunchAutopilot(@Body() body: { dryRun?: boolean; postId?: string; force?: boolean; discoverOnly?: boolean; scanLimit?: number } = {}) {
     return this.metaAdsPostLaunchAutopilotService.runNow({
-      source: 'api',
+      source: body?.discoverOnly ? 'api-discovery' : 'api',
       dryRun: body?.dryRun,
       postId: body?.postId,
       force: body?.force,
+      discoverOnly: body?.discoverOnly,
+      scanLimit: body?.scanLimit,
     });
   }
 

@@ -300,9 +300,14 @@ export class MetaAdsPostLaunchAutopilotService implements OnModuleInit, OnModule
 
   async getPosts(limit = 100) {
     const states = await this.loadLatestPostStates();
+    const items = Array.from(states.values()).sort((a: any, b: any) => {
+      const ta = new Date(a?.createdTime || a?.at || 0).getTime();
+      const tb = new Date(b?.createdTime || b?.at || 0).getTime();
+      return tb - ta;
+    });
     return {
       ok: true,
-      items: Array.from(states.values()).slice(0, Math.min(Math.max(Number(limit || 100), 1), 500)),
+      items: items.slice(0, Math.min(Math.max(Number(limit || 100), 1), 500)),
     };
   }
 
@@ -314,19 +319,88 @@ export class MetaAdsPostLaunchAutopilotService implements OnModuleInit, OnModule
     return this.writePostState(post, 'SKIPPED', { reason: 'Bỏ qua thủ công' });
   }
 
-  async runNow(options: { source?: string; dryRun?: boolean; postId?: string; force?: boolean } = {}) {
+  async runNow(options: { source?: string; dryRun?: boolean; postId?: string; force?: boolean; discoverOnly?: boolean; scanLimit?: number } = {}) {
     if (this.running) return { ok: false, skipped: true, reason: 'Auto Launch đang chạy một phiên khác', status: this.getStatus() };
     this.running = true;
     const started = Date.now();
     const dryRun = typeof options.dryRun === 'boolean' ? options.dryRun : this.runtimeDryRun;
     try {
       const pageId = await this.metaAdsSyncService.resolvePageIdForAutoLaunch();
-      const posts = (await this.metaAdsSyncService.getPublishedPagePostsForAutoLaunch(pageId, 100))
+      const scanLimit = Math.min(100, Math.max(1, Number(options.scanLimit || 100)));
+      const published = await this.metaAdsSyncService.getPublishedPagePostsForAutoLaunch(pageId, scanLimit);
+      const posts = published
         .filter((post: AutoLaunchPost) => !options.postId || String(post.id) === String(options.postId))
-        .slice(0, this.maxPostsPerRun);
+        .slice(0, options.discoverOnly ? scanLimit : this.maxPostsPerRun);
       const states = await this.loadLatestPostStates();
       const existingAds = await this.existingAdsForPosts(posts.map((p: AutoLaunchPost) => p.id));
       const results: any[] = [];
+
+      // “Quét bài đã đăng” chỉ phát hiện/trạng thái, tuyệt đối không tạo hoặc bật Ads.
+      if (options.discoverOnly) {
+        for (const post of posts) {
+          const previous = states.get(post.id);
+          const existing = existingAds.get(post.id);
+          const ageHours = this.ageHours(post);
+
+          if (existing) {
+            const state: PostState = 'ALREADY_AD';
+            const payload = {
+              ageHours,
+              hasAd: true,
+              metaAdId: existing.metaAdId,
+              metaAdSetId: existing.metaAdSetId,
+              metaCampaignId: existing.metaCampaignId,
+              adName: existing.name || null,
+            };
+            const logged = previous?.state === state ? { ...previous, ...payload } : await this.writePostState(post, state, payload);
+            states.set(post.id, logged);
+            results.push(logged);
+            continue;
+          }
+
+          if (previous?.state === 'SKIPPED') {
+            results.push({ ...previous, hasAd: false });
+            continue;
+          }
+
+          const assessment = await this.assessPost(post);
+          let state: PostState;
+          if (this.requireInventoryMatch && (!assessment || ['UNMAPPED', 'AMBIGUOUS'].includes(String(assessment.level || '').toUpperCase()))) {
+            state = 'UNMAPPED';
+          } else if (this.blockCriticalStock && String(assessment?.level || '').toUpperCase() === 'CRITICAL') {
+            state = 'BLOCKED_STOCK';
+          } else if (ageHours >= this.waitHours) {
+            state = 'READY';
+          } else {
+            state = 'WAITING';
+          }
+
+          const payload = {
+            ageHours,
+            hasAd: false,
+            readyAt: post.created_time ? new Date(new Date(post.created_time).getTime() + this.waitHours * 3_600_000).toISOString() : null,
+            assessment,
+          };
+          const logged = previous?.state === state ? { ...previous, ...payload } : await this.writePostState(post, state, payload);
+          states.set(post.id, logged);
+          results.push(logged);
+        }
+
+        this.lastRunAt = new Date().toISOString();
+        this.lastSummary = {
+          source: options.source || 'api-discovery',
+          pageId,
+          discoveryOnly: true,
+          scanned: posts.length,
+          withAds: results.filter((x) => x.hasAd || x.state === 'ALREADY_AD').length,
+          withoutAds: results.filter((x) => !(x.hasAd || x.state === 'ALREADY_AD')).length,
+          ready: results.filter((x) => x.state === 'READY').length,
+          waiting: results.filter((x) => x.state === 'WAITING').length,
+          unmapped: results.filter((x) => x.state === 'UNMAPPED').length,
+          durationMs: Date.now() - started,
+        };
+        return { ok: true, summary: this.lastSummary, results, status: this.getStatus() };
+      }
 
       for (const post of posts) {
         const previous = states.get(post.id);
