@@ -112,7 +112,7 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
   private get requireBoth() { return this.runtimeRequireBoth; }
 
   private get intervalMs() {
-    return Math.max(60_000, Number(process.env.META_ADS_INVENTORY_INTERVAL_MS || 300_000));
+    return Math.max(60_000, Number(process.env.META_ADS_INVENTORY_INTERVAL_MS || 1_800_000));
   }
 
   private runScheduledSafely(source: 'startup' | 'interval') {

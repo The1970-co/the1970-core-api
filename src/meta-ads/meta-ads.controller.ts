@@ -4,6 +4,7 @@ import { MetaAdsSyncService } from './meta-ads-sync.service';
 import { MetaAdsOrderAttributionService } from './meta-ads-order-attribution.service';
 import { MetaAdsInventoryAutopilotService } from './meta-ads-inventory-autopilot.service';
 import { MetaAdsPerformanceAutopilotService } from './meta-ads-performance-autopilot.service';
+import { MetaAdsPostLaunchAutopilotService } from './meta-ads-post-launch-autopilot.service';
 import { SyncMetaAdsDto } from './dto/sync-meta-ads.dto';
 import type { MetaInsightLevel } from './dto/sync-meta-ads.dto';
 
@@ -69,6 +70,7 @@ export class MetaAdsController {
     private readonly metaAdsOrderAttributionService: MetaAdsOrderAttributionService,
     private readonly metaAdsInventoryAutopilotService: MetaAdsInventoryAutopilotService,
     private readonly metaAdsPerformanceAutopilotService: MetaAdsPerformanceAutopilotService,
+    private readonly metaAdsPostLaunchAutopilotService: MetaAdsPostLaunchAutopilotService,
   ) {}
 
   @Get('test')
@@ -300,6 +302,36 @@ export class MetaAdsController {
   @Post('actions/pause-ad')
   pauseSingleAd(@Body() body: { metaAdId?: string }) {
     return this.metaAdsSyncService.setAdStatus(String(body?.metaAdId || ''), 'PAUSED');
+  }
+
+  @Get('autopilot/launch/status')
+  getPostLaunchAutopilotStatus() {
+    return this.metaAdsPostLaunchAutopilotService.getStatus();
+  }
+
+  @Get('autopilot/launch/posts')
+  getPostLaunchAutopilotPosts(@Query('limit') limit?: string) {
+    return this.metaAdsPostLaunchAutopilotService.getPosts(Number(limit || 100));
+  }
+
+  @Post('autopilot/launch/config')
+  setPostLaunchAutopilotConfig(@Body() body: any = {}) {
+    return this.metaAdsPostLaunchAutopilotService.setRuntimeConfig(body);
+  }
+
+  @Post('autopilot/launch/run')
+  runPostLaunchAutopilot(@Body() body: { dryRun?: boolean; postId?: string; force?: boolean } = {}) {
+    return this.metaAdsPostLaunchAutopilotService.runNow({
+      source: 'api',
+      dryRun: body?.dryRun,
+      postId: body?.postId,
+      force: body?.force,
+    });
+  }
+
+  @Post('autopilot/launch/skip')
+  skipPostLaunchAutopilot(@Body() body: { postId?: string } = {}) {
+    return this.metaAdsPostLaunchAutopilotService.skipPost(String(body?.postId || ''));
   }
 
   @Get('live-insights')

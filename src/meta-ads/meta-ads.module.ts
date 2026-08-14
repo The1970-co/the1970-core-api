@@ -6,6 +6,7 @@ import { MetaAdsSyncService } from './meta-ads-sync.service';
 import { MetaAdsOrderAttributionService } from './meta-ads-order-attribution.service';
 import { MetaAdsInventoryAutopilotService } from './meta-ads-inventory-autopilot.service';
 import { MetaAdsPerformanceAutopilotService } from './meta-ads-performance-autopilot.service';
+import { MetaAdsPostLaunchAutopilotService } from './meta-ads-post-launch-autopilot.service';
 
 @Module({
   imports: [PrismaModule],
@@ -16,6 +17,7 @@ import { MetaAdsPerformanceAutopilotService } from './meta-ads-performance-autop
     MetaAdsOrderAttributionService,
     MetaAdsInventoryAutopilotService,
     MetaAdsPerformanceAutopilotService,
+    MetaAdsPostLaunchAutopilotService,
   ],
   exports: [
     MetaAdsService,
@@ -23,6 +25,7 @@ import { MetaAdsPerformanceAutopilotService } from './meta-ads-performance-autop
     MetaAdsOrderAttributionService,
     MetaAdsInventoryAutopilotService,
     MetaAdsPerformanceAutopilotService,
+    MetaAdsPostLaunchAutopilotService,
   ],
 })
 export class MetaAdsModule {}
