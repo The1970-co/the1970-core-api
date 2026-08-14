@@ -305,7 +305,7 @@ export class MetaAdsSyncService {
         limit: '1000',
       }, 20),
       this.graphList<any>(`/${accountId}/adsets`, {
-        fields: 'id,name,campaign_id,status,effective_status',
+        fields: 'id,name,campaign_id,status,effective_status,configured_status,daily_budget,lifetime_budget',
         limit: '1000',
       }, 50),
     ]);
@@ -324,6 +324,8 @@ export class MetaAdsSyncService {
         campaignName: campaign?.name || null,
         adSetId: row.adset_id || null,
         adSetName: adSet?.name || null,
+        adSetDailyBudget: adSet?.daily_budget != null ? this.n(adSet.daily_budget) : null,
+        adSetLifetimeBudget: adSet?.lifetime_budget != null ? this.n(adSet.lifetime_budget) : null,
         status: row.status || row.configured_status || null,
         effectiveStatus: row.effective_status || row.status || row.configured_status || null,
         updatedTime: row.updated_time || null,

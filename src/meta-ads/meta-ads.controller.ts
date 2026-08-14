@@ -230,6 +230,18 @@ export class MetaAdsController {
     return this.metaAdsSyncService.setAdStatus(String(body?.metaAdId || ''), 'PAUSED');
   }
 
+  @Post('actions/ad-status')
+  setSingleAdStatus(@Body() body: { metaAdId?: string; status?: 'ACTIVE' | 'PAUSED' }) {
+    const status = String(body?.status || '').toUpperCase();
+    if (status !== 'ACTIVE' && status !== 'PAUSED') throw new Error('status phải là ACTIVE hoặc PAUSED');
+    return this.metaAdsSyncService.setAdStatus(String(body?.metaAdId || ''), status as 'ACTIVE' | 'PAUSED');
+  }
+
+  @Get('autopilot/control-center')
+  getAutopilotControlCenter() {
+    return this.metaAdsPerformanceAutopilotService.getControlCenter();
+  }
+
   @Get('autopilot/performance/status')
   getPerformanceAutopilotStatus() {
     return this.metaAdsPerformanceAutopilotService.getStatus();

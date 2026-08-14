@@ -167,6 +167,88 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
     return { ok: true, dryRun, metaAdSetId, oldBudget: currentBudget, newBudget: nextBudget, percent };
   }
 
+  async getControlCenter() {
+    const [live, structure] = await Promise.all([
+      this.metaAdsSyncService.getLiveInsights({ range: 'today', level: 'ad', limit: 1000 }),
+      this.metaAdsSyncService.getLiveAdsForAutopilot(5000),
+    ]);
+    const range = this.hcmTodayRange();
+    const attributed = (await this.attributionService.attachProductOrdersToAds(
+      (live?.topAds || []) as any[],
+      { since: range.since, until: range.until, sourceMode: 'facebook', orderMode: 'valid' },
+    )) as any[];
+
+    const structureByAd = new Map((structure || []).map((row: any) => [String(row?.metaAdId || row?.id || ''), row]));
+    const merged = attributed.map((row: any) => {
+      const id = String(row?.metaAdId || row?.id || '');
+      const meta = structureByAd.get(id) as any;
+      return {
+        ...row,
+        campaignName: row?.campaignName || meta?.campaignName || null,
+        adSetName: row?.adSetName || meta?.adSetName || null,
+        metaAdSetId: row?.metaAdSetId || meta?.adSetId || null,
+        status: meta?.status || row?.status || null,
+        effectiveStatus: meta?.effectiveStatus || row?.effectiveStatus || null,
+        adSetDailyBudget: n(meta?.adSetDailyBudget),
+      };
+    });
+
+    const stockChecks = await this.inventoryAutopilotService.assessAdsForScale(merged);
+    const stockByAd = new Map(stockChecks.map((row: any) => [String(row?.metaAdId || ''), row]));
+
+    const rows = merged.map((row: any) => {
+      const attr = row?.productAttribution || {};
+      const stock = stockByAd.get(String(row?.metaAdId || row?.id || '')) as any;
+      const spend = n(row?.metrics?.spend);
+      const revenue = n(attr?.revenue || attr?.familyRevenue);
+      const roas = n(attr?.realRoasEstimate || attr?.familyRoasEstimate);
+      const scaleReasons: string[] = [];
+      if (attr?.allocationMode !== 'single_ad_family' || n(attr?.confidence) < 80) scaleReasons.push('Attribution chưa đủ chắc');
+      if (roas < this.scaleRoas) scaleReasons.push(`ROAS ${roas.toFixed(2)} < ${this.scaleRoas}`);
+      if (spend < this.minSpend) scaleReasons.push(`Spend chưa đạt ${Math.round(this.minSpend)}`);
+      if (!stock?.safe) scaleReasons.push(stock?.reason || 'Tồn kho chưa an toàn');
+      const adSetId = String(row?.metaAdSetId || '');
+      if (adSetId && !this.cooldownOk(adSetId)) scaleReasons.push(`Cooldown ${this.cooldownMinutes} phút`);
+      if (adSetId && this.cleanHistory(adSetId).length >= this.maxScalePerAdSetPerDay) scaleReasons.push(`Đủ ${this.maxScalePerAdSetPerDay} lần scale/24h`);
+
+      return {
+        id: String(row?.metaAdId || row?.id || ''),
+        metaAdId: String(row?.metaAdId || row?.id || ''),
+        adName: row?.name || '',
+        campaignName: row?.campaignName || '',
+        campaignId: row?.metaCampaignId || '',
+        adSetName: row?.adSetName || '',
+        adSetId: row?.metaAdSetId || '',
+        status: row?.status || null,
+        effectiveStatus: row?.effectiveStatus || null,
+        thumbnailUrl: row?.thumbnailUrl || row?.imageUrl || null,
+        spend,
+        revenue,
+        roas,
+        budgetDaily: n(row?.adSetDailyBudget),
+        productAttribution: attr,
+        inventory: stock || null,
+        canScale: scaleReasons.length === 0 && isActive(row),
+        scaleReasons,
+      };
+    });
+
+    return {
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      config: this.getStatus(),
+      summary: {
+        totalAds: rows.length,
+        activeAds: rows.filter((row: any) => String(row.effectiveStatus || row.status || '').toUpperCase() === 'ACTIVE').length,
+        pausedAds: rows.filter((row: any) => String(row.effectiveStatus || row.status || '').toUpperCase() === 'PAUSED').length,
+        scaleCandidates: rows.filter((row: any) => row.canScale).length,
+        lowStockAds: rows.filter((row: any) => row?.inventory?.groups?.some((g: any) => (g.lowSizes || []).length > 0)).length,
+        criticalStockAds: rows.filter((row: any) => row?.inventory?.groups?.some((g: any) => (g.criticalSizes || []).length > 0)).length,
+      },
+      rows,
+    };
+  }
+
   async runNow(options: { source?: string; dryRun?: boolean } = {}) {
     if (this.running) return { ok: false, skipped: true, reason: 'Performance autopilot đang chạy' };
     this.running = true;
