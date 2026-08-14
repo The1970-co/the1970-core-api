@@ -282,21 +282,43 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
       colorCountByProduct.set(group.productCode, (colorCountByProduct.get(group.productCode) || 0) + 1);
     }
 
-    return (ads || []).map((ad) => {
+    return (ads || []).map((ad: any) => {
       const matchedGroups = groups.filter((group) =>
-        this.matchAdsForGroup(group, [ad], colorCountByProduct.get(group.productCode) || 1).length > 0,
+        this.matchAdsForGroup(group, [{ ...ad, status: 'ACTIVE', effectiveStatus: 'ACTIVE' }], colorCountByProduct.get(group.productCode) || 1).length > 0,
       );
-      if (!matchedGroups.length) {
-        return { metaAdId: String(ad?.metaAdId || ad?.id || ''), safe: false, reason: 'Không match chắc chắn được mã + màu để kiểm tồn', groups: [] };
+
+      if (matchedGroups.length !== 1) {
+        return {
+          metaAdId: String(ad?.metaAdId || ad?.id || ''),
+          safe: false,
+          level: matchedGroups.length > 1 ? 'AMBIGUOUS' : 'UNMAPPED',
+          sizes: [],
+          reason: matchedGroups.length > 1 ? 'Match tồn kho bị trùng nhiều mã + màu' : 'Chưa match được tồn kho đúng mã + màu',
+        };
       }
-      const unsafe = matchedGroups.filter((group) => group.lowSizes.length > 0);
+
+      const group = matchedGroups[0];
+      const critical = group.sizes.some((row) => row.qty < this.pauseThreshold);
+      const low = group.sizes.some((row) => row.qty < this.warnThreshold);
       return {
         metaAdId: String(ad?.metaAdId || ad?.id || ''),
-        safe: unsafe.length === 0,
-        reason: unsafe.length
-          ? `Không scale: ${unsafe.map((g) => `${g.colorKey} có size ${g.lowSizes.join(', ')} dưới ${this.warnThreshold}`).join('; ')}`
-          : 'Tồn size an toàn để scale',
-        groups: matchedGroups.map((g) => ({ colorKey: g.colorKey, sizes: g.sizes.map((x) => ({ size: x.size, qty: x.qty })), lowSizes: g.lowSizes, criticalSizes: g.criticalSizes })),
+        safe: !low,
+        level: critical ? 'CRITICAL' : low ? 'LOW_STOCK' : 'SAFE',
+        productId: group.productId,
+        productCode: group.productCode,
+        productName: group.productName,
+        color: group.color,
+        colorKey: group.colorKey,
+        sizes: group.sizes.map((row) => ({ size: row.size, qty: row.qty })),
+        totalQty: group.totalQty,
+        minQty: group.minQty,
+        lowSizes: group.lowSizes,
+        criticalSizes: group.criticalSizes,
+        reason: critical
+          ? `Có size ${group.criticalSizes.join(', ')} dưới ${this.pauseThreshold}`
+          : low
+            ? `Có size ${group.lowSizes.join(', ')} dưới ${this.warnThreshold}`
+            : 'Tồn tất cả size an toàn để scale',
       };
     });
   }

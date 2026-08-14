@@ -210,6 +210,42 @@ export class MetaAdsController {
       },
     };
   }
+  @Get('autopilot/performance/status')
+  getPerformanceAutopilotStatus() {
+    return this.metaAdsPerformanceAutopilotService.getStatus();
+  }
+
+  @Post('autopilot/performance/config')
+  setPerformanceAutopilotConfig(@Body() body: any = {}) {
+    return this.metaAdsPerformanceAutopilotService.setRuntimeConfig(body);
+  }
+
+  @Post('autopilot/performance/run')
+  runPerformanceAutopilot(@Body() body: { dryRun?: boolean } = {}) {
+    return this.metaAdsPerformanceAutopilotService.runNow({ source: 'api', dryRun: body?.dryRun });
+  }
+
+  @Get('autopilot/control-center')
+  getAutopilotControlCenter() {
+    return this.metaAdsPerformanceAutopilotService.getControlCenter();
+  }
+
+  @Post('actions/scale-adset')
+  scaleAdSet(@Body() body: { metaAdSetId?: string; percent?: number; dryRun?: boolean; metaAdId?: string } = {}) {
+    return this.metaAdsPerformanceAutopilotService.executeAdSetScale(
+      String(body?.metaAdSetId || ''),
+      Number(body?.percent || 20),
+      Boolean(body?.dryRun),
+      { source: 'manual_ui', metaAdId: body?.metaAdId },
+    );
+  }
+
+  @Post('actions/ad-status')
+  setSingleAdStatus(@Body() body: { metaAdId?: string; status?: 'PAUSED' | 'ACTIVE' } = {}) {
+    const status = String(body?.status || '').toUpperCase() as 'PAUSED' | 'ACTIVE';
+    return this.metaAdsSyncService.setAdStatus(String(body?.metaAdId || ''), status);
+  }
+
   @Get('autopilot/inventory/status')
   getInventoryAutopilotStatus() {
     return this.metaAdsInventoryAutopilotService.getStatus();
@@ -228,42 +264,6 @@ export class MetaAdsController {
   @Post('actions/pause-ad')
   pauseSingleAd(@Body() body: { metaAdId?: string }) {
     return this.metaAdsSyncService.setAdStatus(String(body?.metaAdId || ''), 'PAUSED');
-  }
-
-  @Post('actions/ad-status')
-  setSingleAdStatus(@Body() body: { metaAdId?: string; status?: 'ACTIVE' | 'PAUSED' }) {
-    const status = String(body?.status || '').toUpperCase();
-    if (status !== 'ACTIVE' && status !== 'PAUSED') throw new Error('status phải là ACTIVE hoặc PAUSED');
-    return this.metaAdsSyncService.setAdStatus(String(body?.metaAdId || ''), status as 'ACTIVE' | 'PAUSED');
-  }
-
-  @Get('autopilot/control-center')
-  getAutopilotControlCenter() {
-    return this.metaAdsPerformanceAutopilotService.getControlCenter();
-  }
-
-  @Get('autopilot/performance/status')
-  getPerformanceAutopilotStatus() {
-    return this.metaAdsPerformanceAutopilotService.getStatus();
-  }
-
-  @Post('autopilot/performance/config')
-  setPerformanceAutopilotConfig(@Body() body: any = {}) {
-    return this.metaAdsPerformanceAutopilotService.setRuntimeConfig(body);
-  }
-
-  @Post('autopilot/performance/run')
-  runPerformanceAutopilot(@Body() body: { dryRun?: boolean } = {}) {
-    return this.metaAdsPerformanceAutopilotService.runNow({ source: 'api', dryRun: body?.dryRun });
-  }
-
-  @Post('actions/scale-adset')
-  scaleAdSet(@Body() body: { metaAdSetId?: string; percent?: number; dryRun?: boolean }) {
-    return this.metaAdsPerformanceAutopilotService.executeAdSetScale(
-      String(body?.metaAdSetId || ''),
-      Number(body?.percent || 20),
-      body?.dryRun !== false,
-    );
   }
 
   @Get('live-insights')

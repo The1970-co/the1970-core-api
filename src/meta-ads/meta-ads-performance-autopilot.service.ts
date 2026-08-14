@@ -1,9 +1,11 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
 import { MetaAdsSyncService } from './meta-ads-sync.service';
 import { MetaAdsOrderAttributionService } from './meta-ads-order-attribution.service';
 import { MetaAdsInventoryAutopilotService } from './meta-ads-inventory-autopilot.service';
 
 type AutomationLevel = 'manual' | 'semi' | 'auto';
+type AnyRow = Record<string, any>;
 
 type PerformanceAction = {
   at: string;
@@ -34,20 +36,24 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
   private readonly logger = new Logger(MetaAdsPerformanceAutopilotService.name);
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+
   private runtimeEnabled = this.envBool('META_ADS_PERFORMANCE_AUTOPILOT_ENABLED', false);
   private runtimeDryRun = this.envBool('META_ADS_PERFORMANCE_AUTOPILOT_DRY_RUN', true);
   private runtimeLevel: AutomationLevel = this.envLevel(process.env.META_ADS_PERFORMANCE_AUTOMATION_LEVEL || 'manual');
+
+  // Rule đã chốt: đánh giá rolling 24h, ROAS >= 3, scale +20%, tối đa 1 lần / 24h.
   private scaleRoas = this.envNumber('META_ADS_SCALE_ROAS', 3);
   private scalePercent = this.envNumber('META_ADS_SCALE_PERCENT', 20);
   private minSpend = this.envNumber('META_ADS_SCALE_MIN_SPEND', 200000);
-  private cooldownMinutes = this.envNumber('META_ADS_SCALE_COOLDOWN_MINUTES', 360);
-  private maxScalePerAdSetPerDay = this.envNumber('META_ADS_SCALE_MAX_PER_ADSET_PER_DAY', 2);
+  private readonly minRunHours = 24;
+  private readonly scaleWindowHours = 24;
+
   private lastRunAt: string | null = null;
   private lastSummary: any = null;
   private actions: PerformanceAction[] = [];
-  private scaleHistory = new Map<string, string[]>();
 
   constructor(
+    private readonly prisma: PrismaService,
     private readonly metaAdsSyncService: MetaAdsSyncService,
     private readonly attributionService: MetaAdsOrderAttributionService,
     private readonly inventoryAutopilotService: MetaAdsInventoryAutopilotService,
@@ -70,6 +76,7 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
   }
 
   private get intervalMs() {
+    // Scan thường xuyên để khi vừa đủ 24h thì không phải đợi lâu; guardrail vẫn chỉ cho scale 1 lần / 24h.
     return Math.max(60_000, this.envNumber('META_ADS_PERFORMANCE_INTERVAL_MS', 300_000));
   }
 
@@ -97,8 +104,6 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
     if (Number.isFinite(Number(input.scaleRoas))) this.scaleRoas = Math.max(0.1, Number(input.scaleRoas));
     if (Number.isFinite(Number(input.scalePercent))) this.scalePercent = Math.min(50, Math.max(1, Number(input.scalePercent)));
     if (Number.isFinite(Number(input.minSpend))) this.minSpend = Math.max(0, Number(input.minSpend));
-    if (Number.isFinite(Number(input.cooldownMinutes))) this.cooldownMinutes = Math.max(30, Number(input.cooldownMinutes));
-    if (Number.isFinite(Number(input.maxScalePerAdSetPerDay))) this.maxScalePerAdSetPerDay = Math.max(1, Math.round(Number(input.maxScalePerAdSetPerDay)));
     this.restartTimer();
     return this.getStatus();
   }
@@ -114,22 +119,13 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
       scaleRoas: this.scaleRoas,
       scalePercent: this.scalePercent,
       minSpend: this.minSpend,
-      cooldownMinutes: this.cooldownMinutes,
-      maxScalePerAdSetPerDay: this.maxScalePerAdSetPerDay,
+      minRunHours: this.minRunHours,
+      scaleWindowHours: this.scaleWindowHours,
+      maxScalePerAdSetPer24h: 1,
       lastRunAt: this.lastRunAt,
       lastSummary: this.lastSummary,
       recentActions: this.actions.slice(0, 100),
-      rule: `ROAS >= ${this.scaleRoas}, spend >= ${this.minSpend}, tồn mọi size >= 10; scale ad set +${this.scalePercent}%.`,
-    };
-  }
-
-  private hcmTodayRange() {
-    const ymd = new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit',
-    }).format(new Date());
-    return {
-      since: new Date(`${ymd}T00:00:00.000+07:00`),
-      until: new Date(`${ymd}T23:59:59.999+07:00`),
+      rule: `Chạy >= ${this.minRunHours}h + ROAS rolling 24h >= ${this.scaleRoas} + spend >= ${this.minSpend} + tồn mọi size >= 10; scale Ad Set +${this.scalePercent}%, tối đa 1 lần/24h.`,
     };
   }
 
@@ -137,115 +133,284 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
     this.actions = [action, ...this.actions].slice(0, 200);
   }
 
-  private cleanHistory(adSetId: string) {
-    const now = Date.now();
-    const oneDay = 24 * 60 * 60 * 1000;
-    const rows = (this.scaleHistory.get(adSetId) || []).filter((iso) => now - new Date(iso).getTime() < oneDay);
-    this.scaleHistory.set(adSetId, rows);
-    return rows;
+  private async recentScaleLogs(hours = this.scaleWindowHours) {
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000);
+    try {
+      const rows = await (this.prisma as any).metaSyncLog.findMany({
+        where: {
+          syncType: 'META_ADS_AUTOPILOT_SCALE',
+          status: 'SUCCESS',
+          startedAt: { gte: since },
+        },
+        orderBy: { startedAt: 'desc' },
+        take: 1000,
+      });
+      return (rows || []) as AnyRow[];
+    } catch (error: any) {
+      this.logger.warn(`[AUTO_SCALE_LOG_READ] ${error?.message || error}`);
+      return [];
+    }
   }
 
-  private cooldownOk(adSetId: string) {
-    const rows = this.cleanHistory(adSetId);
-    if (!rows.length) return true;
-    const latest = Math.max(...rows.map((x) => new Date(x).getTime()));
-    return Date.now() - latest >= this.cooldownMinutes * 60_000;
+  private scaleLogAdSetId(log: AnyRow) {
+    const payload = (log?.errorJson || {}) as AnyRow;
+    return String(payload?.metaAdSetId || '').trim();
   }
 
-  private recordScale(adSetId: string) {
-    const rows = this.cleanHistory(adSetId);
-    rows.push(new Date().toISOString());
-    this.scaleHistory.set(adSetId, rows);
+  private async lastScaleByAdSet() {
+    const logs = await this.recentScaleLogs();
+    const map = new Map<string, AnyRow>();
+    for (const log of logs) {
+      const adSetId = this.scaleLogAdSetId(log);
+      if (adSetId && !map.has(adSetId)) map.set(adSetId, log);
+    }
+    return map;
   }
 
-  async executeAdSetScale(metaAdSetId: string, percent = this.scalePercent, dryRun = this.runtimeDryRun) {
-    const adSet = await this.metaAdsSyncService.getAdSetForAutopilot(metaAdSetId);
-    const currentBudget = n(adSet?.daily_budget);
-    if (!currentBudget) throw new Error('Ad set không có daily_budget để scale');
-    const nextBudget = Math.round(currentBudget * (1 + Number(percent) / 100));
-    if (!dryRun) await this.metaAdsSyncService.setAdSetDailyBudget(metaAdSetId, nextBudget);
-    return { ok: true, dryRun, metaAdSetId, oldBudget: currentBudget, newBudget: nextBudget, percent };
+  private async persistScaleLog(input: {
+    metaAdSetId: string;
+    metaAdId?: string;
+    source: string;
+    percent: number;
+    oldBudget: number;
+    newBudget: number;
+    roas?: number;
+    spend?: number;
+  }) {
+    try {
+      await (this.prisma as any).metaSyncLog.create({
+        data: {
+          metaAccountId: null,
+          syncType: 'META_ADS_AUTOPILOT_SCALE',
+          status: 'SUCCESS',
+          range: 'rolling_24h',
+          startedAt: new Date(),
+          finishedAt: new Date(),
+          durationMs: 0,
+          scanned: 1,
+          upserted: 1,
+          failed: 0,
+          message: `Scale Ad Set +${input.percent}%: ${input.oldBudget} -> ${input.newBudget}`,
+          errorJson: {
+            metaAdSetId: input.metaAdSetId,
+            metaAdId: input.metaAdId || null,
+            source: input.source,
+            percent: input.percent,
+            oldBudget: input.oldBudget,
+            newBudget: input.newBudget,
+            roas: input.roas ?? null,
+            spend: input.spend ?? null,
+          },
+        },
+      });
+    } catch (error: any) {
+      // Không rollback lệnh Meta nếu ghi audit log lỗi.
+      this.logger.warn(`[AUTO_SCALE_LOG_WRITE] ${error?.message || error}`);
+    }
+  }
+
+  async executeAdSetScale(
+    metaAdSetId: string,
+    percent = this.scalePercent,
+    dryRun = this.runtimeDryRun,
+    context: { source?: string; metaAdId?: string; roas?: number; spend?: number } = {},
+  ) {
+    const adSetId = String(metaAdSetId || '').trim();
+    if (!adSetId) throw new Error('Thiếu metaAdSetId');
+
+    const recent = await this.lastScaleByAdSet();
+    const existing = recent.get(adSetId);
+    const isAutomaticSource = String(context.source || '').toLowerCase().startsWith('auto') || String(context.source || '').toLowerCase() === 'interval' || String(context.source || '').toLowerCase() === 'startup';
+    if (existing && !dryRun && isAutomaticSource) {
+      const lastAt = new Date(existing.startedAt).getTime();
+      const nextAt = new Date(lastAt + this.scaleWindowHours * 60 * 60 * 1000);
+      throw new Error(`Ad Set đã scale trong 24h. Được scale lại sau ${nextAt.toLocaleString('vi-VN')}`);
+    }
+
+    const adSet = await this.metaAdsSyncService.getAdSetForAutopilot(adSetId);
+    const currentBudget = n(adSet?.daily_budget ?? adSet?.dailyBudget);
+    if (!currentBudget) throw new Error('Ad Set không có daily_budget để scale');
+
+    const safePercent = Math.min(50, Math.max(1, Number(percent) || this.scalePercent));
+    const nextBudget = Math.round(currentBudget * (1 + safePercent / 100));
+
+    if (!dryRun) {
+      await this.metaAdsSyncService.setAdSetDailyBudget(adSetId, nextBudget);
+      await this.persistScaleLog({
+        metaAdSetId: adSetId,
+        metaAdId: context.metaAdId,
+        source: context.source || 'manual',
+        percent: safePercent,
+        oldBudget: currentBudget,
+        newBudget: nextBudget,
+        roas: context.roas,
+        spend: context.spend,
+      });
+    }
+
+    return {
+      ok: true,
+      dryRun,
+      metaAdSetId: adSetId,
+      oldBudget: currentBudget,
+      newBudget: nextBudget,
+      percent: safePercent,
+      nextAutoScaleAt: dryRun ? null : new Date(Date.now() + this.scaleWindowHours * 60 * 60 * 1000).toISOString(),
+    };
+  }
+
+  private runtimeHours(row: AnyRow) {
+    const candidates = [row?.createdTime, row?.created_time, row?.updatedTime, row?.updated_time]
+      .map((x) => (x ? new Date(x).getTime() : NaN))
+      .filter((x) => Number.isFinite(x));
+    if (!candidates.length) return 999999;
+    // Conservative: sau một thay đổi Meta gần đây cũng chờ đủ 24h trước auto scale.
+    const anchor = Math.max(...candidates);
+    return Math.max(0, (Date.now() - anchor) / 3_600_000);
+  }
+
+  private evaluateCandidate(input: {
+    row: AnyRow;
+    stock: AnyRow | undefined;
+    lastScale: AnyRow | undefined;
+    exactRolling24h: boolean;
+  }) {
+    const { row, stock, lastScale, exactRolling24h } = input;
+    const attr = (row?.productAttribution || {}) as AnyRow;
+    const roas = n(attr?.realRoasEstimate);
+    const spend = n(row?.metrics?.spend);
+    const runHours = this.runtimeHours(row);
+    const reasons: string[] = [];
+
+    if (!exactRolling24h) reasons.push('Meta chưa trả được rolling 24h chính xác');
+    if (attr?.allocationMode !== 'single_ad_family' || n(attr?.confidence) < 80) reasons.push('Attribution chưa đủ chắc');
+    if (runHours < this.minRunHours) reasons.push(`Mới chạy ${runHours.toFixed(1)}h < ${this.minRunHours}h`);
+    if (roas < this.scaleRoas) reasons.push(`ROAS 24h ${roas.toFixed(2)} < ${this.scaleRoas}`);
+    if (spend < this.minSpend) reasons.push(`Spend 24h ${Math.round(spend)} < ${Math.round(this.minSpend)}`);
+    if (!stock?.safe) reasons.push(stock?.reason || 'Tồn kho chưa an toàn');
+
+    let nextScaleAt: string | null = null;
+    if (lastScale) {
+      const lastAt = new Date(lastScale.startedAt).getTime();
+      const next = lastAt + this.scaleWindowHours * 60 * 60 * 1000;
+      nextScaleAt = new Date(next).toISOString();
+      if (Date.now() < next) reasons.push('Đã scale trong 24h');
+    }
+
+    return {
+      eligible: reasons.length === 0,
+      reasons,
+      roas,
+      spend,
+      runHours,
+      nextScaleAt,
+      attribution: attr,
+    };
   }
 
   async getControlCenter() {
-    const [live, structure] = await Promise.all([
-      this.metaAdsSyncService.getLiveInsights({ range: 'today', level: 'ad', limit: 1000 }),
+    const now = new Date();
+    const since = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+    const [rollingRaw, structure, lastScaleMap] = await Promise.all([
+      this.metaAdsSyncService.getRolling24hAdInsights(1000),
       this.metaAdsSyncService.getLiveAdsForAutopilot(5000),
+      this.lastScaleByAdSet(),
     ]);
-    const range = this.hcmTodayRange();
+    const rolling: any = rollingRaw;
+
     const attributed = (await this.attributionService.attachProductOrdersToAds(
-      (live?.topAds || []) as any[],
-      { since: range.since, until: range.until, sourceMode: 'facebook', orderMode: 'valid' },
-    )) as any[];
+      ((rolling?.topAds || []) as AnyRow[]),
+      {
+        since,
+        until: now,
+        sourceMode: 'facebook',
+        orderMode: 'valid',
+      },
+    )) as AnyRow[];
 
-    const structureByAd = new Map((structure || []).map((row: any) => [String(row?.metaAdId || row?.id || ''), row]));
-    const merged = attributed.map((row: any) => {
-      const id = String(row?.metaAdId || row?.id || '');
-      const meta = structureByAd.get(id) as any;
+    const structureByAd = new Map((structure || []).map((row: AnyRow) => [String(row.metaAdId || row.id), row]));
+    const merged = attributed.map((row: AnyRow) => ({
+      ...row,
+      ...(structureByAd.get(String(row.metaAdId || row.id)) || {}),
+      metrics: row.metrics || {},
+      productAttribution: row.productAttribution || {},
+    }));
+
+    // Ads ACTIVE nhưng không có spend 24h vẫn phải xuất hiện để người vận hành bật/tắt được.
+    const known = new Set(merged.map((row: AnyRow) => String(row.metaAdId || row.id)));
+    for (const row of structure || []) {
+      const id = String((row as AnyRow).metaAdId || (row as AnyRow).id || '');
+      if (!id || known.has(id)) continue;
+      merged.push({ ...(row as AnyRow), metrics: { spend: 0 }, productAttribution: {} });
+    }
+
+    const inventoryChecks = await this.inventoryAutopilotService.assessAdsForScale(merged);
+    const inventoryByAd = new Map(inventoryChecks.map((x: AnyRow) => [String(x.metaAdId), x]));
+
+    const ads = merged.map((row: AnyRow) => {
+      const adId = String(row?.metaAdId || row?.id || '');
+      const adSetId = String(row?.metaAdSetId || row?.adSetId || '');
+      const stock = inventoryByAd.get(adId) as AnyRow | undefined;
+      const evaluation = this.evaluateCandidate({
+        row,
+        stock,
+        lastScale: lastScaleMap.get(adSetId),
+        exactRolling24h: rolling?.exactRolling24h === true,
+      });
+      const attr = evaluation.attribution;
+      const internalRevenue = n(attr?.revenue || attr?.orderRevenue);
+
       return {
-        ...row,
-        campaignName: row?.campaignName || meta?.campaignName || null,
-        adSetName: row?.adSetName || meta?.adSetName || null,
-        metaAdSetId: row?.metaAdSetId || meta?.adSetId || null,
-        status: meta?.status || row?.status || null,
-        effectiveStatus: meta?.effectiveStatus || row?.effectiveStatus || null,
-        adSetDailyBudget: n(meta?.adSetDailyBudget),
-      };
-    });
-
-    const stockChecks = await this.inventoryAutopilotService.assessAdsForScale(merged);
-    const stockByAd = new Map(stockChecks.map((row: any) => [String(row?.metaAdId || ''), row]));
-
-    const rows = merged.map((row: any) => {
-      const attr = row?.productAttribution || {};
-      const stock = stockByAd.get(String(row?.metaAdId || row?.id || '')) as any;
-      const spend = n(row?.metrics?.spend);
-      const revenue = n(attr?.revenue || attr?.familyRevenue);
-      const roas = n(attr?.realRoasEstimate || attr?.familyRoasEstimate);
-      const scaleReasons: string[] = [];
-      if (attr?.allocationMode !== 'single_ad_family' || n(attr?.confidence) < 80) scaleReasons.push('Attribution chưa đủ chắc');
-      if (roas < this.scaleRoas) scaleReasons.push(`ROAS ${roas.toFixed(2)} < ${this.scaleRoas}`);
-      if (spend < this.minSpend) scaleReasons.push(`Spend chưa đạt ${Math.round(this.minSpend)}`);
-      if (!stock?.safe) scaleReasons.push(stock?.reason || 'Tồn kho chưa an toàn');
-      const adSetId = String(row?.metaAdSetId || '');
-      if (adSetId && !this.cooldownOk(adSetId)) scaleReasons.push(`Cooldown ${this.cooldownMinutes} phút`);
-      if (adSetId && this.cleanHistory(adSetId).length >= this.maxScalePerAdSetPerDay) scaleReasons.push(`Đủ ${this.maxScalePerAdSetPerDay} lần scale/24h`);
-
-      return {
-        id: String(row?.metaAdId || row?.id || ''),
-        metaAdId: String(row?.metaAdId || row?.id || ''),
-        adName: row?.name || '',
-        campaignName: row?.campaignName || '',
-        campaignId: row?.metaCampaignId || '',
-        adSetName: row?.adSetName || '',
-        adSetId: row?.metaAdSetId || '',
+        metaAdId: adId,
+        adName: row?.name || row?.adName || '',
+        metaAdSetId: adSetId,
+        adSetName: row?.adSetName || null,
+        metaCampaignId: row?.metaCampaignId || row?.campaignId || null,
+        campaignName: row?.campaignName || null,
         status: row?.status || null,
         effectiveStatus: row?.effectiveStatus || null,
         thumbnailUrl: row?.thumbnailUrl || row?.imageUrl || null,
-        spend,
-        revenue,
-        roas,
-        budgetDaily: n(row?.adSetDailyBudget),
-        productAttribution: attr,
-        inventory: stock || null,
-        canScale: scaleReasons.length === 0 && isActive(row),
-        scaleReasons,
+        createdTime: row?.createdTime || row?.created_time || null,
+        updatedTime: row?.updatedTime || row?.updated_time || null,
+        runHours: evaluation.runHours,
+        budgetDaily: n(row?.adSetDailyBudget || row?.dailyBudget || row?.daily_budget),
+        spend24h: evaluation.spend,
+        revenue24h: internalRevenue,
+        roas24h: evaluation.roas,
+        orderCount24h: n(attr?.orderCount),
+        productId: attr?.productId || null,
+        sku: attr?.sku || attr?.familySku || null,
+        familySku: attr?.familySku || null,
+        productName: attr?.productName || null,
+        attributionConfidence: n(attr?.confidence),
+        allocationMode: attr?.allocationMode || null,
+        sizes: stock?.sizes || [],
+        stockSafe: Boolean(stock?.safe),
+        stockLevel: stock?.level || 'UNMAPPED',
+        stockReason: stock?.reason || 'Chưa match tồn kho',
+        autoScaleEligible: evaluation.eligible && isActive(row),
+        autoScaleReasons: evaluation.reasons,
+        nextScaleAt: evaluation.nextScaleAt,
       };
     });
 
     return {
       ok: true,
       generatedAt: new Date().toISOString(),
+      window: { since: since.toISOString(), until: now.toISOString(), hours: 24 },
+      exactRolling24h: rolling?.exactRolling24h === true,
+      fallbackReason: rolling?.fallbackReason || null,
       config: this.getStatus(),
+      ads,
       summary: {
-        totalAds: rows.length,
-        activeAds: rows.filter((row: any) => String(row.effectiveStatus || row.status || '').toUpperCase() === 'ACTIVE').length,
-        pausedAds: rows.filter((row: any) => String(row.effectiveStatus || row.status || '').toUpperCase() === 'PAUSED').length,
-        scaleCandidates: rows.filter((row: any) => row.canScale).length,
-        lowStockAds: rows.filter((row: any) => row?.inventory?.groups?.some((g: any) => (g.lowSizes || []).length > 0)).length,
-        criticalStockAds: rows.filter((row: any) => row?.inventory?.groups?.some((g: any) => (g.criticalSizes || []).length > 0)).length,
+        total: ads.length,
+        active: ads.filter((x: AnyRow) => String(x.effectiveStatus || x.status).toUpperCase() === 'ACTIVE').length,
+        paused: ads.filter((x: AnyRow) => String(x.effectiveStatus || x.status).toUpperCase().includes('PAUSED')).length,
+        scaleEligible: ads.filter((x: AnyRow) => x.autoScaleEligible).length,
+        lowStock: ads.filter((x: AnyRow) => x.stockLevel === 'LOW_STOCK').length,
+        criticalStock: ads.filter((x: AnyRow) => x.stockLevel === 'CRITICAL').length,
       },
-      rows,
     };
   }
 
@@ -256,32 +421,16 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
     const dryRun = typeof options.dryRun === 'boolean' ? options.dryRun : this.runtimeDryRun;
 
     try {
-      const live = await this.metaAdsSyncService.getLiveInsights({ range: 'today', level: 'ad', limit: 1000 });
-      const range = this.hcmTodayRange();
-      const attributed = (await this.attributionService.attachProductOrdersToAds(
-        (live?.topAds || []) as any[],
-        {
-        since: range.since,
-        until: range.until,
-        sourceMode: 'facebook',
-          orderMode: 'valid',
-        },
-      )) as any[];
+      const center = await this.getControlCenter();
+      const rows = (center.ads || []).filter((row: AnyRow) => String(row?.effectiveStatus || row?.status || '').toUpperCase() === 'ACTIVE');
 
-      const activeRows: any[] = attributed.filter((row: any) => isActive(row) && row?.metaAdSetId);
-      const inventoryChecks = await this.inventoryAutopilotService.assessAdsForScale(activeRows);
-      const inventoryByAd = new Map(inventoryChecks.map((x: any) => [String(x.metaAdId), x]));
-
-      // Một ad set chỉ scale tối đa 1 lần mỗi vòng, lấy ad có ROAS nội bộ tốt nhất.
-      const bestByAdSet = new Map<string, any>();
-      for (const row of activeRows) {
-        const attr = row?.productAttribution || {};
-        const roas = n(attr?.realRoasEstimate);
-        const spend = n(row?.metrics?.spend);
+      // Một Ad Set có thể chứa nhiều ads; chỉ scale một lần, lấy ads có ROAS 24h cao nhất làm đại diện.
+      const bestByAdSet = new Map<string, AnyRow>();
+      for (const row of rows) {
         const adSetId = String(row?.metaAdSetId || '');
-        const candidate = { row, roas, spend, attr };
+        if (!adSetId) continue;
         const old = bestByAdSet.get(adSetId);
-        if (!old || roas > old.roas) bestByAdSet.set(adSetId, candidate);
+        if (!old || n(row?.roas24h) > n(old?.roas24h)) bestByAdSet.set(adSetId, row);
       }
 
       let eligible = 0;
@@ -289,66 +438,100 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
       let scaled = 0;
       let skipped = 0;
       let failed = 0;
-      const results: any[] = [];
+      const results: AnyRow[] = [];
 
-      for (const [adSetId, candidate] of bestByAdSet) {
-        const { row, roas, spend, attr } = candidate;
-        const adId = String(row?.metaAdId || row?.id || '');
-        const stock = inventoryByAd.get(adId) as any;
-        const reasons: string[] = [];
-
-        if (attr?.allocationMode !== 'single_ad_family' || n(attr?.confidence) < 80) reasons.push('Attribution chưa đủ chắc để auto scale');
-        if (roas < this.scaleRoas) reasons.push(`ROAS ${roas.toFixed(2)} < ${this.scaleRoas}`);
-        if (spend < this.minSpend) reasons.push(`Spend ${Math.round(spend)} < ${Math.round(this.minSpend)}`);
-        if (!stock?.safe) reasons.push(stock?.reason || 'Tồn kho chưa an toàn');
-        if (!this.cooldownOk(adSetId)) reasons.push(`Ad set đang trong cooldown ${this.cooldownMinutes} phút`);
-        if (this.cleanHistory(adSetId).length >= this.maxScalePerAdSetPerDay) reasons.push(`Đã đủ ${this.maxScalePerAdSetPerDay} lần scale/24h`);
-
-        if (reasons.length) {
+      for (const [adSetId, row] of bestByAdSet) {
+        if (!row.autoScaleEligible) {
           skipped += 1;
-          results.push({ metaAdId: adId, metaAdSetId: adSetId, roas, spend, action: 'SKIP', reasons });
+          const reason = Array.isArray(row.autoScaleReasons) ? row.autoScaleReasons.join(' · ') : 'Không đủ điều kiện';
+          this.pushAction({
+            at: new Date().toISOString(),
+            type: 'SKIP',
+            metaAdId: row.metaAdId,
+            metaAdSetId: adSetId,
+            adName: row.adName,
+            sku: row.sku || null,
+            roas: n(row.roas24h),
+            spend: n(row.spend24h),
+            reason,
+          });
+          results.push({ metaAdId: row.metaAdId, metaAdSetId: adSetId, action: 'SKIP', reason });
           continue;
         }
 
         eligible += 1;
-        const reason = `ROAS ${roas.toFixed(2)} >= ${this.scaleRoas}; spend đủ; tồn size an toàn; attribution chắc.`;
-
-        if (this.runtimeLevel === 'manual') {
+        if (this.runtimeLevel !== 'auto') {
           suggested += 1;
-          this.pushAction({ at: new Date().toISOString(), type: 'SUGGEST_SCALE', metaAdId: adId, metaAdSetId: adSetId, adName: row?.name, sku: attr?.sku || null, roas, spend, reason });
-          results.push({ metaAdId: adId, metaAdSetId: adSetId, roas, spend, action: 'SUGGEST' });
-          continue;
-        }
-
-        if (this.runtimeLevel === 'semi') {
-          suggested += 1;
-          this.pushAction({ at: new Date().toISOString(), type: 'SUGGEST_SCALE', metaAdId: adId, metaAdSetId: adSetId, adName: row?.name, sku: attr?.sku || null, roas, spend, reason: `${reason} Chờ bấm xác nhận.` });
-          results.push({ metaAdId: adId, metaAdSetId: adSetId, roas, spend, action: 'SUGGEST' });
+          const reason = `Đủ điều kiện: chạy ${n(row.runHours).toFixed(1)}h, ROAS 24h ${n(row.roas24h).toFixed(2)}, tồn an toàn.`;
+          this.pushAction({
+            at: new Date().toISOString(),
+            type: 'SUGGEST_SCALE',
+            metaAdId: row.metaAdId,
+            metaAdSetId: adSetId,
+            adName: row.adName,
+            sku: row.sku || null,
+            roas: n(row.roas24h),
+            spend: n(row.spend24h),
+            reason,
+          });
+          results.push({ metaAdId: row.metaAdId, metaAdSetId: adSetId, action: 'SUGGEST_SCALE' });
           continue;
         }
 
         try {
-          const execution = await this.executeAdSetScale(adSetId, this.scalePercent, dryRun);
-          if (!dryRun) this.recordScale(adSetId);
-          scaled += 1;
-          this.pushAction({
-            at: new Date().toISOString(), type: dryRun ? 'DRY_RUN_SCALE' : 'SCALE', metaAdId: adId, metaAdSetId: adSetId,
-            adName: row?.name, sku: attr?.sku || null, roas, spend, oldBudget: execution.oldBudget, newBudget: execution.newBudget,
-            reason: `${reason} Scale +${this.scalePercent}%.`,
+          const scaledResult = await this.executeAdSetScale(adSetId, this.scalePercent, dryRun, {
+            source: options.source || 'auto',
+            metaAdId: row.metaAdId,
+            roas: n(row.roas24h),
+            spend: n(row.spend24h),
           });
-          results.push({ ...execution, metaAdId: adId, roas, spend, action: dryRun ? 'DRY_RUN_SCALE' : 'SCALE' });
+          if (!dryRun) scaled += 1;
+          this.pushAction({
+            at: new Date().toISOString(),
+            type: dryRun ? 'DRY_RUN_SCALE' : 'SCALE',
+            metaAdId: row.metaAdId,
+            metaAdSetId: adSetId,
+            adName: row.adName,
+            sku: row.sku || null,
+            roas: n(row.roas24h),
+            spend: n(row.spend24h),
+            oldBudget: scaledResult.oldBudget,
+            newBudget: scaledResult.newBudget,
+            reason: `ROAS rolling 24h ${n(row.roas24h).toFixed(2)} >= ${this.scaleRoas}; scale +${this.scalePercent}%.`,
+          });
+          results.push({ ...scaledResult, metaAdId: row.metaAdId, roas24h: row.roas24h });
         } catch (error: any) {
           failed += 1;
           const message = error?.message || String(error);
-          this.pushAction({ at: new Date().toISOString(), type: 'ERROR', metaAdId: adId, metaAdSetId: adSetId, adName: row?.name, sku: attr?.sku || null, roas, spend, reason: message });
-          results.push({ metaAdId: adId, metaAdSetId: adSetId, roas, spend, action: 'ERROR', error: message });
+          this.pushAction({
+            at: new Date().toISOString(),
+            type: 'ERROR',
+            metaAdId: row.metaAdId,
+            metaAdSetId: adSetId,
+            adName: row.adName,
+            sku: row.sku || null,
+            roas: n(row.roas24h),
+            spend: n(row.spend24h),
+            reason: message,
+          });
+          results.push({ metaAdId: row.metaAdId, metaAdSetId: adSetId, action: 'ERROR', error: message });
         }
       }
 
       this.lastRunAt = new Date().toISOString();
-      this.lastSummary = { source: options.source || 'manual', dryRun, level: this.runtimeLevel, scannedAds: activeRows.length, scannedAdSets: bestByAdSet.size, eligible, suggested, scaled, skipped, failed };
-      this.logger.log(`[META_PERFORMANCE_AUTOPILOT] ${JSON.stringify(this.lastSummary)}`);
-      return { ok: true, ...this.lastSummary, durationMs: Date.now() - started, results };
+      this.lastSummary = {
+        source: options.source || 'manual',
+        dryRun,
+        exactRolling24h: center.exactRolling24h,
+        scannedAdSets: bestByAdSet.size,
+        eligible,
+        suggested,
+        scaled,
+        skipped,
+        failed,
+        durationMs: Date.now() - started,
+      };
+      return { ok: true, summary: this.lastSummary, results, status: this.getStatus() };
     } finally {
       this.running = false;
     }

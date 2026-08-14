@@ -261,43 +261,13 @@ export class MetaAdsSyncService {
     return { ok: result?.success !== false, metaAdId: adId, status };
   }
 
-  async getAdSetForAutopilot(metaAdSetId: string) {
-    const id = String(metaAdSetId || '').trim();
-    if (!id) throw new Error('Thiếu metaAdSetId');
-    return this.graphGet<any>(`/${id}`, {
-      fields: 'id,name,campaign_id,status,effective_status,configured_status,daily_budget,lifetime_budget',
-    });
-  }
-
-  async setAdSetDailyBudget(metaAdSetId: string, dailyBudget: number) {
-    const id = String(metaAdSetId || '').trim();
-    const budget = Math.round(Number(dailyBudget || 0));
-    if (!id) throw new Error('Thiếu metaAdSetId');
-    if (!Number.isFinite(budget) || budget <= 0) throw new Error('dailyBudget không hợp lệ');
-
-    const result = await this.graphPost<{ success?: boolean }>(`/${id}`, {
-      daily_budget: String(budget),
-    });
-
-    try {
-      await (this.prisma as any).metaAdSet.updateMany({
-        where: { metaAdSetId: id },
-        data: { dailyBudget: budget, lastSyncedAt: new Date() },
-      });
-    } catch (error: any) {
-      this.logger.warn(`[META_ADSET_BUDGET_DB_CACHE] ${id}: ${error?.message || error}`);
-    }
-
-    return { ok: result?.success !== false, metaAdSetId: id, dailyBudget: budget };
-  }
-
   async getLiveAdsForAutopilot(limit = 5000) {
     const accountId = this.normalizeAccountId(this.defaultAdAccountId);
     const pageLimit = String(Math.min(Math.max(Number(limit || 5000), 50), 1000));
 
     const [ads, campaigns, adSets] = await Promise.all([
       this.graphList<any>(`/${accountId}/ads`, {
-        fields: 'id,name,campaign_id,adset_id,status,effective_status,configured_status,updated_time',
+        fields: 'id,name,campaign_id,adset_id,status,effective_status,configured_status,created_time,updated_time,creative{id,thumbnail_url,image_url,object_story_spec}',
         limit: pageLimit,
       }, 100),
       this.graphList<any>(`/${accountId}/campaigns`, {
@@ -305,7 +275,7 @@ export class MetaAdsSyncService {
         limit: '1000',
       }, 20),
       this.graphList<any>(`/${accountId}/adsets`, {
-        fields: 'id,name,campaign_id,status,effective_status,configured_status,daily_budget,lifetime_budget',
+        fields: 'id,name,campaign_id,status,effective_status,daily_budget,lifetime_budget,start_time,end_time,updated_time',
         limit: '1000',
       }, 50),
     ]);
@@ -324,13 +294,148 @@ export class MetaAdsSyncService {
         campaignName: campaign?.name || null,
         adSetId: row.adset_id || null,
         adSetName: adSet?.name || null,
-        adSetDailyBudget: adSet?.daily_budget != null ? this.n(adSet.daily_budget) : null,
-        adSetLifetimeBudget: adSet?.lifetime_budget != null ? this.n(adSet.lifetime_budget) : null,
         status: row.status || row.configured_status || null,
         effectiveStatus: row.effective_status || row.status || row.configured_status || null,
+        createdTime: row.created_time || null,
         updatedTime: row.updated_time || null,
+        thumbnailUrl: row?.creative?.thumbnail_url || row?.creative?.image_url || row?.creative?.object_story_spec?.link_data?.picture || row?.creative?.object_story_spec?.video_data?.image_url || null,
+        adSetDailyBudget: adSet?.daily_budget != null ? this.n(adSet.daily_budget) : null,
+        adSetLifetimeBudget: adSet?.lifetime_budget != null ? this.n(adSet.lifetime_budget) : null,
+        adSetStartTime: adSet?.start_time || null,
+        adSetUpdatedTime: adSet?.updated_time || null,
       };
     });
+  }
+
+
+  async getAdSetForAutopilot(metaAdSetId: string) {
+    const adSetId = String(metaAdSetId || '').trim();
+    if (!adSetId) throw new Error('Thiếu metaAdSetId');
+    return this.graphGet<any>(`/${adSetId}`, {
+      fields: 'id,name,status,effective_status,daily_budget,lifetime_budget,start_time,end_time,updated_time,campaign_id',
+    });
+  }
+
+  async setAdSetDailyBudget(metaAdSetId: string, dailyBudget: number) {
+    const adSetId = String(metaAdSetId || '').trim();
+    const budget = Math.round(Number(dailyBudget || 0));
+    if (!adSetId) throw new Error('Thiếu metaAdSetId');
+    if (!Number.isFinite(budget) || budget <= 0) throw new Error('daily_budget không hợp lệ');
+
+    const result = await this.graphPost<{ success?: boolean }>(`/${adSetId}`, {
+      daily_budget: String(budget),
+    });
+
+    try {
+      await (this.prisma as any).metaAdSet.updateMany({
+        where: { metaAdSetId: adSetId },
+        data: { dailyBudget: budget, lastSyncedAt: new Date() },
+      });
+    } catch (error: any) {
+      this.logger.warn(`[META_ADSET_BUDGET_DB_CACHE] ${adSetId}: ${error?.message || error}`);
+    }
+
+    return { ok: result?.success !== false, metaAdSetId: adSetId, dailyBudget: budget };
+  }
+
+  private hcmParts(date: Date) {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23',
+    }).formatToParts(date);
+    const get = (type: string) => parts.find((p) => p.type === type)?.value || '';
+    return { ymd: `${get('year')}-${get('month')}-${get('day')}`, hour: Number(get('hour') || 0) };
+  }
+
+  private hourlyBucketStart(dateStart: string, label: string) {
+    const match = String(label || '').match(/(\d{1,2}):/);
+    if (!dateStart || !match) return null;
+    const hour = String(Number(match[1])).padStart(2, '0');
+    const d = new Date(`${dateStart}T${hour}:00:00.000+07:00`);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  async getRolling24hAdInsights(limit = 1000) {
+    const accountId = this.normalizeAccountId(this.defaultAdAccountId);
+    const now = new Date();
+    const since = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const sinceYmd = this.hcmParts(since).ymd;
+    const untilYmd = this.hcmParts(now).ymd;
+
+    try {
+      const rows = await this.graphList<any>(`/${accountId}/insights`, {
+        fields: 'date_start,date_stop,account_id,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,reach,frequency,clicks,inline_link_clicks,cpc,cpm,ctr,actions,cost_per_action_type,action_values,purchase_roas,website_purchase_roas',
+        level: 'ad',
+        time_increment: '1',
+        time_range: JSON.stringify({ since: sinceYmd, until: untilYmd }),
+        breakdowns: 'hourly_stats_aggregated_by_advertiser_time_zone',
+        action_report_time: 'conversion',
+        use_unified_attribution_setting: 'true',
+        limit: String(Math.min(Math.max(Number(limit || 1000), 50), 1000)),
+      }, 100);
+
+      const filtered = rows.filter((row: any) => {
+        const label = row?.hourly_stats_aggregated_by_advertiser_time_zone;
+        const bucket = this.hourlyBucketStart(String(row?.date_start || ''), String(label || ''));
+        if (!bucket) return false;
+        const t = bucket.getTime();
+        return t >= since.getTime() && t <= now.getTime();
+      });
+
+      const byAd = new Map<string, any>();
+      for (const row of filtered) {
+        const id = String(row?.ad_id || '').trim();
+        if (!id) continue;
+        const metrics = this.metricsFromMetaInsightRow(row);
+        const old = byAd.get(id) || {
+          id,
+          level: 'ad',
+          name: row?.ad_name || '',
+          campaignName: row?.campaign_name || null,
+          adSetName: row?.adset_name || null,
+          metaCampaignId: row?.campaign_id || null,
+          metaAdSetId: row?.adset_id || null,
+          metaAdId: id,
+          status: null,
+          effectiveStatus: null,
+          metricRows: [],
+          rawRows: [],
+        };
+        old.metricRows.push(metrics);
+        old.rawRows.push(row);
+        byAd.set(id, old);
+      }
+
+      const normalized = Array.from(byAd.values()).map((row: any) => ({
+        ...row,
+        metrics: this.mergeMetricRows(row.metricRows || []),
+        rawJson: { rolling24h: true, rows: row.rawRows || [] },
+        metricRows: undefined,
+        rawRows: undefined,
+      }));
+      const enriched = await this.enrichLiveRowsWithStructure(normalized, 'ad');
+
+      return {
+        ok: true,
+        source: 'meta_live_hourly_rolling_24h',
+        exactRolling24h: true,
+        generatedAt: now.toISOString(),
+        window: { since: since.toISOString(), until: now.toISOString() },
+        count: enriched.length,
+        topAds: enriched,
+        summary: this.mergeMetricRows(enriched.map((row: any) => row.metrics || {})),
+      };
+    } catch (error: any) {
+      // Fail closed cho auto-scale: vẫn trả dữ liệu để UI xem, nhưng exactRolling24h=false nên engine không tự scale.
+      this.logger.warn(`[META_ROLLING_24H] hourly breakdown unavailable: ${error?.message || error}`);
+      const fallback = await this.getLiveInsights({ range: 'today', level: 'ad', limit });
+      return {
+        ...fallback,
+        exactRolling24h: false,
+        fallbackReason: error?.message || String(error),
+        window: { since: since.toISOString(), until: now.toISOString() },
+      };
+    }
   }
 
   private async graphList<T>(path: string, params: Record<string, string>, maxPages = 20) {
