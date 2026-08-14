@@ -388,17 +388,35 @@ export class MetaAdsSyncService {
 
   async getLiveAdsForAutopilot(limit = 5000) {
     const accountId = this.normalizeAccountId(this.defaultAdAccountId);
-    // Meta có thể trả code=1 "Please reduce the amount of data..." nếu vừa lấy nested creative
-    // vừa request page 1000. Dùng page nhỏ hơn nhưng vẫn paginate đủ tổng số ads.
     const requested = Math.min(Math.max(Number(limit || 5000), 50), 5000);
-    const adsPageLimit = String(Math.min(requested, 100));
 
-    const ads = await this.graphList<any>(`/${accountId}/ads`, {
-      fields: 'id,name,campaign_id,adset_id,status,effective_status,configured_status,created_time,updated_time,creative{id,thumbnail_url,image_url}',
-      limit: adsPageLimit,
-    }, Math.min(100, Math.max(1, Math.ceil(requested / 100))));
+    // QUAN TRỌNG:
+    // Endpoint này chỉ cần lấy structure để render danh sách Ads nhanh và ổn định.
+    // Không kéo creative nested ở request list chính vì Meta rất dễ trả code=1
+    // "Please reduce the amount of data you're asking for".
+    let ads: any[] = [];
+    let source = 'META_ADS_MINIMAL';
 
-    // Campaign/Ad Set chỉ để enrich tên + budget; lỗi riêng ở 2 list này không được làm mất toàn bộ ads live.
+    try {
+      ads = await this.graphList<any>(`/${accountId}/ads`, {
+        fields: 'id,name,campaign_id,adset_id,status,effective_status,configured_status,created_time,updated_time',
+        limit: '100',
+      }, Math.min(50, Math.max(1, Math.ceil(requested / 100))));
+    } catch (firstError: any) {
+      // Fallback siêu nhẹ: bỏ cả timestamps/configured_status và giảm page size.
+      // Nếu Meta đang nhạy với amount-of-data thì nhánh này vẫn phải kéo được danh sách Ads.
+      this.logger.warn(`[META_AUTOPILOT_LIVE_ADS] primary list failed, retry minimal: ${firstError?.message || firstError}`);
+      source = 'META_ADS_MINIMAL_RETRY';
+      ads = await this.graphList<any>(`/${accountId}/ads`, {
+        fields: 'id,name,campaign_id,adset_id,status,effective_status',
+        limit: '50',
+      }, Math.min(100, Math.max(1, Math.ceil(requested / 50))));
+    }
+
+    // Chỉ giữ đúng số lượng caller yêu cầu.
+    ads = ads.slice(0, requested);
+
+    // Campaign/Ad Set chỉ là enrich. Lỗi ở đây tuyệt đối không được làm mất Ads.
     const [campaignResult, adSetResult] = await Promise.allSettled([
       this.graphList<any>(`/${accountId}/campaigns`, {
         fields: 'id,name,status,effective_status,daily_budget,lifetime_budget,start_time,stop_time',
@@ -412,19 +430,49 @@ export class MetaAdsSyncService {
 
     const campaigns = campaignResult.status === 'fulfilled' ? campaignResult.value : [];
     const adSets = adSetResult.status === 'fulfilled' ? adSetResult.value : [];
-    if (campaignResult.status === 'rejected') this.logger.warn(`[MetaAdsSync] campaign enrich skipped: ${campaignResult.reason?.message || campaignResult.reason}`);
-    if (adSetResult.status === 'rejected') this.logger.warn(`[MetaAdsSync] adset enrich skipped: ${adSetResult.reason?.message || adSetResult.reason}`);
+
+    if (campaignResult.status === 'rejected') {
+      this.logger.warn(`[MetaAdsSync] campaign enrich skipped: ${campaignResult.reason?.message || campaignResult.reason}`);
+    }
+    if (adSetResult.status === 'rejected') {
+      this.logger.warn(`[MetaAdsSync] adset enrich skipped: ${adSetResult.reason?.message || adSetResult.reason}`);
+    }
 
     const campaignMap = new Map(campaigns.map((row: any) => [String(row.id), row]));
     const adSetMap = new Map(adSets.map((row: any) => [String(row.id), row]));
 
-    return ads.map((row: any) => {
+    // Thumbnail lấy từ DB cache đã sync trước đó, không bắt request /ads phải kéo creative.
+    // Cache lỗi/rỗng cũng không ảnh hưởng danh sách Ads live.
+    const thumbnailMap = new Map<string, string | null>();
+    try {
+      const ids = ads.map((row: any) => String(row?.id || '')).filter(Boolean);
+      if (ids.length) {
+        const cachedAds = await (this.prisma as any).metaAd.findMany({
+          where: { metaAdId: { in: ids } },
+          select: { metaAdId: true, thumbnailUrl: true, imageUrl: true },
+          take: Math.min(ids.length, 5000),
+        });
+        for (const row of cachedAds || []) {
+          thumbnailMap.set(
+            String(row?.metaAdId || ''),
+            String(row?.thumbnailUrl || row?.imageUrl || '').trim() || null,
+          );
+        }
+      }
+    } catch (error: any) {
+      this.logger.warn(`[META_AUTOPILOT_THUMBNAIL_CACHE] ${error?.message || error}`);
+    }
+
+    const rows = ads.map((row: any) => {
       const campaign = campaignMap.get(String(row.campaign_id || '')) as any;
       const adSet = adSetMap.get(String(row.adset_id || '')) as any;
+      const metaAdId = String(row.id || '');
+
       return {
-        id: String(row.id || ''),
-        metaAdId: String(row.id || ''),
+        id: metaAdId,
+        metaAdId,
         name: row.name || '',
+        adName: row.name || '',
         campaignId: row.campaign_id || null,
         metaCampaignId: row.campaign_id || null,
         campaignName: campaign?.name || null,
@@ -437,15 +485,21 @@ export class MetaAdsSyncService {
         effectiveStatus: row.effective_status || row.status || row.configured_status || null,
         createdTime: row.created_time || null,
         updatedTime: row.updated_time || null,
-        thumbnailUrl: row?.creative?.thumbnail_url || row?.creative?.image_url || row?.creative?.object_story_spec?.link_data?.picture || row?.creative?.object_story_spec?.video_data?.image_url || null,
+        thumbnailUrl: thumbnailMap.get(metaAdId) || null,
         adSetDailyBudget: adSet?.daily_budget != null ? this.n(adSet.daily_budget) : null,
         adSetLifetimeBudget: adSet?.lifetime_budget != null ? this.n(adSet.lifetime_budget) : null,
         adSetStartTime: adSet?.start_time || null,
         adSetUpdatedTime: adSet?.updated_time || null,
+        source,
       };
     });
-  }
 
+    this.logger.log(
+      `[META_AUTOPILOT_LIVE_ADS] account=${accountId} source=${source} ads=${rows.length} campaigns=${campaigns.length} adsets=${adSets.length}`,
+    );
+
+    return rows;
+  }
 
   async getAdSetForAutopilot(metaAdSetId: string) {
     const adSetId = String(metaAdSetId || '').trim();
