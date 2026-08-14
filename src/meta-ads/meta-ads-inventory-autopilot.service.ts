@@ -3,6 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { MetaAdsSyncService } from './meta-ads-sync.service';
 
 type AutopilotLevel = 'NORMAL' | 'READY_TO_PAUSE' | 'AUTO_PAUSED' | 'CRITICAL_NO_AD_MATCH';
+type AutomationLevel = 'manual' | 'semi' | 'auto';
 
 type SizeStock = {
   size: string;
@@ -30,7 +31,7 @@ type ColorStockGroup = {
 
 type AutopilotAction = {
   at: string;
-  type: 'WARNING' | 'PAUSE' | 'DRY_RUN_PAUSE' | 'NO_MATCH' | 'ERROR';
+  type: 'WARNING' | 'SUGGEST_PAUSE' | 'PAUSE' | 'DRY_RUN_PAUSE' | 'NO_MATCH' | 'ERROR';
   colorKey: string;
   productName: string;
   sizes: Array<{ size: string; qty: number }>;
@@ -77,6 +78,12 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
   private running = false;
   private runtimeEnabled = this.envBool('META_ADS_INVENTORY_AUTOPILOT_ENABLED', false);
   private runtimeDryRun = this.envBool('META_ADS_INVENTORY_AUTOPILOT_DRY_RUN', true);
+  private runtimeLevel: AutomationLevel = this.envLevel(process.env.META_ADS_PERFORMANCE_AUTOMATION_LEVEL || 'manual');
+  private runtimeWarnThreshold = Math.max(1, Number(process.env.META_ADS_INVENTORY_WARN_THRESHOLD || 10));
+  private runtimePauseThreshold = Math.max(0, Number(process.env.META_ADS_INVENTORY_PAUSE_THRESHOLD || 5));
+  private runtimeCriticalSizeCount = Math.max(1, Number(process.env.META_ADS_INVENTORY_CRITICAL_SIZE_COUNT || 2));
+  private runtimePauseTotalQty = Math.max(0, Number(process.env.META_ADS_INVENTORY_PAUSE_TOTAL_QTY || 40));
+  private runtimeRequireBoth = this.envBool('META_ADS_INVENTORY_REQUIRE_BOTH', true);
   private lastRunAt: string | null = null;
   private lastRunDurationMs = 0;
   private lastSummary: any = null;
@@ -93,19 +100,23 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
     return ['1', 'true', 'yes', 'on'].includes(raw);
   }
 
-  private get warnThreshold() {
-    return Math.max(1, Number(process.env.META_ADS_INVENTORY_WARN_THRESHOLD || 10));
+  private envLevel(value: any): AutomationLevel {
+    const v = String(value || '').toLowerCase();
+    return v === 'auto' || v === 'semi' ? v : 'manual';
   }
 
-  private get pauseThreshold() {
-    return Math.max(0, Number(process.env.META_ADS_INVENTORY_PAUSE_THRESHOLD || 5));
-  }
+  private get warnThreshold() { return this.runtimeWarnThreshold; }
+  private get pauseThreshold() { return this.runtimePauseThreshold; }
+  private get criticalSizeCount() { return this.runtimeCriticalSizeCount; }
+  private get pauseTotalQty() { return this.runtimePauseTotalQty; }
+  private get requireBoth() { return this.runtimeRequireBoth; }
 
   private get intervalMs() {
     return Math.max(60_000, Number(process.env.META_ADS_INVENTORY_INTERVAL_MS || 300_000));
   }
 
-  onModuleInit() {
+  async onModuleInit() {
+    await this.loadPersistedConfig();
     this.restartTimer();
     if (this.runtimeEnabled) {
       setTimeout(() => void this.runNow({ source: 'startup' }), 15_000);
@@ -127,11 +138,40 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
     }, this.intervalMs);
   }
 
-  setRuntimeConfig(input: { enabled?: boolean; dryRun?: boolean }) {
+  async setRuntimeConfig(input: { enabled?: boolean; dryRun?: boolean; level?: AutomationLevel; warnThreshold?: number; pauseThreshold?: number; criticalSizeCount?: number; pauseTotalQty?: number; requireBoth?: boolean }) {
     if (typeof input?.enabled === 'boolean') this.runtimeEnabled = input.enabled;
     if (typeof input?.dryRun === 'boolean') this.runtimeDryRun = input.dryRun;
+    if (input?.level) this.runtimeLevel = this.envLevel(input.level);
+    if (Number.isFinite(Number(input?.warnThreshold))) this.runtimeWarnThreshold = Math.max(1, Number(input.warnThreshold));
+    if (Number.isFinite(Number(input?.pauseThreshold))) this.runtimePauseThreshold = Math.max(0, Number(input.pauseThreshold));
+    if (Number.isFinite(Number(input?.criticalSizeCount))) this.runtimeCriticalSizeCount = Math.max(1, Math.round(Number(input.criticalSizeCount)));
+    if (Number.isFinite(Number(input?.pauseTotalQty))) this.runtimePauseTotalQty = Math.max(0, Math.round(Number(input.pauseTotalQty)));
+    if (typeof input?.requireBoth === 'boolean') this.runtimeRequireBoth = input.requireBoth;
     this.restartTimer();
+    await this.persistRuntimeConfig();
     return this.getStatus();
+  }
+
+  private async loadPersistedConfig() {
+    try {
+      const row = await (this.prisma as any).metaSyncLog.findFirst({ where: { syncType: 'META_ADS_AUTOPILOT_INVENTORY_CONFIG', status: 'SUCCESS' }, orderBy: { startedAt: 'desc' } });
+      const config = (row?.errorJson as any)?.config || {};
+      if (typeof config.enabled === 'boolean') this.runtimeEnabled = config.enabled;
+      if (typeof config.dryRun === 'boolean') this.runtimeDryRun = config.dryRun;
+      if (config.level) this.runtimeLevel = this.envLevel(config.level);
+      if (Number.isFinite(Number(config.warnThreshold))) this.runtimeWarnThreshold = Math.max(1, Number(config.warnThreshold));
+      if (Number.isFinite(Number(config.pauseThreshold))) this.runtimePauseThreshold = Math.max(0, Number(config.pauseThreshold));
+      if (Number.isFinite(Number(config.criticalSizeCount))) this.runtimeCriticalSizeCount = Math.max(1, Math.round(Number(config.criticalSizeCount)));
+      if (Number.isFinite(Number(config.pauseTotalQty))) this.runtimePauseTotalQty = Math.max(0, Math.round(Number(config.pauseTotalQty)));
+      if (typeof config.requireBoth === 'boolean') this.runtimeRequireBoth = config.requireBoth;
+    } catch (error: any) { this.logger.warn(`[INVENTORY_AUTOPILOT_CONFIG_LOAD] ${error?.message || error}`); }
+  }
+
+  private async persistRuntimeConfig() {
+    try {
+      const config = { enabled: this.runtimeEnabled, dryRun: this.runtimeDryRun, level: this.runtimeLevel, warnThreshold: this.warnThreshold, pauseThreshold: this.pauseThreshold, criticalSizeCount: this.criticalSizeCount, pauseTotalQty: this.pauseTotalQty, requireBoth: this.requireBoth };
+      await (this.prisma as any).metaSyncLog.create({ data: { metaAccountId: null, syncType: 'META_ADS_AUTOPILOT_INVENTORY_CONFIG', status: 'SUCCESS', range: 'config', startedAt: new Date(), finishedAt: new Date(), durationMs: 0, scanned: 0, upserted: 1, failed: 0, message: 'Saved Inventory Autopilot config', errorJson: { config } } });
+    } catch (error: any) { this.logger.warn(`[INVENTORY_AUTOPILOT_CONFIG_SAVE] ${error?.message || error}`); }
   }
 
   getStatus() {
@@ -139,12 +179,16 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
       ok: true,
       enabled: this.runtimeEnabled,
       dryRun: this.runtimeDryRun,
+      level: this.runtimeLevel,
       running: this.running,
       warnThreshold: this.warnThreshold,
       pauseThreshold: this.pauseThreshold,
+      criticalSizeCount: this.criticalSizeCount,
+      pauseTotalQty: this.pauseTotalQty,
+      requireBoth: this.requireBoth,
       intervalMs: this.intervalMs,
       intervalMinutes: Math.round(this.intervalMs / 60_000),
-      rule: `Cảnh báo khi bất kỳ size < ${this.warnThreshold}; pause ad con khi bất kỳ size < ${this.pauseThreshold}.`,
+      rule: `Cảnh báo khi bất kỳ size < ${this.warnThreshold}; critical khi ít nhất ${this.criticalSizeCount} size < ${this.pauseThreshold}${this.requireBoth ? ` và tổng tồn màu < ${this.pauseTotalQty}` : ` hoặc tổng tồn màu < ${this.pauseTotalQty}`}; chỉ auto pause ở Mức 3.`,
       lastRunAt: this.lastRunAt,
       lastRunDurationMs: this.lastRunDurationMs,
       lastSummary: this.lastSummary,
@@ -246,23 +290,52 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
   }
 
   private async loadInventoryGroups(): Promise<ColorStockGroup[]> {
-    const variants = await (this.prisma as any).productVariant.findMany({
-      include: {
-        product: true,
-        inventoryItems: true,
+    // QUAN TRỌNG: dùng đúng nguồn tồn kho mà trang Kho hàng đang dùng:
+    // InventoryItem -> variant -> product. Không đi vòng qua ProductVariant.inventoryItems,
+    // vì source thật của inventory.service/getInventory là InventoryItem.
+    const inventoryRows = await (this.prisma as any).inventoryItem.findMany({
+      select: {
+        id: true,
+        branchId: true,
+        availableQty: true,
+        reservedQty: true,
+        incomingQty: true,
+        variantId: true,
+        variant: {
+          select: {
+            id: true,
+            sku: true,
+            color: true,
+            size: true,
+            productId: true,
+            product: {
+              select: {
+                id: true,
+                name: true,
+                slug: true,
+                status: true,
+              },
+            },
+          },
+        },
       },
-      take: 30000,
+      take: 100000,
     });
 
     const groups = new Map<string, any>();
 
-    for (const variant of variants || []) {
+    for (const item of inventoryRows || []) {
+      const variant = item?.variant || {};
       const product = variant?.product || {};
+      if (!variant?.id) continue;
+      if (String(product?.status || '').toUpperCase() === 'INACTIVE') continue;
+
       const productId = String(product?.id || variant?.productId || '').trim();
-      const productName = String(product?.name || variant?.productName || product?.slug || product?.code || 'Sản phẩm').trim();
+      const productName = String(product?.name || product?.slug || 'Sản phẩm').trim();
       const sku = String(variant?.sku || '').trim().toUpperCase();
-      const productCode = this.extractProductCode(product?.code, product?.slug, productName, sku)
-        || String(product?.code || product?.slug || '').trim().toUpperCase();
+      const productCode =
+        this.extractProductCode(product?.slug, productName, sku) ||
+        String(product?.slug || '').trim().replace(/^\/+|\/+$/g, '').toUpperCase();
       const color = String(variant?.color || '').trim();
       const colorNormalized = normalizeText(color);
       const size = this.sizeLabel(variant?.size);
@@ -283,7 +356,7 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
         sizes: new Map<string, any>(),
       };
 
-      [productCode, product?.code, product?.slug, this.extractProductCode(productName, sku)]
+      [productCode, product?.slug, this.extractProductCode(productName, sku)]
         .map((value) => String(value || '').trim())
         .filter(Boolean)
         .forEach((value) => group.productAliases.add(value));
@@ -294,14 +367,21 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
         if (colorAlias) group.skuAliases.add(colorAlias);
       }
 
-      const qty = Array.isArray(variant?.inventoryItems)
-        ? variant.inventoryItems.reduce((sum: number, item: any) => sum + n(item?.availableQty), 0)
-        : 0;
-
-      const sizeRow = group.sizes.get(size) || { size, qty: 0, variantIds: [], skus: [] };
+      // Giống InventoryPageClient: tổng tồn bán được = tổng availableQty của các chi nhánh.
+      // Mỗi InventoryItem là 1 variant tại 1 branch, nên cộng dồn theo size.
+      const qty = n(item?.availableQty);
+      const sizeRow = group.sizes.get(size) || {
+        size,
+        qty: 0,
+        variantIds: [],
+        skus: [],
+        branchQty: {},
+      };
       sizeRow.qty += qty;
-      if (variant?.id) sizeRow.variantIds.push(String(variant.id));
-      if (sku) sizeRow.skus.push(sku);
+      const branchId = String(item?.branchId || '').trim();
+      if (branchId) sizeRow.branchQty[branchId] = (sizeRow.branchQty[branchId] || 0) + qty;
+      if (variant?.id && !sizeRow.variantIds.includes(String(variant.id))) sizeRow.variantIds.push(String(variant.id));
+      if (sku && !sizeRow.skus.includes(sku)) sizeRow.skus.push(sku);
       group.sizes.set(size, sizeRow);
       groups.set(groupKey, group);
     }
@@ -314,7 +394,7 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
       const minQty = sizes.length ? Math.min(...sizes.map((row) => row.qty)) : 0;
       const lowSizes = sizes.filter((row) => row.qty < this.warnThreshold).map((row) => row.size);
       const criticalSizes = sizes.filter((row) => row.qty < this.pauseThreshold).map((row) => row.size);
-      const level: AutopilotLevel = criticalSizes.length ? 'AUTO_PAUSED' : lowSizes.length ? 'READY_TO_PAUSE' : 'NORMAL';
+      const level: AutopilotLevel = lowSizes.length ? 'READY_TO_PAUSE' : 'NORMAL';
 
       return {
         key: group.key,
@@ -333,6 +413,13 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
         level,
       };
     });
+  }
+
+
+  private isCriticalGroup(group: ColorStockGroup) {
+    const sizeCondition = group.criticalSizes.length >= this.criticalSizeCount;
+    const totalCondition = group.totalQty < this.pauseTotalQty;
+    return this.requireBoth ? sizeCondition && totalCondition : sizeCondition || totalCondition;
   }
 
 
@@ -365,7 +452,7 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
       }
 
       const group = matched.group;
-      const hasCritical = group.criticalSizes.length > 0;
+      const hasCritical = this.isCriticalGroup(group);
       const hasLow = group.lowSizes.length > 0;
       const level = hasCritical ? 'CRITICAL' : hasLow ? 'LOW_STOCK' : 'NORMAL';
 
@@ -386,7 +473,9 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
         criticalSizes: group.criticalSizes,
         reason: !hasLow
           ? `Đã match ${group.productCode} / ${group.color}; tồn tất cả size >= ngưỡng an toàn`
-          : `${group.colorKey}: size ${group.lowSizes.join(', ')} dưới ${this.warnThreshold}`,
+          : hasCritical
+            ? `${group.colorKey}: ${group.criticalSizes.length} size dưới ${this.pauseThreshold} và tổng tồn ${group.totalQty} < ${this.pauseTotalQty}`
+            : `${group.colorKey}: size ${group.lowSizes.join(', ')} dưới ${this.warnThreshold}; chưa đủ điều kiện auto pause`,
         groups: [group],
       };
     });
@@ -412,8 +501,8 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
         colorCountByProduct.set(group.productCode, (colorCountByProduct.get(group.productCode) || 0) + 1);
       }
 
-      const warnings = groups.filter((group) => group.lowSizes.length > 0 && group.criticalSizes.length === 0);
-      const critical = groups.filter((group) => group.criticalSizes.length > 0);
+      const warnings = groups.filter((group) => group.lowSizes.length > 0 && !this.isCriticalGroup(group));
+      const critical = groups.filter((group) => this.isCriticalGroup(group));
       let matchedAds = 0;
       let pausedAds = 0;
       let failedAds = 0;
@@ -421,7 +510,7 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
       const results: any[] = [];
 
       for (const group of warnings) {
-        const reason = `Chuẩn bị tắt: size ${group.lowSizes.join(', ')} dưới ${this.warnThreshold}; chưa size nào dưới ${this.pauseThreshold}.`;
+        const reason = `Cảnh báo: size ${group.lowSizes.join(', ')} dưới ${this.warnThreshold}; chưa đủ điều kiện pause (${this.criticalSizeCount} size < ${this.pauseThreshold} ${this.requireBoth ? 'và' : 'hoặc'} tổng tồn < ${this.pauseTotalQty}).`;
         this.pushAction({
           at: new Date().toISOString(),
           type: 'WARNING',
@@ -447,7 +536,7 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
         if (!matched.length) {
           noMatchGroups += 1;
           group.level = 'CRITICAL_NO_AD_MATCH';
-          const reason = `Có size ${group.criticalSizes.join(', ')} dưới ${this.pauseThreshold} nhưng không match chắc chắn được ad ACTIVE đúng mã + màu.`;
+          const reason = `Đủ điều kiện critical (${group.criticalSizes.length} size < ${this.pauseThreshold}, tổng tồn ${group.totalQty}) nhưng không match chắc chắn được ad ACTIVE đúng mã + màu.`;
           this.pushAction({
             at: new Date().toISOString(),
             type: 'NO_MATCH',
@@ -462,15 +551,16 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
 
         const adResults: any[] = [];
         for (const ad of matched) {
-          const reason = `Auto pause vì ${group.colorKey}: size ${group.criticalSizes.join(', ')} dưới ${this.pauseThreshold}. Chỉ pause ad con, không pause adset/campaign.`;
+          const reason = `Critical ${group.colorKey}: ${group.criticalSizes.length} size dưới ${this.pauseThreshold}, tổng tồn ${group.totalQty}. Chỉ pause ad con, không pause adset/campaign.`;
           try {
-            if (!dryRun) {
+            const canAutoPause = this.runtimeEnabled && this.runtimeLevel === 'auto';
+            if (canAutoPause && !dryRun) {
               await this.metaAdsSyncService.setAdStatus(ad.metaAdId || ad.id, 'PAUSED');
               pausedAds += 1;
             }
             this.pushAction({
               at: new Date().toISOString(),
-              type: dryRun ? 'DRY_RUN_PAUSE' : 'PAUSE',
+              type: canAutoPause ? (dryRun ? 'DRY_RUN_PAUSE' : 'PAUSE') : 'SUGGEST_PAUSE',
               colorKey: group.colorKey,
               productName: group.productName,
               sizes: group.sizes.map((row) => ({ size: row.size, qty: row.qty })),
@@ -479,7 +569,7 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
               campaignName: ad.campaignName,
               reason,
             });
-            adResults.push({ metaAdId: ad.metaAdId || ad.id, name: ad.name, ok: true, dryRun });
+            adResults.push({ metaAdId: ad.metaAdId || ad.id, name: ad.name, ok: true, dryRun, action: canAutoPause ? (dryRun ? 'DRY_RUN_PAUSE' : 'PAUSE') : 'SUGGEST_PAUSE' });
           } catch (error: any) {
             failedAds += 1;
             const message = error?.message || String(error);
@@ -497,7 +587,7 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
             adResults.push({ metaAdId: ad.metaAdId || ad.id, name: ad.name, ok: false, error: message });
           }
         }
-        results.push({ group, matchedAds: adResults, action: dryRun ? 'DRY_RUN_PAUSE' : 'PAUSE' });
+        results.push({ group, matchedAds: adResults, action: this.runtimeLevel === 'auto' ? (dryRun ? 'DRY_RUN_PAUSE' : 'PAUSE') : 'SUGGEST_PAUSE' });
       }
 
       const summary = {
@@ -511,7 +601,8 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
         matchedAds,
         pausedAds,
         failedAds,
-        rule: { warnThreshold: this.warnThreshold, pauseThreshold: this.pauseThreshold },
+        level: this.runtimeLevel,
+        rule: { warnThreshold: this.warnThreshold, pauseThreshold: this.pauseThreshold, criticalSizeCount: this.criticalSizeCount, pauseTotalQty: this.pauseTotalQty, requireBoth: this.requireBoth },
       };
 
       this.lastRunAt = new Date().toISOString();

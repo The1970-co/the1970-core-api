@@ -80,7 +80,8 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
     return Math.max(60_000, this.envNumber('META_ADS_PERFORMANCE_INTERVAL_MS', 300_000));
   }
 
-  onModuleInit() {
+  async onModuleInit() {
+    await this.loadPersistedConfig();
     this.restartTimer();
     if (this.runtimeEnabled) setTimeout(() => void this.runNow({ source: 'startup' }), 20_000);
   }
@@ -97,7 +98,7 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
     this.timer = setInterval(() => void this.runNow({ source: 'interval' }), this.intervalMs);
   }
 
-  setRuntimeConfig(input: any = {}) {
+  async setRuntimeConfig(input: any = {}) {
     if (typeof input.enabled === 'boolean') this.runtimeEnabled = input.enabled;
     if (typeof input.dryRun === 'boolean') this.runtimeDryRun = input.dryRun;
     if (input.level) this.runtimeLevel = this.envLevel(input.level);
@@ -105,7 +106,35 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
     if (Number.isFinite(Number(input.scalePercent))) this.scalePercent = Math.min(50, Math.max(1, Number(input.scalePercent)));
     if (Number.isFinite(Number(input.minSpend))) this.minSpend = Math.max(0, Number(input.minSpend));
     this.restartTimer();
+    await this.persistRuntimeConfig();
     return this.getStatus();
+  }
+
+  private async loadPersistedConfig() {
+    try {
+      const row = await (this.prisma as any).metaSyncLog.findFirst({
+        where: { syncType: 'META_ADS_AUTOPILOT_PERFORMANCE_CONFIG', status: 'SUCCESS' },
+        orderBy: { startedAt: 'desc' },
+      });
+      const config = (row?.errorJson as any)?.config || {};
+      if (typeof config.enabled === 'boolean') this.runtimeEnabled = config.enabled;
+      if (typeof config.dryRun === 'boolean') this.runtimeDryRun = config.dryRun;
+      if (config.level) this.runtimeLevel = this.envLevel(config.level);
+      if (Number.isFinite(Number(config.scaleRoas))) this.scaleRoas = Math.max(0.1, Number(config.scaleRoas));
+      if (Number.isFinite(Number(config.scalePercent))) this.scalePercent = Math.min(50, Math.max(1, Number(config.scalePercent)));
+      if (Number.isFinite(Number(config.minSpend))) this.minSpend = Math.max(0, Number(config.minSpend));
+    } catch (error: any) {
+      this.logger.warn(`[AUTOPILOT_CONFIG_LOAD] ${error?.message || error}`);
+    }
+  }
+
+  private async persistRuntimeConfig() {
+    try {
+      const config = { enabled: this.runtimeEnabled, dryRun: this.runtimeDryRun, level: this.runtimeLevel, scaleRoas: this.scaleRoas, scalePercent: this.scalePercent, minSpend: this.minSpend };
+      await (this.prisma as any).metaSyncLog.create({ data: { metaAccountId: null, syncType: 'META_ADS_AUTOPILOT_PERFORMANCE_CONFIG', status: 'SUCCESS', range: 'config', startedAt: new Date(), finishedAt: new Date(), durationMs: 0, scanned: 0, upserted: 1, failed: 0, message: 'Saved Performance Autopilot config', errorJson: { config } } });
+    } catch (error: any) {
+      this.logger.warn(`[AUTOPILOT_CONFIG_SAVE] ${error?.message || error}`);
+    }
   }
 
   getStatus() {
