@@ -167,6 +167,54 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
     return map;
   }
 
+  async getScaleHistory(limit = 1000) {
+    const safeLimit = Math.min(5000, Math.max(1, Number(limit || 1000)));
+    try {
+      const rows = await (this.prisma as any).metaSyncLog.findMany({
+        where: {
+          syncType: 'META_ADS_AUTOPILOT_SCALE',
+          status: 'SUCCESS',
+        },
+        orderBy: { startedAt: 'desc' },
+        take: safeLimit,
+      });
+
+      const items = (rows || []).map((log: AnyRow) => {
+        const payload = (log?.errorJson || {}) as AnyRow;
+        const metaAdSetId = String(payload?.metaAdSetId || '').trim() || null;
+        const metaCampaignId = String(payload?.metaCampaignId || '').trim() || null;
+        const budgetLevel = String(payload?.budgetLevel || 'ADSET').toUpperCase() === 'CAMPAIGN' ? 'CAMPAIGN' : 'ADSET';
+        const budgetEntityId = String(payload?.budgetEntityId || (budgetLevel === 'CAMPAIGN' ? metaCampaignId : metaAdSetId) || '').trim() || null;
+        return {
+          id: String(log?.id || `${log?.startedAt || ''}-${budgetEntityId || ''}`),
+          at: log?.startedAt ? new Date(log.startedAt).toISOString() : null,
+          metaAdId: String(payload?.metaAdId || '').trim() || null,
+          metaAdSetId,
+          metaCampaignId,
+          budgetLevel,
+          budgetEntityId,
+          source: String(payload?.source || 'manual'),
+          percent: n(payload?.percent),
+          oldBudget: n(payload?.oldBudget),
+          newBudget: n(payload?.newBudget),
+          roas: payload?.roas == null ? null : n(payload?.roas),
+          spend: payload?.spend == null ? null : n(payload?.spend),
+          message: log?.message || null,
+        };
+      });
+
+      const countByEntity: Record<string, number> = {};
+      for (const item of items) {
+        if (item.budgetEntityId) countByEntity[item.budgetEntityId] = (countByEntity[item.budgetEntityId] || 0) + 1;
+      }
+
+      return { ok: true, items, countByEntity, total: items.length };
+    } catch (error: any) {
+      this.logger.warn(`[AUTO_SCALE_HISTORY] ${error?.message || error}`);
+      return { ok: false, items: [], countByEntity: {}, total: 0, error: error?.message || String(error) };
+    }
+  }
+
   private async persistScaleLog(input: {
     metaAdSetId: string;
     metaCampaignId?: string;

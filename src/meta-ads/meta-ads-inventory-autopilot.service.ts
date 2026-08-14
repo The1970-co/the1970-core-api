@@ -18,6 +18,7 @@ type ColorStockGroup = {
   productName: string;
   color: string;
   colorKey: string;
+  productAliases: string[];
   skuAliases: string[];
   sizes: SizeStock[];
   totalQty: number;
@@ -165,6 +166,85 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
     return rawSku.replace(new RegExp(`[-_\\s/]+${escaped}$`, 'i'), '');
   }
 
+  private extractProductCode(...values: any[]) {
+    for (const value of values) {
+      const raw = String(value || '').toUpperCase();
+      const compact = raw.replace(/[^A-Z0-9]+/g, ' ');
+      const match = compact.match(/\b[A-Z]{1,6}\s*\d{2,6}\b/);
+      if (match?.[0]) return match[0].replace(/\s+/g, '');
+    }
+    return '';
+  }
+
+  private meaningfulColorTokens(value: any) {
+    const stop = new Set(['mau', 'color', 'xanh']);
+    return normalizeText(value)
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 2 && !stop.has(token));
+  }
+
+  private colorMatchScore(group: ColorStockGroup, rawAdText: string) {
+    const text = normalizeText(rawAdText);
+    const compact = compactText(rawAdText);
+    const colorPhrase = normalizeText(group.color);
+    const colorCompact = compactText(group.color);
+    const skuAliases = group.skuAliases.map(compactText).filter(Boolean);
+
+    if (skuAliases.some((alias) => alias.length >= 4 && compact.includes(alias))) return 120;
+    if (colorPhrase && text.includes(colorPhrase)) return 110;
+    if (colorCompact && compact.includes(colorCompact)) return 105;
+
+    const groupTokens = this.meaningfulColorTokens(group.color);
+    if (!groupTokens.length) return 0;
+    const adTokens = new Set(normalizeText(rawAdText).split(/\s+/).filter(Boolean));
+    const matched = groupTokens.filter((token) => adTokens.has(token));
+    if (!matched.length) return 0;
+
+    // Cho phép tên quảng cáo dùng tên màu đời thường khác tên màu kho.
+    // Ví dụ kho "RÊU TRÀM" nhưng bài ads ghi "Xanh rêu" -> token "reu" vẫn match chắc.
+    const ratio = matched.length / groupTokens.length;
+    if (matched.length === groupTokens.length) return 95;
+    if (matched.length === 1 && groupTokens.length === 1) return 90;
+    return 60 + Math.round(ratio * 25);
+  }
+
+  private productMatchesAd(group: ColorStockGroup, rawAdText: string) {
+    const compact = compactText(rawAdText);
+    const productTokens = uniq([
+      compactText(group.productCode),
+      ...(group.productAliases || []).map(compactText),
+    ]).filter((token) => token.length >= 4);
+    const skuAliases = group.skuAliases.map(compactText).filter(Boolean);
+    return productTokens.some((token) => compact.includes(token)) || skuAliases.some((alias) => alias.length >= 4 && compact.includes(alias));
+  }
+
+  private bestGroupForAd(
+    ad: any,
+    groups: ColorStockGroup[],
+    colorCountByProduct: Map<string, number>,
+    options: { activeOnly?: boolean } = {},
+  ) {
+    if (options.activeOnly !== false && !isMetaAdActive(ad)) return { group: null as ColorStockGroup | null, ambiguous: false, score: 0 };
+
+    const raw = [ad?.name, ad?.adName, ad?.adSetName, ad?.campaignName].filter(Boolean).join(' ');
+    const candidates = groups
+      .filter((group) => this.productMatchesAd(group, raw))
+      .map((group) => {
+        let score = this.colorMatchScore(group, raw);
+        if (!score && (colorCountByProduct.get(group.productCode) || 0) === 1) score = 20;
+        return { group, score };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    if (!candidates.length) return { group: null as ColorStockGroup | null, ambiguous: false, score: 0 };
+    const best = candidates[0];
+    const second = candidates[1];
+    const ambiguous = Boolean(second && second.score === best.score && second.group.colorKey !== best.group.colorKey);
+    return { group: ambiguous ? null : best.group, ambiguous, score: best.score, candidates: candidates.slice(0, 5) };
+  }
+
   private async loadInventoryGroups(): Promise<ColorStockGroup[]> {
     const variants = await (this.prisma as any).productVariant.findMany({
       include: {
@@ -179,12 +259,13 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
     for (const variant of variants || []) {
       const product = variant?.product || {};
       const productId = String(product?.id || variant?.productId || '').trim();
-      const productCode = String(product?.slug || product?.code || '').trim().toUpperCase();
-      const productName = String(product?.name || variant?.productName || productCode || 'Sản phẩm').trim();
+      const productName = String(product?.name || variant?.productName || product?.slug || product?.code || 'Sản phẩm').trim();
+      const sku = String(variant?.sku || '').trim().toUpperCase();
+      const productCode = this.extractProductCode(product?.code, product?.slug, productName, sku)
+        || String(product?.code || product?.slug || '').trim().toUpperCase();
       const color = String(variant?.color || '').trim();
       const colorNormalized = normalizeText(color);
       const size = this.sizeLabel(variant?.size);
-      const sku = String(variant?.sku || '').trim().toUpperCase();
 
       // Auto-pause chỉ xử lý được khi xác định rõ mã sản phẩm + màu.
       if (!productCode || !colorNormalized) continue;
@@ -197,9 +278,15 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
         productName,
         color,
         colorKey: `${productCode}-${String(color).trim().toUpperCase()}`,
+        productAliases: new Set<string>(),
         skuAliases: new Set<string>(),
         sizes: new Map<string, any>(),
       };
+
+      [productCode, product?.code, product?.slug, this.extractProductCode(productName, sku)]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+        .forEach((value) => group.productAliases.add(value));
 
       if (sku) {
         group.skuAliases.add(sku);
@@ -236,6 +323,7 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
         productName: group.productName,
         color: group.color,
         colorKey: group.colorKey,
+        productAliases: Array.from(group.productAliases),
         skuAliases: Array.from(group.skuAliases),
         sizes,
         totalQty,
@@ -247,39 +335,6 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
     });
   }
 
-  private matchAdsForGroup(
-    group: ColorStockGroup,
-    ads: any[],
-    productColorCount: number,
-    options: { activeOnly?: boolean } = {},
-  ) {
-    const activeOnly = options.activeOnly !== false;
-    const productToken = compactText(group.productCode);
-    const colorPhrase = normalizeText(group.color);
-    const colorCompact = compactText(group.color);
-    const skuAliases = group.skuAliases.map(compactText).filter(Boolean);
-
-    return ads.filter((ad) => {
-      if (activeOnly && !isMetaAdActive(ad)) return false;
-
-      const raw = [ad?.name, ad?.adSetName, ad?.campaignName].filter(Boolean).join(' ');
-      const text = normalizeText(raw);
-      const compact = compactText(raw);
-
-      const hasProduct = Boolean(productToken && compact.includes(productToken));
-      const hasSkuAlias = skuAliases.some((alias) => alias.length >= 4 && compact.includes(alias));
-      if (!hasProduct && !hasSkuAlias) return false;
-
-      const hasColor = Boolean(
-        (colorPhrase && text.includes(colorPhrase)) ||
-        (colorCompact && compact.includes(colorCompact)) ||
-        skuAliases.some((alias) => alias.includes(productToken) && compact.includes(alias)),
-      );
-
-      // Nếu một mã chỉ có đúng 1 màu thì mã chính là đủ. Có nhiều màu bắt buộc phải match màu rõ ràng.
-      return hasColor || productColorCount === 1;
-    });
-  }
 
   private pushAction(action: AutopilotAction) {
     this.recentActions = [action, ...this.recentActions].slice(0, 100);
@@ -294,42 +349,22 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
     }
 
     return (ads || []).map((ad: any) => {
-      // Control Center cần map tồn cả ad ACTIVE lẫn PAUSED để admin vẫn xem được đúng mã + màu.
-      // Việc auto-pause thật ở runNow() vẫn chỉ match ad ACTIVE.
-      const matches = groups.filter((group) =>
-        this.matchAdsForGroup(
-          group,
-          [ad],
-          colorCountByProduct.get(group.productCode) || 1,
-          { activeOnly: false },
-        ).length > 0,
-      );
+      const matched = this.bestGroupForAd(ad, groups, colorCountByProduct, { activeOnly: false });
 
-      if (!matches.length) {
+      if (!matched.group) {
         return {
           metaAdId: String(ad?.metaAdId || ad?.id || ''),
           safe: false,
-          level: 'UNMAPPED',
+          level: matched.ambiguous ? 'AMBIGUOUS' : 'UNMAPPED',
           sizes: [],
-          reason: 'Chưa match chắc chắn mã + màu với tồn kho',
+          reason: matched.ambiguous
+            ? 'Tên ads match nhiều màu với cùng độ tin cậy, cần kiểm tra mapping'
+            : 'Chưa match chắc chắn mã + màu với tồn kho',
           groups: [],
         };
       }
 
-      // Một ad chỉ nên đại diện cho một mã + màu. Nếu match nhiều nhóm thì fail closed,
-      // không cho Auto Scale vì mapping chưa đủ chắc chắn.
-      if (matches.length > 1) {
-        return {
-          metaAdId: String(ad?.metaAdId || ad?.id || ''),
-          safe: false,
-          level: 'AMBIGUOUS',
-          sizes: [],
-          reason: `Match nhiều mã + màu (${matches.map((group) => group.colorKey).join(', ')}), cần kiểm tra mapping`,
-          groups: matches,
-        };
-      }
-
-      const group = matches[0];
+      const group = matched.group;
       const hasCritical = group.criticalSizes.length > 0;
       const hasLow = group.lowSizes.length > 0;
       const level = hasCritical ? 'CRITICAL' : hasLow ? 'LOW_STOCK' : 'NORMAL';
@@ -338,6 +373,7 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
         metaAdId: String(ad?.metaAdId || ad?.id || ''),
         safe: !hasLow,
         level,
+        matchScore: matched.score,
         colorKey: group.colorKey,
         productId: group.productId,
         productCode: group.productCode,
@@ -349,9 +385,9 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
         lowSizes: group.lowSizes,
         criticalSizes: group.criticalSizes,
         reason: !hasLow
-          ? 'Tồn tất cả size >= ngưỡng an toàn'
+          ? `Đã match ${group.productCode} / ${group.color}; tồn tất cả size >= ngưỡng an toàn`
           : `${group.colorKey}: size ${group.lowSizes.join(', ')} dưới ${this.warnThreshold}`,
-        groups: matches,
+        groups: [group],
       };
     });
   }
@@ -396,8 +432,16 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
         });
       }
 
+      const bestGroupByAd = new Map<string, string>();
+      for (const ad of ads || []) {
+        const best = this.bestGroupForAd(ad, groups, colorCountByProduct, { activeOnly: true });
+        if (best.group) bestGroupByAd.set(String(ad?.metaAdId || ad?.id || ''), best.group.key);
+      }
+
       for (const group of critical) {
-        const matched = this.matchAdsForGroup(group, ads, colorCountByProduct.get(group.productCode) || 1);
+        const matched = (ads || []).filter((ad: any) =>
+          isMetaAdActive(ad) && bestGroupByAd.get(String(ad?.metaAdId || ad?.id || '')) === group.key,
+        );
         matchedAds += matched.length;
 
         if (!matched.length) {

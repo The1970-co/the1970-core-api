@@ -10,7 +10,19 @@ import { MetaAdsPerformanceAutopilotService } from './meta-ads-performance-autop
 @Module({
   imports: [PrismaModule],
   controllers: [MetaAdsController],
-  providers: [MetaAdsService, MetaAdsSyncService, MetaAdsOrderAttributionService, MetaAdsInventoryAutopilotService, MetaAdsPerformanceAutopilotService],
-  exports: [MetaAdsService, MetaAdsSyncService, MetaAdsOrderAttributionService, MetaAdsInventoryAutopilotService, MetaAdsPerformanceAutopilotService],
+  providers: [
+    MetaAdsService,
+    MetaAdsSyncService,
+    MetaAdsOrderAttributionService,
+    MetaAdsInventoryAutopilotService,
+    MetaAdsPerformanceAutopilotService,
+  ],
+  exports: [
+    MetaAdsService,
+    MetaAdsSyncService,
+    MetaAdsOrderAttributionService,
+    MetaAdsInventoryAutopilotService,
+    MetaAdsPerformanceAutopilotService,
+  ],
 })
 export class MetaAdsModule {}

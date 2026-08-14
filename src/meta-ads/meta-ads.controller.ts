@@ -216,9 +216,24 @@ export class MetaAdsController {
     return this.metaAdsSyncService.getLiveAdsForAutopilot(Number(limit || 5000));
   }
 
+  @Post('autopilot/budgets')
+  getAutopilotBudgets(
+    @Body() body: { metaAdSetIds?: string[]; metaCampaignIds?: string[] } = {},
+  ) {
+    return this.metaAdsSyncService.getBudgetSnapshot({
+      metaAdSetIds: Array.isArray(body?.metaAdSetIds) ? body.metaAdSetIds : [],
+      metaCampaignIds: Array.isArray(body?.metaCampaignIds) ? body.metaCampaignIds : [],
+    });
+  }
+
   @Get('autopilot/control-center')
   getAutopilotControlCenter() {
     return this.metaAdsPerformanceAutopilotService.getControlCenter();
+  }
+
+  @Get('autopilot/scale-history')
+  getAutopilotScaleHistory(@Query('limit') limit?: string) {
+    return this.metaAdsPerformanceAutopilotService.getScaleHistory(Number(limit || 1000));
   }
 
   @Get('autopilot/performance/status')
@@ -259,6 +274,12 @@ export class MetaAdsController {
       throw new Error('status phải là ACTIVE hoặc PAUSED');
     }
     return this.metaAdsSyncService.setAdStatus(String(body?.metaAdId || ''), status as 'PAUSED' | 'ACTIVE');
+  }
+
+  @Post('autopilot/inventory/assess')
+  assessInventoryForAds(@Body() body: { ads?: any[] } = {}) {
+    const ads = Array.isArray(body?.ads) ? body.ads.slice(0, 500) : [];
+    return this.metaAdsInventoryAutopilotService.assessAdsForScale(ads);
   }
 
   @Get('autopilot/inventory/status')

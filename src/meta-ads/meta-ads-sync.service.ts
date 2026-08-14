@@ -320,6 +320,60 @@ export class MetaAdsSyncService {
     });
   }
 
+  async getBudgetSnapshot(input: { metaAdSetIds?: string[]; metaCampaignIds?: string[] } = {}) {
+    const adSetIds = Array.from(new Set((input.metaAdSetIds || []).map((id) => String(id || '').trim()).filter(Boolean))).slice(0, 500);
+    const campaignIds = Array.from(new Set((input.metaCampaignIds || []).map((id) => String(id || '').trim()).filter(Boolean))).slice(0, 500);
+
+    const adSets: any[] = [];
+    for (const id of adSetIds) {
+      try {
+        const row = await this.getAdSetForAutopilot(id);
+        adSets.push({
+          metaAdSetId: id,
+          metaCampaignId: row?.campaign_id || row?.campaignId || null,
+          dailyBudget: row?.daily_budget != null ? this.n(row.daily_budget) : null,
+          lifetimeBudget: row?.lifetime_budget != null ? this.n(row.lifetime_budget) : null,
+          source: 'META',
+        });
+      } catch (error: any) {
+        try {
+          const cached = await (this.prisma as any).metaAdSet.findFirst({
+            where: { metaAdSetId: id },
+            select: { metaAdSetId: true, metaCampaignId: true, dailyBudget: true, lifetimeBudget: true },
+          });
+          if (cached) adSets.push({ ...cached, source: 'DB_CACHE' });
+        } catch {}
+        this.logger.warn(`[META_BUDGET_SNAPSHOT_ADSET] ${id}: ${error?.message || error}`);
+      }
+    }
+
+    const campaignIdsFromAdSets = adSets.map((row) => String(row?.metaCampaignId || '')).filter(Boolean);
+    const allCampaignIds = Array.from(new Set([...campaignIds, ...campaignIdsFromAdSets])).slice(0, 500);
+    const campaigns: any[] = [];
+    for (const id of allCampaignIds) {
+      try {
+        const row = await this.getCampaignForAutopilot(id);
+        campaigns.push({
+          metaCampaignId: id,
+          dailyBudget: row?.daily_budget != null ? this.n(row.daily_budget) : null,
+          lifetimeBudget: row?.lifetime_budget != null ? this.n(row.lifetime_budget) : null,
+          source: 'META',
+        });
+      } catch (error: any) {
+        try {
+          const cached = await (this.prisma as any).metaCampaign.findFirst({
+            where: { metaCampaignId: id },
+            select: { metaCampaignId: true, dailyBudget: true, lifetimeBudget: true },
+          });
+          if (cached) campaigns.push({ ...cached, source: 'DB_CACHE' });
+        } catch {}
+        this.logger.warn(`[META_BUDGET_SNAPSHOT_CAMPAIGN] ${id}: ${error?.message || error}`);
+      }
+    }
+
+    return { ok: true, adSets, campaigns, generatedAt: new Date().toISOString() };
+  }
+
   async getCampaignForAutopilot(metaCampaignId: string) {
     const campaignId = String(metaCampaignId || '').trim();
     if (!campaignId) throw new Error('Thiếu metaCampaignId');
