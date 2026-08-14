@@ -237,6 +237,131 @@ export class MetaAdsSyncService {
     return json;
   }
 
+  private get pageAccessToken() {
+    return process.env.META_INBOX_PAGE_ACCESS_TOKEN || process.env.META_PAGE_ACCESS_TOKEN || process.env.META_INBOX || this.accessToken;
+  }
+
+  async resolvePageIdForAutoLaunch() {
+    const fromEnv = String(process.env.META_PAGE_ID || process.env.META_INBOX_PAGE_ID || '').trim();
+    if (fromEnv) return fromEnv;
+
+    try {
+      const row = await (this.prisma as any).metaAd.findFirst({
+        where: { OR: [{ pageId: { not: null } }, { postId: { not: null } }] },
+        orderBy: { updatedAt: 'desc' },
+        select: { pageId: true, postId: true },
+      });
+      const direct = String(row?.pageId || '').trim();
+      if (direct) return direct;
+      const postId = String(row?.postId || '').trim();
+      if (postId.includes('_')) return postId.split('_')[0];
+    } catch {}
+
+    throw new Error('Thiếu META_PAGE_ID và chưa suy ra được Page ID từ Meta Ads cache');
+  }
+
+  async getPublishedPagePostsForAutoLaunch(pageId: string, limit = 100) {
+    const id = String(pageId || '').trim();
+    if (!id) throw new Error('Thiếu Page ID');
+    const token = String(this.pageAccessToken || '').trim();
+    if (!token) throw new Error('Thiếu Page access token để đọc bài viết Page');
+
+    const url = new URL(`https://graph.facebook.com/${this.version}/${id}/published_posts`);
+    url.searchParams.set('fields', 'id,message,created_time,permalink_url,full_picture,attachments{media,type,url,title,subattachments}');
+    url.searchParams.set('limit', String(Math.min(Math.max(Number(limit || 100), 1), 100)));
+    url.searchParams.set('access_token', token);
+    const res = await fetch(url.toString(), { method: 'GET' });
+    const json = (await res.json()) as any;
+    if (!res.ok || json?.error) {
+      this.logger.error(`[AUTO_LAUNCH_PAGE_POSTS] ${JSON.stringify(json?.error || json)}`);
+      throw new Error(json?.error?.message || 'Không đọc được published posts của Page');
+    }
+    return Array.isArray(json?.data) ? json.data : [];
+  }
+
+  async createCreativeFromPagePostAutoLaunch(input: { pageId: string; postId: string; name: string }) {
+    const accountId = this.normalizeAccountId(this.defaultAdAccountId);
+    const pageId = String(input.pageId || '').trim();
+    const postId = String(input.postId || '').trim();
+    if (!pageId || !postId) throw new Error('Thiếu pageId/postId để tạo creative');
+
+    const result = await this.graphPost<{ id?: string }>(`/${accountId}/adcreatives`, {
+      name: String(input.name || `Auto Launch ${postId}`).slice(0, 200),
+      object_story_id: postId,
+      page_id: pageId,
+    });
+    const id = String(result?.id || '').trim();
+    if (!id) throw new Error('Meta không trả metaCreativeId');
+    return { ok: true, metaCreativeId: id, pageId, postId };
+  }
+
+  async createAdFromCreativeAutoLaunch(input: { adSetId: string; creativeId: string; name: string; status?: 'PAUSED' | 'ACTIVE' }) {
+    const accountId = this.normalizeAccountId(this.defaultAdAccountId);
+    const adSetId = String(input.adSetId || '').trim();
+    const creativeId = String(input.creativeId || '').trim();
+    if (!adSetId || !creativeId) throw new Error('Thiếu adSetId/creativeId để tạo Ad');
+
+    const result = await this.graphPost<{ id?: string }>(`/${accountId}/ads`, {
+      name: String(input.name || 'Auto Launch Ad').slice(0, 200),
+      adset_id: adSetId,
+      status: input.status === 'ACTIVE' ? 'ACTIVE' : 'PAUSED',
+      creative: JSON.stringify({ creative_id: creativeId }),
+    });
+    const id = String(result?.id || '').trim();
+    if (!id) throw new Error('Meta không trả metaAdId');
+    return { ok: true, metaAdId: id, metaAdSetId: adSetId, metaCreativeId: creativeId, status: input.status === 'ACTIVE' ? 'ACTIVE' : 'PAUSED' };
+  }
+
+  async prepareAdSetForPagePostAutoLaunch(input: {
+    launchMode?: 'EXISTING_ADSET' | 'CLONE_ADSET';
+    targetAdSetId?: string;
+    templateAdSetId?: string;
+    targetCampaignId?: string;
+    dailyBudget?: number;
+    name: string;
+  }) {
+    const mode = String(input.launchMode || 'EXISTING_ADSET').toUpperCase();
+    if (mode !== 'CLONE_ADSET') {
+      const adSetId = String(input.targetAdSetId || '').trim();
+      if (!adSetId) throw new Error('Auto Launch chưa cấu hình targetAdSetId');
+      const row = await this.graphGet<any>(`/${adSetId}`, { fields: 'id,name,campaign_id,status,effective_status' });
+      return { ok: true, mode: 'EXISTING_ADSET', metaAdSetId: adSetId, metaCampaignId: row?.campaign_id || null };
+    }
+
+    const templateId = String(input.templateAdSetId || input.targetAdSetId || '').trim();
+    if (!templateId) throw new Error('Auto Launch CLONE_ADSET chưa cấu hình templateAdSetId');
+    const template = await this.graphGet<any>(`/${templateId}`, {
+      fields: 'id,name,campaign_id,optimization_goal,billing_event,bid_strategy,daily_budget,lifetime_budget,targeting,promoted_object,destination_type,attribution_spec,bid_amount',
+    });
+    const campaignId = String(input.targetCampaignId || template?.campaign_id || '').trim();
+    if (!campaignId) throw new Error('Không xác định được Campaign cho Ad Set mới');
+
+    const campaign = await this.getCampaignForAutopilot(campaignId);
+    const campaignBudget = this.n(campaign?.daily_budget ?? campaign?.dailyBudget);
+    const desiredBudget = Math.round(Number(input.dailyBudget || 0)) || this.n(template?.daily_budget);
+    const params: Record<string, string> = {
+      campaign_id: campaignId,
+      name: `${String(input.name || 'Auto Launch').slice(0, 175)} · Ad Set`,
+      status: 'PAUSED',
+    };
+    if (template?.optimization_goal) params.optimization_goal = String(template.optimization_goal);
+    if (template?.billing_event) params.billing_event = String(template.billing_event);
+    if (template?.bid_strategy) params.bid_strategy = String(template.bid_strategy);
+    if (template?.targeting) params.targeting = JSON.stringify(template.targeting);
+    if (template?.promoted_object) params.promoted_object = JSON.stringify(template.promoted_object);
+    if (template?.destination_type) params.destination_type = String(template.destination_type);
+    if (Array.isArray(template?.attribution_spec)) params.attribution_spec = JSON.stringify(template.attribution_spec);
+    if (this.n(template?.bid_amount) > 0) params.bid_amount = String(Math.round(this.n(template.bid_amount)));
+    // Nếu Campaign đang dùng CBO/Advantage Campaign Budget thì không được gắn daily_budget vào Ad Set.
+    if (!campaignBudget && desiredBudget > 0) params.daily_budget = String(desiredBudget);
+
+    const accountId = this.normalizeAccountId(this.defaultAdAccountId);
+    const result = await this.graphPost<{ id?: string }>(`/${accountId}/adsets`, params);
+    const id = String(result?.id || '').trim();
+    if (!id) throw new Error('Meta không trả metaAdSetId');
+    return { ok: true, mode: 'CLONE_ADSET', metaAdSetId: id, metaCampaignId: campaignId, dailyBudget: !campaignBudget ? desiredBudget : null, campaignBudget: campaignBudget || null };
+  }
+
   async setAdStatus(metaAdId: string, status: 'PAUSED' | 'ACTIVE') {
     const adId = String(metaAdId || '').trim();
     if (!adId) throw new Error('Thiếu metaAdId');
@@ -263,22 +388,32 @@ export class MetaAdsSyncService {
 
   async getLiveAdsForAutopilot(limit = 5000) {
     const accountId = this.normalizeAccountId(this.defaultAdAccountId);
-    const pageLimit = String(Math.min(Math.max(Number(limit || 5000), 50), 1000));
+    // Meta có thể trả code=1 "Please reduce the amount of data..." nếu vừa lấy nested creative
+    // vừa request page 1000. Dùng page nhỏ hơn nhưng vẫn paginate đủ tổng số ads.
+    const requested = Math.min(Math.max(Number(limit || 5000), 50), 5000);
+    const adsPageLimit = String(Math.min(requested, 100));
 
-    const [ads, campaigns, adSets] = await Promise.all([
-      this.graphList<any>(`/${accountId}/ads`, {
-        fields: 'id,name,campaign_id,adset_id,status,effective_status,configured_status,created_time,updated_time,creative{id,thumbnail_url,image_url,object_story_spec}',
-        limit: pageLimit,
-      }, 100),
+    const ads = await this.graphList<any>(`/${accountId}/ads`, {
+      fields: 'id,name,campaign_id,adset_id,status,effective_status,configured_status,created_time,updated_time,creative{id,thumbnail_url,image_url}',
+      limit: adsPageLimit,
+    }, Math.min(100, Math.max(1, Math.ceil(requested / 100))));
+
+    // Campaign/Ad Set chỉ để enrich tên + budget; lỗi riêng ở 2 list này không được làm mất toàn bộ ads live.
+    const [campaignResult, adSetResult] = await Promise.allSettled([
       this.graphList<any>(`/${accountId}/campaigns`, {
         fields: 'id,name,status,effective_status,daily_budget,lifetime_budget,start_time,stop_time',
-        limit: '1000',
-      }, 20),
+        limit: '100',
+      }, 50),
       this.graphList<any>(`/${accountId}/adsets`, {
         fields: 'id,name,campaign_id,status,effective_status,daily_budget,lifetime_budget,start_time,end_time,updated_time',
-        limit: '1000',
-      }, 50),
+        limit: '100',
+      }, 100),
     ]);
+
+    const campaigns = campaignResult.status === 'fulfilled' ? campaignResult.value : [];
+    const adSets = adSetResult.status === 'fulfilled' ? adSetResult.value : [];
+    if (campaignResult.status === 'rejected') this.logger.warn(`[MetaAdsSync] campaign enrich skipped: ${campaignResult.reason?.message || campaignResult.reason}`);
+    if (adSetResult.status === 'rejected') this.logger.warn(`[MetaAdsSync] adset enrich skipped: ${adSetResult.reason?.message || adSetResult.reason}`);
 
     const campaignMap = new Map(campaigns.map((row: any) => [String(row.id), row]));
     const adSetMap = new Map(adSets.map((row: any) => [String(row.id), row]));

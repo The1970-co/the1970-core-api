@@ -115,11 +115,17 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
     return Math.max(60_000, Number(process.env.META_ADS_INVENTORY_INTERVAL_MS || 300_000));
   }
 
+  private runScheduledSafely(source: 'startup' | 'interval') {
+    void this.runNow({ source }).catch((error: any) => {
+      this.logger.error(`[$META_INVENTORY_AUTOPILOT] scheduled ${source} failed: ${error?.message || error}`);
+    });
+  }
+
   async onModuleInit() {
     await this.loadPersistedConfig();
     this.restartTimer();
     if (this.runtimeEnabled) {
-      setTimeout(() => void this.runNow({ source: 'startup' }), 15_000);
+      setTimeout(() => this.runScheduledSafely('startup'), 15_000);
     }
   }
 
@@ -134,7 +140,7 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
     if (!this.runtimeEnabled) return;
 
     this.timer = setInterval(() => {
-      void this.runNow({ source: 'interval' });
+      this.runScheduledSafely('interval');
     }, this.intervalMs);
   }
 

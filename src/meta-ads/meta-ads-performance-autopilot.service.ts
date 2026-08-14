@@ -80,10 +80,16 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
     return Math.max(60_000, this.envNumber('META_ADS_PERFORMANCE_INTERVAL_MS', 300_000));
   }
 
+  private runScheduledSafely(source: 'startup' | 'interval') {
+    void this.runNow({ source }).catch((error: any) => {
+      this.logger.error(`[$META_PERFORMANCE_AUTOPILOT] scheduled ${source} failed: ${error?.message || error}`);
+    });
+  }
+
   async onModuleInit() {
     await this.loadPersistedConfig();
     this.restartTimer();
-    if (this.runtimeEnabled) setTimeout(() => void this.runNow({ source: 'startup' }), 20_000);
+    if (this.runtimeEnabled) setTimeout(() => this.runScheduledSafely('startup'), 20_000);
   }
 
   onModuleDestroy() {
@@ -95,7 +101,7 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     if (!this.runtimeEnabled) return;
-    this.timer = setInterval(() => void this.runNow({ source: 'interval' }), this.intervalMs);
+    this.timer = setInterval(() => this.runScheduledSafely('interval'), this.intervalMs);
   }
 
   async setRuntimeConfig(input: any = {}) {
