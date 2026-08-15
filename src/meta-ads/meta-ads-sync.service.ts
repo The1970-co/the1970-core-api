@@ -463,6 +463,31 @@ export class MetaAdsSyncService {
         }
       }
 
+      // CALL 4: chỉ giữ Ads đang THỰC SỰ PHÂN PHỐI hôm nay.
+      // effective_status=ACTIVE chưa đủ vì Meta có thể để lại ads/test shell ở trạng thái ACTIVE.
+      // Một ad chỉ được coi là đang phân phối khi insights hôm nay có impressions hoặc spend > 0.
+      const deliveringAdIds = new Set<string>();
+      try {
+        const insightRows = await this.graphList<any>(`/${accountId}/insights`, {
+          level: 'ad',
+          fields: 'ad_id,impressions,spend',
+          date_preset: 'today',
+          filtering: JSON.stringify([
+            { field: 'ad.id', operator: 'IN', value: activeAds.map((x: any) => String(x?.id || '')).filter(Boolean) },
+          ]),
+          limit: '100',
+        }, 5);
+
+        for (const row of insightRows || []) {
+          const id = String(row?.ad_id || '').trim();
+          const impressions = Number(row?.impressions || 0);
+          const spend = Number(row?.spend || 0);
+          if (id && (impressions > 0 || spend > 0)) deliveringAdIds.add(id);
+        }
+      } catch (error: any) {
+        this.logger.warn(`[META_AUTOPILOT_DELIVERY_INSIGHTS] ${error?.message || error}`);
+      }
+
       // DB cache chỉ để thumbnail và fallback nếu bulk call thiếu field.
       const adIds = activeAds.map((x: any) => String(x?.id || '')).filter(Boolean);
       const [cachedAds, cachedAdSets, cachedCampaigns] = await Promise.all([
@@ -545,11 +570,16 @@ export class MetaAdsSyncService {
         const adSetStatus = String(row?.adSetEffectiveStatus || row?.adSetStatus || '').toUpperCase();
         const campaignStatus = String(row?.campaignEffectiveStatus || row?.campaignStatus || '').toUpperCase();
         const hasLiveCreative = Boolean(String(row?.liveThumbnailUrl || '').trim());
+        const isDeliveringToday = deliveringAdIds.has(String(row?.metaAdId || ''));
 
-        // Chỉ vận hành khi CẢ 3 tầng đều đang ACTIVE trên Meta.
-        // Một Ad có configured_status ACTIVE nhưng Ad Set/Campaign đã tắt phải bị loại.
+        // Chỉ vận hành khi:
+        // 1) Ad ACTIVE
+        // 2) Ad Set ACTIVE
+        // 3) Campaign ACTIVE
+        // 4) Có creative live
+        // 5) Có delivery thật hôm nay (impressions/spend > 0)
         const trulyActive = adStatus === 'ACTIVE' && adSetStatus === 'ACTIVE' && campaignStatus === 'ACTIVE';
-        const keep = trulyActive && hasLiveCreative;
+        const keep = trulyActive && hasLiveCreative && isDeliveringToday;
         if (!keep) {
           rejectedRows.push({
             metaAdId: row?.metaAdId,
@@ -558,6 +588,7 @@ export class MetaAdsSyncService {
             adSetStatus,
             campaignStatus,
             hasLiveCreative,
+            isDeliveringToday,
           });
         }
         return keep;
@@ -569,7 +600,7 @@ export class MetaAdsSyncService {
 
       this.autopilotActiveAdsCache = { at: Date.now(), rows: operationalRows };
       this.logger.log(
-        `[META_AUTOPILOT_LIVE_ADS] account=${accountId} source=META_ACTIVE_BULK rawActive=${rows.length} operational=${operationalRows.length} adsets=${adSetIds.length} campaigns=${campaignIds.length} metaCalls<=3 cacheTtlSec=60`,
+        `[META_AUTOPILOT_LIVE_ADS] account=${accountId} source=META_ACTIVE_BULK rawActive=${rows.length} operational=${operationalRows.length} adsets=${adSetIds.length} campaigns=${campaignIds.length} metaCalls<=4 delivery=today cacheTtlSec=60`,
       );
       return operationalRows;
     })();
