@@ -352,16 +352,15 @@ export class MetaAdsPostLaunchAutopilotService implements OnModuleInit, OnModule
 
     const states = await this.loadLatestPostStates();
     const previous = states.get(postId);
-    const ageHours = this.ageHours(post);
-    let state: PostState = ageHours >= this.waitHours ? 'READY' : 'WAITING';
-    if (this.blockCriticalStock && level === 'CRITICAL') state = 'BLOCKED_STOCK';
-    if (previous?.state === 'ALREADY_AD' || previous?.state === 'CREATED_PAUSED' || previous?.state === 'ACTIVE') {
-      state = previous.state;
-    }
+    const previousState = String(previous?.state || '').toUpperCase();
+
+    // Save mapping ONLY. Do not create or queue Ads here.
+    const preservedStates = new Set(['ALREADY_AD', 'CREATED_PAUSED', 'ACTIVE', 'SKIPPED']);
+    const state: any = preservedStates.has(previousState) ? previousState : 'WAITING_MAPPED';
 
     const logged = await this.writePostState(post, state, {
       ...(previous || {}),
-      ageHours,
+      ageHours: this.ageHours(post),
       assessment: {
         ...assessment,
         source: 'MANUAL_PRODUCT_OVERRIDE',
@@ -372,9 +371,19 @@ export class MetaAdsPostLaunchAutopilotService implements OnModuleInit, OnModule
         color: assessment.color,
         confirmedAt: new Date().toISOString(),
       },
+      mappingOnly: true,
+      launchConfirmed: false,
     });
 
-    return { ok: true, postId, state, assessment, item: logged };
+    return {
+      ok: true,
+      postId,
+      state,
+      mappingOnly: true,
+      launchTriggered: false,
+      assessment,
+      item: logged,
+    };
   }
 
 
@@ -500,9 +509,39 @@ export class MetaAdsPostLaunchAutopilotService implements OnModuleInit, OnModule
           continue;
         }
 
+        // A manually saved mapping always requires a separate explicit run confirmation.
+        // Auto/scheduler cannot launch it merely because mapping was saved.
+        if (previous?.manualMapping && previous?.launchConfirmed === false && !options.force) {
+          results.push({
+            ...previous,
+            postId: post.id,
+            state: 'WAITING_MAPPED',
+            waitingForLaunchConfirmation: true,
+          });
+          continue;
+        }
+
         const ageHours = this.ageHours(post);
         const due = options.force === true || ageHours >= this.waitHours;
-        const assessment = await this.assessPost(post);
+
+        let assessment: any = await this.assessPost(post);
+        const manualProductCode = String(
+          options.manualProductCode ||
+          previous?.manualMapping?.productCode ||
+          ''
+        ).trim().toUpperCase();
+        const manualColor = String(
+          options.manualColor ||
+          previous?.manualMapping?.color ||
+          ''
+        ).trim();
+
+        if (manualProductCode) {
+          assessment = await this.inventoryAutopilotService.assessManualProductForLaunch({
+            productCode: manualProductCode,
+            color: manualColor || undefined,
+          });
+        }
 
         const inventoryUnmapped =
           !assessment || ['UNMAPPED', 'AMBIGUOUS'].includes(String(assessment.level || '').toUpperCase());
