@@ -333,7 +333,7 @@ export class MetaAdsController {
   }
 
   @Post('autopilot/launch/template-comparison')
-  getPostLaunchTemplateComparison(@Body() body: {
+  async getPostLaunchTemplateComparison(@Body() body: {
     launchMode?: 'EXISTING_ADSET' | 'CLONE_ADSET' | 'NEW_CAMPAIGN';
     targetAdSetId?: string;
     templateAdSetId?: string;
@@ -341,7 +341,25 @@ export class MetaAdsController {
     dailyBudget?: number;
     name?: string;
   } = {}) {
-    return this.metaAdsSyncService.getAutoLaunchTemplateComparison(body);
+    try {
+      return await this.metaAdsSyncService.getAutoLaunchTemplateComparison(body);
+    } catch (error: any) {
+      // Diagnostic mode: không trả 500 mù. Mobile sẽ nhìn thấy stage/message thật.
+      return {
+        ok: false,
+        diagnostic: true,
+        stage: 'template-comparison',
+        error: String(error?.message || error || 'Unknown error'),
+        name: String(error?.name || ''),
+        code: error?.code ?? null,
+        response: error?.response?.data ?? error?.response ?? null,
+        input: {
+          launchMode: body?.launchMode || 'NEW_CAMPAIGN',
+          templateAdSetId: body?.templateAdSetId || body?.targetAdSetId || null,
+          dailyBudget: body?.dailyBudget ?? null,
+        },
+      };
+    }
   }
 
   @Post('autopilot/launch/run')

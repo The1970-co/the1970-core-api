@@ -577,6 +577,15 @@ export class MetaAdsSyncService {
     dailyBudget?: number;
     name?: string;
   }) {
+    this.logger.warn(
+      `[META_AUTO_LAUNCH_PREVIEW] ENTER ${JSON.stringify({
+        launchMode: input.launchMode || 'NEW_CAMPAIGN',
+        templateAdSetId: input.templateAdSetId || input.targetAdSetId || null,
+        dailyBudget: input.dailyBudget || null,
+        name: input.name || null,
+      })}`,
+    );
+
     const mode = String(input.launchMode || 'NEW_CAMPAIGN').toUpperCase();
     const templateId = String(input.templateAdSetId || input.targetAdSetId || '').trim();
 
