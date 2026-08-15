@@ -324,6 +324,18 @@ export class MetaAdsController {
     return this.metaAdsPostLaunchAutopilotService.setRuntimeConfig(body);
   }
 
+  @Post('autopilot/launch/template-comparison')
+  getPostLaunchTemplateComparison(@Body() body: {
+    launchMode?: 'EXISTING_ADSET' | 'CLONE_ADSET' | 'NEW_CAMPAIGN';
+    targetAdSetId?: string;
+    templateAdSetId?: string;
+    targetCampaignId?: string;
+    dailyBudget?: number;
+    name?: string;
+  } = {}) {
+    return this.metaAdsSyncService.getAutoLaunchTemplateComparison(body);
+  }
+
   @Post('autopilot/launch/run')
   runPostLaunchAutopilot(@Body() body: { dryRun?: boolean; postId?: string; force?: boolean; manualOverride?: boolean; manualProductCode?: string; manualColor?: string; discoverOnly?: boolean; scanLimit?: number } = {}) {
     return this.metaAdsPostLaunchAutopilotService.runNow({
