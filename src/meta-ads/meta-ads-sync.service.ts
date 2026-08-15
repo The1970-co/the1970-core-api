@@ -467,7 +467,20 @@ export class MetaAdsSyncService {
     if (template?.targeting) params.targeting = JSON.stringify(template.targeting);
     if (template?.promoted_object) params.promoted_object = JSON.stringify(template.promoted_object);
     if (Array.isArray(template?.attribution_spec)) {
-      params.attribution_spec = JSON.stringify(template.attribution_spec);
+      // Với OUTCOME_ENGAGEMENT + CONVERSATIONS, Meta hiện chỉ chấp nhận
+      // attribution click-through 1 ngày. Template cũ có thể trả 7 ngày.
+      params.attribution_spec = JSON.stringify(
+        template.attribution_spec.map((item: any) => {
+          const eventType = String(item?.event_type || '').toUpperCase();
+          if (eventType === 'CLICK_THROUGH') {
+            return {
+              ...item,
+              window_days: 1,
+            };
+          }
+          return item;
+        }),
+      );
     }
 
     // Bidding copy đúng raw Ad Set mẫu. Raw null => OMIT.
@@ -710,7 +723,12 @@ export class MetaAdsSyncService {
       ),
       compareField('targeting', template?.targeting, template?.targeting ? JSON.parse(adSetParams.targeting || '{}') : null),
       compareField('promoted_object', template?.promoted_object, template?.promoted_object ? JSON.parse(adSetParams.promoted_object || '{}') : null),
-      compareField('attribution_spec', template?.attribution_spec, adSetParams.attribution_spec ? JSON.parse(adSetParams.attribution_spec) : null),
+      compareField(
+        'attribution_spec',
+        template?.attribution_spec,
+        adSetParams.attribution_spec ? JSON.parse(adSetParams.attribution_spec) : null,
+        'Meta yêu cầu CLICK_THROUGH window_days = 1 cho objective/optimization hiện tại; template 7 ngày sẽ được NORMALIZED về 1 ngày.',
+      ),
       compareField('status', template?.status, adSetParams.status, 'Ads mới tạo ở PAUSED để an toàn.'),
     ];
 
