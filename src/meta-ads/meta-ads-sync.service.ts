@@ -314,16 +314,47 @@ export class MetaAdsSyncService {
     return { ok: true, metaAdId: id, metaAdSetId: adSetId, metaCreativeId: creativeId, status: input.status === 'ACTIVE' ? 'ACTIVE' : 'PAUSED' };
   }
 
+  async createCampaignForPagePostAutoLaunch(input: {
+    name: string;
+    dailyBudget?: number;
+  }) {
+    const accountId = this.normalizeAccountId(this.defaultAdAccountId);
+    const name = String(input.name || 'Auto Launch').slice(0, 200);
+    const dailyBudget = Math.max(1, Math.round(Number(input.dailyBudget || 1_000_000)));
+
+    // Engagement campaign, dùng ngân sách Campaign (CBO/Advantage Campaign Budget).
+    // Ad Set bên dưới sẽ dùng optimization_goal=CONVERSATIONS + destination_type=MESSENGER.
+    const result = await this.graphPost<{ id?: string }>(`/${accountId}/campaigns`, {
+      name,
+      objective: 'OUTCOME_ENGAGEMENT',
+      buying_type: 'AUCTION',
+      daily_budget: String(dailyBudget),
+      special_ad_categories: JSON.stringify([]),
+      status: 'PAUSED',
+    });
+
+    const id = String(result?.id || '').trim();
+    if (!id) throw new Error('Meta không trả metaCampaignId');
+    return {
+      ok: true,
+      metaCampaignId: id,
+      name,
+      objective: 'OUTCOME_ENGAGEMENT',
+      dailyBudget,
+      status: 'PAUSED',
+    };
+  }
+
   async prepareAdSetForPagePostAutoLaunch(input: {
-    launchMode?: 'EXISTING_ADSET' | 'CLONE_ADSET';
+    launchMode?: 'EXISTING_ADSET' | 'CLONE_ADSET' | 'NEW_CAMPAIGN';
     targetAdSetId?: string;
     templateAdSetId?: string;
     targetCampaignId?: string;
     dailyBudget?: number;
     name: string;
   }) {
-    const mode = String(input.launchMode || 'EXISTING_ADSET').toUpperCase();
-    if (mode !== 'CLONE_ADSET') {
+    const mode = String(input.launchMode || 'NEW_CAMPAIGN').toUpperCase();
+    if (mode === 'EXISTING_ADSET') {
       const adSetId = String(input.targetAdSetId || '').trim();
       if (!adSetId) throw new Error('Auto Launch chưa cấu hình targetAdSetId');
       const row = await this.graphGet<any>(`/${adSetId}`, { fields: 'id,name,campaign_id,status,effective_status' });
@@ -335,23 +366,39 @@ export class MetaAdsSyncService {
     const template = await this.graphGet<any>(`/${templateId}`, {
       fields: 'id,name,campaign_id,optimization_goal,billing_event,bid_strategy,daily_budget,lifetime_budget,targeting,promoted_object,destination_type,attribution_spec,bid_amount',
     });
-    const campaignId = String(input.targetCampaignId || template?.campaign_id || '').trim();
-    if (!campaignId) throw new Error('Không xác định được Campaign cho Ad Set mới');
+    const desiredBudget = Math.round(Number(input.dailyBudget || 0)) || 1_000_000;
 
-    const campaign = await this.getCampaignForAutopilot(campaignId);
-    const campaignBudget = this.n(campaign?.daily_budget ?? campaign?.dailyBudget);
-    const desiredBudget = Math.round(Number(input.dailyBudget || 0)) || this.n(template?.daily_budget);
+    let campaignId = String(input.targetCampaignId || template?.campaign_id || '').trim();
+    let campaignBudget = 0;
+
+    if (mode === 'NEW_CAMPAIGN') {
+      const createdCampaign = await this.createCampaignForPagePostAutoLaunch({
+        name: String(input.name || 'Auto Launch'),
+        dailyBudget: desiredBudget,
+      });
+      campaignId = String(createdCampaign.metaCampaignId);
+      campaignBudget = desiredBudget;
+    } else {
+      if (!campaignId) throw new Error('Không xác định được Campaign cho Ad Set mới');
+      const campaign = await this.getCampaignForAutopilot(campaignId);
+      campaignBudget = this.n(campaign?.daily_budget ?? campaign?.dailyBudget);
+    }
+
     const params: Record<string, string> = {
       campaign_id: campaignId,
-      name: `${String(input.name || 'Auto Launch').slice(0, 175)} · Ad Set`,
+      // Campaign / Ad Set / Ad dùng cùng một tên.
+      name: String(input.name || 'Auto Launch').slice(0, 200),
       status: 'PAUSED',
     };
-    if (template?.optimization_goal) params.optimization_goal = String(template.optimization_goal);
+
+    // Rule mới: hiệu quả = tương tác qua tin nhắn.
+    // Giữ targeting/promoted_object từ Ad Set mẫu để không phải cấu hình lại tệp khách hàng.
+    params.optimization_goal = 'CONVERSATIONS';
+    params.destination_type = 'MESSENGER';
     if (template?.billing_event) params.billing_event = String(template.billing_event);
     if (template?.bid_strategy) params.bid_strategy = String(template.bid_strategy);
     if (template?.targeting) params.targeting = JSON.stringify(template.targeting);
     if (template?.promoted_object) params.promoted_object = JSON.stringify(template.promoted_object);
-    if (template?.destination_type) params.destination_type = String(template.destination_type);
     if (Array.isArray(template?.attribution_spec)) params.attribution_spec = JSON.stringify(template.attribution_spec);
     if (this.n(template?.bid_amount) > 0) params.bid_amount = String(Math.round(this.n(template.bid_amount)));
     // Nếu Campaign đang dùng CBO/Advantage Campaign Budget thì không được gắn daily_budget vào Ad Set.
@@ -361,7 +408,7 @@ export class MetaAdsSyncService {
     const result = await this.graphPost<{ id?: string }>(`/${accountId}/adsets`, params);
     const id = String(result?.id || '').trim();
     if (!id) throw new Error('Meta không trả metaAdSetId');
-    return { ok: true, mode: 'CLONE_ADSET', metaAdSetId: id, metaCampaignId: campaignId, dailyBudget: !campaignBudget ? desiredBudget : null, campaignBudget: campaignBudget || null };
+    return { ok: true, mode: mode === 'NEW_CAMPAIGN' ? 'NEW_CAMPAIGN' : 'CLONE_ADSET', metaAdSetId: id, metaCampaignId: campaignId, dailyBudget: !campaignBudget ? desiredBudget : null, campaignBudget: campaignBudget || null };
   }
 
   async setAdStatus(metaAdId: string, status: 'PAUSED' | 'ACTIVE') {

@@ -4,7 +4,7 @@ import { MetaAdsSyncService } from './meta-ads-sync.service';
 import { MetaAdsInventoryAutopilotService } from './meta-ads-inventory-autopilot.service';
 
 type AutomationLevel = 'manual' | 'semi' | 'auto';
-type LaunchMode = 'EXISTING_ADSET' | 'CLONE_ADSET';
+type LaunchMode = 'EXISTING_ADSET' | 'CLONE_ADSET' | 'NEW_CAMPAIGN';
 type PostState =
   | 'DISCOVERED'
   | 'WAITING'
@@ -42,11 +42,11 @@ export class MetaAdsPostLaunchAutopilotService implements OnModuleInit, OnModule
   private runtimeDryRun = this.envBool('META_ADS_AUTO_LAUNCH_DRY_RUN', true);
   private runtimeLevel: AutomationLevel = this.envLevel(process.env.META_ADS_PERFORMANCE_AUTOMATION_LEVEL || 'manual');
   private waitHours = Math.max(1, this.envNumber('META_ADS_AUTO_LAUNCH_WAIT_HOURS', 48));
-  private launchMode: LaunchMode = this.envLaunchMode(process.env.META_ADS_AUTO_LAUNCH_MODE || 'EXISTING_ADSET');
+  private launchMode: LaunchMode = this.envLaunchMode(process.env.META_ADS_AUTO_LAUNCH_MODE || 'NEW_CAMPAIGN');
   private targetAdSetId = String(process.env.META_ADS_AUTO_LAUNCH_ADSET_ID || '').trim();
   private templateAdSetId = String(process.env.META_ADS_AUTO_LAUNCH_TEMPLATE_ADSET_ID || '').trim();
   private targetCampaignId = String(process.env.META_ADS_AUTO_LAUNCH_CAMPAIGN_ID || '').trim();
-  private dailyBudget = Math.max(0, this.envNumber('META_ADS_AUTO_LAUNCH_DAILY_BUDGET', 500000));
+  private dailyBudget = Math.max(0, this.envNumber('META_ADS_AUTO_LAUNCH_DAILY_BUDGET', 1000000));
   private requireInventoryMatch = this.envBool('META_ADS_AUTO_LAUNCH_REQUIRE_INVENTORY_MATCH', true);
   private blockCriticalStock = this.envBool('META_ADS_AUTO_LAUNCH_BLOCK_CRITICAL_STOCK', true);
   private autoActivate = this.envBool('META_ADS_AUTO_LAUNCH_AUTO_ACTIVATE', true);
@@ -77,7 +77,9 @@ export class MetaAdsPostLaunchAutopilotService implements OnModuleInit, OnModule
   }
 
   private envLaunchMode(value: any): LaunchMode {
-    return String(value || '').toUpperCase() === 'CLONE_ADSET' ? 'CLONE_ADSET' : 'EXISTING_ADSET';
+    const v = String(value || '').toUpperCase();
+    if (v === 'EXISTING_ADSET' || v === 'CLONE_ADSET') return v;
+    return 'NEW_CAMPAIGN';
   }
 
   private get intervalMs() {
@@ -265,11 +267,25 @@ export class MetaAdsPostLaunchAutopilotService implements OnModuleInit, OnModule
   }
 
   private adName(post: AutoLaunchPost, assessment: any) {
-    const product = String(assessment?.productCode || '').trim();
+    const first = String(post.message || '').split(/\n+/)[0].replace(/#\S+/g, '').trim();
+    const productName = String(assessment?.productName || '').trim();
+    const productCode = String(assessment?.productCode || '').trim();
     const color = String(assessment?.color || '').trim();
-    if (product) return `${product}${color ? ` ${color}` : ''} · Auto ${new Date().toLocaleDateString('vi-VN')}`.slice(0, 200);
-    const first = String(post.message || 'Page post').split(/\n+/)[0].trim();
-    return `${first || 'Page post'} · Auto`.slice(0, 200);
+
+    const base =
+      productName ||
+      first ||
+      [productCode, color].filter(Boolean).join(' ') ||
+      'Page post';
+
+    const createdDate = new Intl.DateTimeFormat('vi-VN', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      day: 'numeric',
+      month: 'numeric',
+      year: 'numeric',
+    }).format(new Date());
+
+    return `${base} ${createdDate}`.replace(/\s+/g, ' ').trim().slice(0, 200);
   }
 
   private async assessPost(post: AutoLaunchPost) {
