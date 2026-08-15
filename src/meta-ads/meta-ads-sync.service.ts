@@ -128,6 +128,7 @@ export class MetaAdsSyncService {
   private readonly logger = new Logger(MetaAdsSyncService.name);
   private autopilotActiveAdsCache: { at: number; rows: any[] } | null = null;
   private autopilotActiveAdsInFlight: Promise<any[]> | null = null;
+  private autopilotTemplateAdSetsCache: { at: number; rows: any[] } | null = null;
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -369,9 +370,15 @@ export class MetaAdsSyncService {
     // Billing event lấy đúng từ mẫu nếu có, fallback IMPRESSIONS.
     params.billing_event = String(template?.billing_event || 'IMPRESSIONS');
 
-    // Chiến lược giá thầu UI = "Mức cao nhất":
-    // Meta tự quyết định bid, không có bid cap / cost target.
-    params.bid_strategy = 'LOWEST_COST_WITHOUT_CAP';
+    // Ad Set mẫu hiện đang để chiến lược giá thầu mặc định của Meta.
+    // Nếu raw Meta không trả bid_strategy thì KHÔNG gửi field này khi create mới.
+    // Đây là cách bám sát đúng Ad Set mẫu/UI nhất, tránh ép enum không cần thiết.
+    const templateBidStrategy = String(template?.bid_strategy || '').trim().toUpperCase();
+    if (templateBidStrategy && !['LOWEST_COST_WITH_BID_CAP', 'COST_CAP', 'TARGET_COST'].includes(templateBidStrategy)) {
+      params.bid_strategy = templateBidStrategy;
+    } else {
+      delete params.bid_strategy;
+    }
 
     if (template?.targeting) params.targeting = JSON.stringify(template.targeting);
     if (template?.promoted_object) params.promoted_object = JSON.stringify(template.promoted_object);
@@ -392,6 +399,61 @@ export class MetaAdsSyncService {
     }
 
     return params;
+  }
+
+  async getAutoLaunchAdSetTemplates(input: { q?: string; limit?: number } = {}) {
+    const q = String(input.q || '').trim().toLowerCase();
+    const limit = Math.min(200, Math.max(20, Number(input.limit || 100)));
+    const now = Date.now();
+
+    let rows = this.autopilotTemplateAdSetsCache?.rows || [];
+    const cacheFresh = Boolean(this.autopilotTemplateAdSetsCache && now - this.autopilotTemplateAdSetsCache.at < 5 * 60_000);
+
+    if (!cacheFresh) {
+      const accountId = this.normalizeAccountId(this.defaultAdAccountId);
+
+      // Chỉ lấy structure nhẹ, không insights/creative. 3 page x 100 = tối đa 300 Ad Set.
+      const raw = await this.graphList<any>(
+        `/${accountId}/adsets`,
+        {
+          fields: 'id,name,status,effective_status,updated_time,campaign{id,name,status,effective_status}',
+          limit: '100',
+        },
+        3,
+      );
+
+      rows = raw.map((x: any) => ({
+        id: String(x?.id || ''),
+        name: String(x?.name || x?.id || ''),
+        status: String(x?.status || ''),
+        effectiveStatus: String(x?.effective_status || ''),
+        updatedTime: x?.updated_time || null,
+        campaignId: String(x?.campaign?.id || ''),
+        campaignName: String(x?.campaign?.name || ''),
+        campaignStatus: String(x?.campaign?.status || ''),
+        campaignEffectiveStatus: String(x?.campaign?.effective_status || ''),
+      })).filter((x: any) => x.id);
+
+      rows.sort((a: any, b: any) => {
+        const ta = Date.parse(String(a.updatedTime || '')) || 0;
+        const tb = Date.parse(String(b.updatedTime || '')) || 0;
+        return tb - ta;
+      });
+
+      this.autopilotTemplateAdSetsCache = { at: now, rows };
+    }
+
+    const filtered = q
+      ? rows.filter((x: any) => `${x.name} ${x.campaignName} ${x.id}`.toLowerCase().includes(q))
+      : rows;
+
+    return {
+      ok: true,
+      query: q,
+      cached: cacheFresh,
+      totalScanned: rows.length,
+      items: filtered.slice(0, limit),
+    };
   }
 
   private async getAutoLaunchTemplateRaw(templateId: string) {
@@ -494,7 +556,7 @@ export class MetaAdsSyncService {
       compareField('optimization_goal', template?.optimization_goal, adSetParams.optimization_goal, 'Auto Launch chuẩn hóa về cuộc trò chuyện qua tin nhắn.'),
       compareField('destination_type', template?.destination_type, adSetParams.destination_type),
       compareField('billing_event', template?.billing_event, adSetParams.billing_event),
-      compareField('bid_strategy', template?.bid_strategy, adSetParams.bid_strategy, 'Mức cao nhất = LOWEST_COST_WITHOUT_CAP.'),
+      compareField('bid_strategy', template?.bid_strategy, adSetParams.bid_strategy, 'Ad Set mẫu raw không có strategy thì Auto Launch cũng OMIT để Meta dùng mặc định / Mức cao nhất.'),
       compareField('bid_amount', template?.bid_amount, adSetParams.bid_amount, 'Không gửi khi dùng Mức cao nhất.'),
       compareField('bid_constraints', template?.bid_constraints, adSetParams.bid_constraints, 'Không gửi cap/constraint.'),
       compareField('cost_per_result_goal', template?.cost_per_result_goal, adSetParams.cost_per_result_goal, 'Không đặt mục tiêu chi phí/kết quả.'),
@@ -520,7 +582,7 @@ export class MetaAdsSyncService {
       },
       validation: {
         valid:
-          adSetParams.bid_strategy === 'LOWEST_COST_WITHOUT_CAP' &&
+          !['LOWEST_COST_WITH_BID_CAP', 'COST_CAP', 'TARGET_COST'].includes(String(adSetParams.bid_strategy || '').toUpperCase()) &&
           !adSetParams.bid_amount &&
           !adSetParams.bid_constraints &&
           !adSetParams.cost_per_result_goal &&
@@ -529,8 +591,8 @@ export class MetaAdsSyncService {
         checks: [
           {
             key: 'bid_strategy',
-            ok: adSetParams.bid_strategy === 'LOWEST_COST_WITHOUT_CAP',
-            message: 'bid_strategy = LOWEST_COST_WITHOUT_CAP',
+            ok: !['LOWEST_COST_WITH_BID_CAP', 'COST_CAP', 'TARGET_COST'].includes(String(adSetParams.bid_strategy || '').toUpperCase()),
+            message: adSetParams.bid_strategy ? `bid_strategy = ${adSetParams.bid_strategy}` : 'bid_strategy = OMIT (Meta dùng mặc định / Mức cao nhất)',
           },
           {
             key: 'bid_amount',

@@ -324,6 +324,14 @@ export class MetaAdsController {
     return this.metaAdsPostLaunchAutopilotService.setRuntimeConfig(body);
   }
 
+  @Get('autopilot/launch/adset-templates')
+  getPostLaunchAdSetTemplates(@Query('q') q?: string, @Query('limit') limit?: string) {
+    return this.metaAdsSyncService.getAutoLaunchAdSetTemplates({
+      q: String(q || ''),
+      limit: Number(limit || 100),
+    });
+  }
+
   @Post('autopilot/launch/template-comparison')
   getPostLaunchTemplateComparison(@Body() body: {
     launchMode?: 'EXISTING_ADSET' | 'CLONE_ADSET' | 'NEW_CAMPAIGN';
