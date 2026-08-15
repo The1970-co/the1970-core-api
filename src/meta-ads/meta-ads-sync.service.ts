@@ -556,7 +556,6 @@ export class MetaAdsSyncService {
         'bid_strategy',
         'bid_amount',
         'bid_constraints',
-        'cost_per_result_goal',
         'daily_budget',
         'lifetime_budget',
         'targeting',
@@ -687,7 +686,7 @@ export class MetaAdsSyncService {
       compareField('bid_strategy', template?.bid_strategy, adSetParams.bid_strategy, 'Copy đúng raw Ad Set mẫu; raw null thì OMIT.'),
       compareField('bid_amount', template?.bid_amount, adSetParams.bid_amount),
       compareField('bid_constraints', template?.bid_constraints, adSetParams.bid_constraints),
-      compareField('cost_per_result_goal', template?.cost_per_result_goal, adSetParams.cost_per_result_goal),
+      compareField('cost_per_result_goal', null, adSetParams.cost_per_result_goal, 'Meta không trả field này trong raw Ad Set; Auto Launch không tự thêm nếu không có dữ liệu.'),
       compareField(
         'daily_budget',
         template?.daily_budget,
