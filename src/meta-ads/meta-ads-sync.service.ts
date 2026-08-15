@@ -437,7 +437,7 @@ export class MetaAdsSyncService {
         try {
           liveAdSetsById = await this.graphGet<Record<string, any>>('/', {
             ids: adSetIds.join(','),
-            fields: 'id,name,campaign_id,daily_budget,lifetime_budget,start_time,updated_time',
+            fields: 'id,name,campaign_id,status,effective_status,daily_budget,lifetime_budget,start_time,updated_time',
           });
         } catch (error: any) {
           this.logger.warn(`[META_AUTOPILOT_BULK_ADSETS] ${error?.message || error}`);
@@ -519,6 +519,10 @@ export class MetaAdsSyncService {
           adSetName: liveAdSet?.name || cachedAdSet?.name || null,
           adSetDailyBudget: adSetDailyBudget || null,
           adSetLifetimeBudget: this.n(liveAdSet?.lifetime_budget ?? cachedAdSet?.lifetimeBudget) || null,
+          adSetStatus: liveAdSet?.status || null,
+          adSetEffectiveStatus: liveAdSet?.effective_status || liveAdSet?.status || null,
+          campaignStatus: liveCampaign?.status || null,
+          campaignEffectiveStatus: liveCampaign?.effective_status || liveCampaign?.status || null,
           budgetLevel,
           currentBudget,
           status: row.status || row.configured_status || null,
@@ -535,13 +539,33 @@ export class MetaAdsSyncService {
 
       // Autopilot vận hành chỉ hiển thị Ads ACTIVE có creative thật.
       // Các shell/test ads kiểu “Thử nghiệm phân tách” thường không có thumbnail và không phải Ads bán hàng cần vận hành.
+      const rejectedRows: any[] = [];
       const operationalRows = rows.filter((row: any) => {
-        const active = String(row?.effectiveStatus || row?.status || '').toUpperCase() === 'ACTIVE';
-        // Chỉ coi là Ads vận hành nếu Meta LIVE hiện tại trả creative preview.
-        // Không dùng thumbnail DB cache để tránh lẫn ads test/split-test cũ.
+        const adStatus = String(row?.effectiveStatus || row?.status || '').toUpperCase();
+        const adSetStatus = String(row?.adSetEffectiveStatus || row?.adSetStatus || '').toUpperCase();
+        const campaignStatus = String(row?.campaignEffectiveStatus || row?.campaignStatus || '').toUpperCase();
         const hasLiveCreative = Boolean(String(row?.liveThumbnailUrl || '').trim());
-        return active && hasLiveCreative;
+
+        // Chỉ vận hành khi CẢ 3 tầng đều đang ACTIVE trên Meta.
+        // Một Ad có configured_status ACTIVE nhưng Ad Set/Campaign đã tắt phải bị loại.
+        const trulyActive = adStatus === 'ACTIVE' && adSetStatus === 'ACTIVE' && campaignStatus === 'ACTIVE';
+        const keep = trulyActive && hasLiveCreative;
+        if (!keep) {
+          rejectedRows.push({
+            metaAdId: row?.metaAdId,
+            name: row?.adName || row?.name,
+            adStatus,
+            adSetStatus,
+            campaignStatus,
+            hasLiveCreative,
+          });
+        }
+        return keep;
       });
+
+      if (rejectedRows.length) {
+        this.logger.log(`[META_AUTOPILOT_FILTERED_OUT] ${JSON.stringify(rejectedRows.slice(0, 20))}`);
+      }
 
       this.autopilotActiveAdsCache = { at: Date.now(), rows: operationalRows };
       this.logger.log(
