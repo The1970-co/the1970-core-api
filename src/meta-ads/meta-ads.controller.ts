@@ -284,6 +284,11 @@ export class MetaAdsController {
     return this.metaAdsInventoryAutopilotService.assessAdsForScale(ads);
   }
 
+  @Get('autopilot/inventory/mapping-options')
+  getInventoryMappingOptions(@Query('limit') limit?: string) {
+    return this.metaAdsInventoryAutopilotService.getManualMappingOptions(Number(limit || 1000));
+  }
+
   @Get('autopilot/inventory/status')
   getInventoryAutopilotStatus() {
     return this.metaAdsInventoryAutopilotService.getStatus();
@@ -320,14 +325,26 @@ export class MetaAdsController {
   }
 
   @Post('autopilot/launch/run')
-  runPostLaunchAutopilot(@Body() body: { dryRun?: boolean; postId?: string; force?: boolean; discoverOnly?: boolean; scanLimit?: number } = {}) {
+  runPostLaunchAutopilot(@Body() body: { dryRun?: boolean; postId?: string; force?: boolean; manualOverride?: boolean; manualProductCode?: string; manualColor?: string; discoverOnly?: boolean; scanLimit?: number } = {}) {
     return this.metaAdsPostLaunchAutopilotService.runNow({
-      source: body?.discoverOnly ? 'api-discovery' : 'api',
+      source: body?.discoverOnly ? 'api-discovery' : body?.manualOverride ? 'api-manual' : 'api',
       dryRun: body?.dryRun,
       postId: body?.postId,
       force: body?.force,
+      manualOverride: body?.manualOverride,
+      manualProductCode: body?.manualProductCode,
+      manualColor: body?.manualColor,
       discoverOnly: body?.discoverOnly,
       scanLimit: body?.scanLimit,
+    });
+  }
+
+  @Post('autopilot/launch/map')
+  setPostManualMapping(@Body() body: { postId?: string; productCode?: string; color?: string } = {}) {
+    return this.metaAdsPostLaunchAutopilotService.setManualMapping({
+      postId: String(body?.postId || ''),
+      productCode: String(body?.productCode || ''),
+      color: body?.color ? String(body.color) : undefined,
     });
   }
 

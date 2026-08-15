@@ -487,6 +487,139 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
     });
   }
 
+
+  async getManualMappingOptions(limit = 1000) {
+    const groups = await this.loadInventoryGroups();
+    const byProduct = new Map<string, any>();
+
+    for (const group of groups) {
+      const code = String(group.productCode || '').trim().toUpperCase();
+      if (!code) continue;
+      const current = byProduct.get(code) || {
+        productCode: code,
+        productId: group.productId || null,
+        productName: group.productName || code,
+        colors: [],
+      };
+      current.colors.push({
+        color: group.color,
+        colorKey: group.colorKey,
+        totalQty: group.totalQty,
+        minQty: group.minQty,
+        sizes: group.sizes.map((row) => ({ size: row.size, qty: row.qty })),
+      });
+      byProduct.set(code, current);
+    }
+
+    const items = Array.from(byProduct.values())
+      .map((item: any) => ({
+        ...item,
+        colors: item.colors.sort((a: any, b: any) =>
+          String(a.color).localeCompare(String(b.color), 'vi', { sensitivity: 'base' }),
+        ),
+      }))
+      .sort((a: any, b: any) => String(a.productCode).localeCompare(String(b.productCode), 'vi', { numeric: true }))
+      .slice(0, Math.min(Math.max(Number(limit || 1000), 1), 5000));
+
+    return { ok: true, items, total: items.length };
+  }
+
+  async assessManualProductForLaunch(input: { productCode: string; color?: string }) {
+    const code = String(input?.productCode || '').trim().toUpperCase();
+    const color = String(input?.color || '').trim();
+
+    if (!code) {
+      return {
+        safe: false,
+        level: 'UNMAPPED',
+        productCode: null,
+        color: null,
+        sizes: [],
+        groups: [],
+        reason: 'Chưa chọn mã sản phẩm',
+      };
+    }
+
+    const groups = await this.loadInventoryGroups();
+    const productGroups = groups.filter((group) => {
+      if (String(group.productCode || '').trim().toUpperCase() === code) return true;
+      return (group.productAliases || []).some((alias) => String(alias || '').trim().toUpperCase() === code);
+    });
+
+    if (!productGroups.length) {
+      return {
+        safe: false,
+        level: 'UNMAPPED',
+        productCode: code,
+        color: color || null,
+        sizes: [],
+        groups: [],
+        reason: `Không tìm thấy mã ${code} trong tồn kho`,
+      };
+    }
+
+    let selected: ColorStockGroup | null = null;
+
+    if (color) {
+      const wanted = normalizeText(color);
+      selected =
+        productGroups.find((group) => normalizeText(group.color) === wanted) ||
+        productGroups.find((group) => normalizeText(group.colorKey) === normalizeText(`${code}-${color}`)) ||
+        null;
+
+      if (!selected) {
+        return {
+          safe: false,
+          level: 'AMBIGUOUS',
+          productCode: code,
+          color,
+          sizes: [],
+          groups: productGroups,
+          availableColors: productGroups.map((group) => group.color),
+          reason: `Mã ${code} có trong kho nhưng không có màu "${color}". Hãy chọn đúng màu trong danh sách.`,
+        };
+      }
+    } else if (productGroups.length === 1) {
+      selected = productGroups[0];
+    } else {
+      return {
+        safe: false,
+        level: 'AMBIGUOUS',
+        productCode: code,
+        color: null,
+        sizes: [],
+        groups: productGroups,
+        availableColors: productGroups.map((group) => group.color),
+        reason: `Mã ${code} có ${productGroups.length} màu. Cần chọn màu để map tồn kho chính xác.`,
+      };
+    }
+
+    const hasCritical = this.isCriticalGroup(selected);
+    const hasLow = selected.lowSizes.length > 0;
+    const level = hasCritical ? 'CRITICAL' : hasLow ? 'LOW_STOCK' : 'NORMAL';
+
+    return {
+      safe: !hasLow,
+      level,
+      source: 'MANUAL_PRODUCT_OVERRIDE',
+      matchScore: 100,
+      productId: selected.productId,
+      productCode: selected.productCode,
+      productName: selected.productName,
+      color: selected.color,
+      colorKey: selected.colorKey,
+      sizes: selected.sizes.map((row) => ({ size: row.size, qty: row.qty })),
+      totalQty: selected.totalQty,
+      minQty: selected.minQty,
+      lowSizes: selected.lowSizes,
+      criticalSizes: selected.criticalSizes,
+      groups: [selected],
+      availableColors: productGroups.map((group) => group.color),
+      reason: `Đã xác nhận thủ công ${selected.productCode} / ${selected.color}; tồn kho lấy trực tiếp theo đúng mã + màu.`,
+    };
+  }
+
+
   async runNow(options: { source?: string; dryRun?: boolean } = {}) {
     if (this.running) {
       return { ok: false, skipped: true, reason: 'Autopilot đang chạy một phiên khác', status: this.getStatus() };

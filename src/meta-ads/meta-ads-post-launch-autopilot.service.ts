@@ -327,6 +327,57 @@ export class MetaAdsPostLaunchAutopilotService implements OnModuleInit, OnModule
     };
   }
 
+
+  async setManualMapping(input: { postId: string; productCode: string; color?: string }) {
+    const postId = String(input?.postId || '').trim();
+    const productCode = String(input?.productCode || '').trim().toUpperCase();
+    const color = String(input?.color || '').trim();
+    if (!postId) throw new Error('Thiếu postId');
+    if (!productCode) throw new Error('Chưa chọn mã sản phẩm');
+
+    const pageId = await this.metaAdsSyncService.resolvePageIdForAutoLaunch();
+    const posts = await this.metaAdsSyncService.getPublishedPagePostsForAutoLaunch(pageId, 100);
+    const post = posts.find((row: AutoLaunchPost) => String(row.id) === postId);
+    if (!post) throw new Error('Không tìm thấy bài Page trong 100 bài đã đăng gần nhất');
+
+    const assessment = await this.inventoryAutopilotService.assessManualProductForLaunch({
+      productCode,
+      color: color || undefined,
+    });
+
+    const level = String(assessment?.level || '').toUpperCase();
+    if (['UNMAPPED', 'AMBIGUOUS'].includes(level)) {
+      return { ok: false, postId, assessment, error: assessment?.reason || 'Mapping chưa chính xác' };
+    }
+
+    const states = await this.loadLatestPostStates();
+    const previous = states.get(postId);
+    const ageHours = this.ageHours(post);
+    let state: PostState = ageHours >= this.waitHours ? 'READY' : 'WAITING';
+    if (this.blockCriticalStock && level === 'CRITICAL') state = 'BLOCKED_STOCK';
+    if (previous?.state === 'ALREADY_AD' || previous?.state === 'CREATED_PAUSED' || previous?.state === 'ACTIVE') {
+      state = previous.state;
+    }
+
+    const logged = await this.writePostState(post, state, {
+      ...(previous || {}),
+      ageHours,
+      assessment: {
+        ...assessment,
+        source: 'MANUAL_PRODUCT_OVERRIDE',
+        manuallyConfirmed: true,
+      },
+      manualMapping: {
+        productCode: assessment.productCode,
+        color: assessment.color,
+        confirmedAt: new Date().toISOString(),
+      },
+    });
+
+    return { ok: true, postId, state, assessment, item: logged };
+  }
+
+
   async skipPost(postId: string) {
     const pageId = await this.metaAdsSyncService.resolvePageIdForAutoLaunch();
     const posts = await this.metaAdsSyncService.getPublishedPagePostsForAutoLaunch(pageId, 100);
@@ -335,7 +386,7 @@ export class MetaAdsPostLaunchAutopilotService implements OnModuleInit, OnModule
     return this.writePostState(post, 'SKIPPED', { reason: 'Bỏ qua thủ công' });
   }
 
-  async runNow(options: { source?: string; dryRun?: boolean; postId?: string; force?: boolean; discoverOnly?: boolean; scanLimit?: number } = {}) {
+  async runNow(options: { source?: string; dryRun?: boolean; postId?: string; force?: boolean; manualOverride?: boolean; manualProductCode?: string; manualColor?: string; discoverOnly?: boolean; scanLimit?: number } = {}) {
     if (this.running) return { ok: false, skipped: true, reason: 'Auto Launch đang chạy một phiên khác', status: this.getStatus() };
     this.running = true;
     const started = Date.now();
@@ -379,7 +430,16 @@ export class MetaAdsPostLaunchAutopilotService implements OnModuleInit, OnModule
             continue;
           }
 
-          const assessment = await this.assessPost(post);
+          let assessment: any = await this.assessPost(post);
+
+        const manualProductCode = String(options.manualProductCode || '').trim().toUpperCase();
+        const manualColor = String(options.manualColor || '').trim();
+        if (manualProductCode) {
+          assessment = await this.inventoryAutopilotService.assessManualProductForLaunch({
+            productCode: manualProductCode,
+            color: manualColor || undefined,
+          });
+        }
           let state: PostState;
           if (this.requireInventoryMatch && (!assessment || ['UNMAPPED', 'AMBIGUOUS'].includes(String(assessment.level || '').toUpperCase()))) {
             state = 'UNMAPPED';
@@ -444,7 +504,13 @@ export class MetaAdsPostLaunchAutopilotService implements OnModuleInit, OnModule
         const due = options.force === true || ageHours >= this.waitHours;
         const assessment = await this.assessPost(post);
 
-        if (this.requireInventoryMatch && (!assessment || ['UNMAPPED', 'AMBIGUOUS'].includes(String(assessment.level || '').toUpperCase()))) {
+        const inventoryUnmapped =
+          !assessment || ['UNMAPPED', 'AMBIGUOUS'].includes(String(assessment.level || '').toUpperCase());
+
+        // Auto/Scheduled vẫn bắt buộc match mã+màu nếu setting đang bật.
+        // Nhưng khi người dùng bấm "Chạy bài này" thủ công, manualOverride cho phép chạy dù chưa map.
+        // Bài đó sẽ không có bảo vệ tồn kho cho tới khi map được sản phẩm.
+        if (this.requireInventoryMatch && inventoryUnmapped && !options.manualOverride) {
           if (previous?.state !== 'UNMAPPED') states.set(post.id, await this.writePostState(post, 'UNMAPPED', { ageHours, assessment }));
           results.push({ postId: post.id, state: 'UNMAPPED', ageHours, assessment });
           continue;
