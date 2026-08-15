@@ -385,11 +385,16 @@ export class MetaAdsSyncService {
     };
 
     if (input.budgetPlacement.level === 'CAMPAIGN') {
-      // Auto Launch dùng budget/ngày cấu hình hiện tại, nhưng giữ đúng LEVEL của mẫu.
+      // CBO: ngân sách nằm ở Campaign.
       params.daily_budget = String(Math.max(1, Math.round(input.desiredBudget)));
+      delete params.is_adset_budget_sharing_enabled;
     } else {
+      // ABO: ngân sách nằm ở từng Ad Set.
+      // Meta hiện yêu cầu khai báo rõ có cho các Ad Set chia sẻ ngân sách hay không.
+      // Flow của mình muốn mỗi Ad Set giữ budget riêng => false.
       delete params.daily_budget;
       delete params.lifetime_budget;
+      params.is_adset_budget_sharing_enabled = 'false';
     }
 
     // Campaign raw của Meta hỗ trợ bid_strategy, nhưng bid_amount / bid_constraints
@@ -675,6 +680,14 @@ export class MetaAdsSyncService {
           ? 'Phát hiện CBO: ngân sách sẽ đặt ở Campaign.'
           : 'Phát hiện ABO: Campaign không gửi ngân sách.',
       ),
+      compareField(
+        'is_adset_budget_sharing_enabled',
+        campaignRaw?.is_adset_budget_sharing_enabled,
+        campaignPayload.is_adset_budget_sharing_enabled,
+        budgetPlacement.level === 'ADSET'
+          ? 'ABO: đặt false để mỗi Ad Set dùng ngân sách riêng, không chia sẻ ngân sách giữa các Ad Set.'
+          : 'CBO: không cần gửi field chia sẻ ngân sách Ad Set.',
+      ),
       compareField('bid_strategy', campaignRaw?.bid_strategy, campaignPayload.bid_strategy, 'Copy đúng raw Campaign mẫu; raw null thì OMIT.'),
       compareField('status', campaignRaw?.status, campaignPayload.status, 'Tạo mới ở PAUSED để duyệt an toàn.'),
     ] : [];
@@ -803,6 +816,7 @@ export class MetaAdsSyncService {
           'daily_budget',
           'lifetime_budget',
           'bid_strategy',
+          'is_adset_budget_sharing_enabled',
           'status',
           'effective_status',
         ].join(','),
