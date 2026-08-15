@@ -392,8 +392,15 @@ export class MetaAdsSyncService {
       delete params.lifetime_budget;
     }
 
-    // Bidding copy đúng cấp Campaign mẫu. Raw null => OMIT, không tự thêm strategy.
-    this.copyBidFieldsFromTemplate(params, input.templateCampaign);
+    // Campaign raw của Meta hỗ trợ bid_strategy, nhưng bid_amount / bid_constraints
+    // là cấu hình Ad Set. Không query/copy các field đó ở Campaign để tránh Graph API 500/400.
+    const campaignBidStrategy = String(input.templateCampaign?.bid_strategy || '').trim();
+    if (campaignBidStrategy) params.bid_strategy = campaignBidStrategy;
+    else delete params.bid_strategy;
+
+    delete params.bid_amount;
+    delete params.bid_constraints;
+    delete params.cost_per_result_goal;
     return params;
   }
 
@@ -575,29 +582,37 @@ export class MetaAdsSyncService {
 
     if (!templateId) throw new Error('Chưa cấu hình templateAdSetId');
 
-    const template = await this.getAutoLaunchTemplateRaw(templateId);
+    let template: any;
+    try {
+      template = await this.getAutoLaunchTemplateRaw(templateId);
+    } catch (error: any) {
+      this.logger.error(`[META_AUTO_LAUNCH_PREVIEW] stage=adset_raw templateAdSetId=${templateId} error=${error?.message || error}`);
+      throw error;
+    }
     const desiredBudget = Math.round(Number(input.dailyBudget || 0)) || 1_000_000;
 
     const templateCampaignId = String(template?.campaign_id || input.targetCampaignId || '').trim();
     let campaignRaw: any = null;
 
     if (templateCampaignId) {
-      campaignRaw = await this.graphGet<any>(`/${templateCampaignId}`, {
-        fields: [
-          'id',
-          'name',
-          'objective',
-          'buying_type',
-          'daily_budget',
-          'lifetime_budget',
-          'bid_strategy',
-          'bid_amount',
-          'bid_constraints',
-          'cost_per_result_goal',
-          'status',
-          'effective_status',
-        ].join(','),
-      });
+      try {
+        campaignRaw = await this.graphGet<any>(`/${templateCampaignId}`, {
+          fields: [
+            'id',
+            'name',
+            'objective',
+            'buying_type',
+            'daily_budget',
+            'lifetime_budget',
+            'bid_strategy',
+            'status',
+            'effective_status',
+          ].join(','),
+        });
+      } catch (error: any) {
+        this.logger.error(`[META_AUTO_LAUNCH_PREVIEW] stage=campaign_raw templateCampaignId=${templateCampaignId} error=${error?.message || error}`);
+        throw error;
+      }
     }
 
     const budgetPlacement = this.detectAutoLaunchBudgetPlacement(template, campaignRaw);
@@ -653,9 +668,6 @@ export class MetaAdsSyncService {
           : 'Phát hiện ABO: Campaign không gửi ngân sách.',
       ),
       compareField('bid_strategy', campaignRaw?.bid_strategy, campaignPayload.bid_strategy, 'Copy đúng raw Campaign mẫu; raw null thì OMIT.'),
-      compareField('bid_amount', campaignRaw?.bid_amount, campaignPayload.bid_amount),
-      compareField('bid_constraints', campaignRaw?.bid_constraints, campaignPayload.bid_constraints),
-      compareField('cost_per_result_goal', campaignRaw?.cost_per_result_goal, campaignPayload.cost_per_result_goal),
       compareField('status', campaignRaw?.status, campaignPayload.status, 'Tạo mới ở PAUSED để duyệt an toàn.'),
     ] : [];
 
@@ -783,9 +795,6 @@ export class MetaAdsSyncService {
           'daily_budget',
           'lifetime_budget',
           'bid_strategy',
-          'bid_amount',
-          'bid_constraints',
-          'cost_per_result_goal',
           'status',
           'effective_status',
         ].join(','),
