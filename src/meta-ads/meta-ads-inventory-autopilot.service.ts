@@ -277,6 +277,51 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
   ) {
     if (options.activeOnly !== false && !isMetaAdActive(ad)) return { group: null as ColorStockGroup | null, ambiguous: false, score: 0 };
 
+    // Manual mapping là nguồn ưu tiên cao nhất cho Ads cũ không có mã SP trong tên.
+    const manualProductCode = String(ad?.manualProductCode || ad?.manualMapping?.productCode || '').trim().toUpperCase();
+    const manualColor = String(ad?.manualColor || ad?.manualMapping?.color || '').trim();
+
+    if (manualProductCode) {
+      const manualGroups = groups.filter(
+        (group) => String(group.productCode || '').trim().toUpperCase() === manualProductCode,
+      );
+
+      if (manualGroups.length) {
+        if (manualColor) {
+          const exact = manualGroups.find(
+            (group) => normalizeText(group.color) === normalizeText(manualColor),
+          );
+          if (exact) {
+            return {
+              group: exact,
+              ambiguous: false,
+              score: 1000,
+              manual: true,
+              candidates: [{ group: exact, score: 1000 }],
+            };
+          }
+        }
+
+        if (manualGroups.length === 1) {
+          return {
+            group: manualGroups[0],
+            ambiguous: false,
+            score: 950,
+            manual: true,
+            candidates: [{ group: manualGroups[0], score: 950 }],
+          };
+        }
+
+        return {
+          group: null as ColorStockGroup | null,
+          ambiguous: true,
+          score: 0,
+          manual: true,
+          candidates: manualGroups.slice(0, 10).map((group) => ({ group, score: 900 })),
+        };
+      }
+    }
+
     const raw = [ad?.name, ad?.adName, ad?.adSetName, ad?.campaignName].filter(Boolean).join(' ');
     const candidates = groups
       .filter((group) => this.productMatchesAd(group, raw))

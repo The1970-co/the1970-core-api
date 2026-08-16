@@ -289,6 +289,55 @@ export class MetaAdsController {
     return this.metaAdsInventoryAutopilotService.getManualMappingOptions(Number(limit || 1000));
   }
 
+  @Post('autopilot/ads/map')
+  async setAdManualMapping(
+    @Body() body: { metaAdId?: string; productCode?: string; color?: string } = {},
+  ) {
+    const metaAdId = String(body?.metaAdId || '').trim();
+    const productCode = String(body?.productCode || '').trim().toUpperCase();
+    const color = String(body?.color || '').trim();
+
+    if (!metaAdId) throw new Error('Thiếu metaAdId');
+    if (!productCode) throw new Error('Thiếu productCode');
+
+    const options = await this.metaAdsInventoryAutopilotService.getManualMappingOptions(5000);
+    const rows = Array.isArray(options) ? options : (options as any)?.items || [];
+
+    const product = rows.find(
+      (row: any) => String(row?.productCode || '').trim().toUpperCase() === productCode,
+    );
+    if (!product) throw new Error(`Không tìm thấy mã sản phẩm ${productCode} trong kho nội bộ`);
+
+    const colors = Array.isArray(product?.colors) ? product.colors : [];
+    const finalColor =
+      color ||
+      (colors.length === 1 ? String(colors[0]?.color || '').trim() : '');
+
+    if (colors.length > 1 && !finalColor) {
+      throw new Error('Mã này có nhiều màu, cần chọn màu');
+    }
+
+    if (finalColor && colors.length) {
+      const normalize = (value: any) =>
+        String(value || '')
+          .trim()
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/đ/g, 'd');
+
+      if (!colors.some((item: any) => normalize(item?.color) === normalize(finalColor))) {
+        throw new Error(`Màu ${finalColor} không thuộc mã ${productCode}`);
+      }
+    }
+
+    return this.metaAdsSyncService.setAutopilotAdManualMapping({
+      metaAdId,
+      productCode,
+      color: finalColor || undefined,
+    });
+  }
+
   @Get('autopilot/inventory/status')
   getInventoryAutopilotStatus() {
     return this.metaAdsInventoryAutopilotService.getStatus();

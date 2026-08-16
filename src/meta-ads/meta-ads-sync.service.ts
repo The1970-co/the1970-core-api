@@ -927,6 +927,47 @@ export class MetaAdsSyncService {
     return { ok: result?.success !== false, metaAdId: adId, status };
   }
 
+  async setAutopilotAdManualMapping(input: { metaAdId: string; productCode: string; color?: string }) {
+    const metaAdId = String(input?.metaAdId || '').trim();
+    const productCode = String(input?.productCode || '').trim().toUpperCase();
+    const color = String(input?.color || '').trim();
+
+    if (!metaAdId) throw new Error('Thiếu metaAdId');
+    if (!productCode) throw new Error('Thiếu productCode');
+
+    const current = await (this.prisma as any).metaAd.findFirst({
+      where: { metaAdId },
+      select: { rawJson: true },
+    });
+
+    const currentRaw =
+      current?.rawJson && typeof current.rawJson === 'object' && !Array.isArray(current.rawJson)
+        ? current.rawJson
+        : {};
+
+    const mapping = {
+      productCode,
+      color: color || null,
+      updatedAt: new Date().toISOString(),
+      source: 'mobile_manual',
+    };
+
+    await (this.prisma as any).metaAd.updateMany({
+      where: { metaAdId },
+      data: {
+        rawJson: {
+          ...currentRaw,
+          _autopilotMapping: mapping,
+        },
+      },
+    });
+
+    // Bắt lần load sau lấy DB mới, không giữ cache 60s cũ.
+    this.autopilotActiveAdsCache = null;
+
+    return { ok: true, metaAdId, mapping };
+  }
+
   async getLiveAdsForAutopilot(limit = 500) {
     const requested = Math.min(Math.max(Number(limit || 500), 1), 500);
     const now = Date.now();
@@ -1033,7 +1074,7 @@ export class MetaAdsSyncService {
         adIds.length
           ? (this.prisma as any).metaAd.findMany({
               where: { metaAdId: { in: adIds } },
-              select: { metaAdId: true, thumbnailUrl: true, imageUrl: true },
+              select: { metaAdId: true, thumbnailUrl: true, imageUrl: true, rawJson: true },
             })
           : Promise.resolve([]),
         adSetIds.length
@@ -1050,6 +1091,7 @@ export class MetaAdsSyncService {
           : Promise.resolve([]),
       ]);
 
+      const cachedAdMap = new Map((cachedAds || []).map((x: any) => [String(x.metaAdId), x]));
       const thumbMap = new Map((cachedAds || []).map((x: any) => [String(x.metaAdId), x.thumbnailUrl || x.imageUrl || null]));
       const cachedAdSetMap = new Map((cachedAdSets || []).map((x: any) => [String(x.metaAdSetId), x]));
       const cachedCampaignMap = new Map((cachedCampaigns || []).map((x: any) => [String(x.metaCampaignId), x]));
@@ -1060,6 +1102,11 @@ export class MetaAdsSyncService {
         const campaignId = String(row.campaign_id || '');
         const liveAdSet = liveAdSetsById?.[adSetId] || {};
         const liveCampaign = liveCampaignsById?.[campaignId] || {};
+        const cachedAd = cachedAdMap.get(metaAdId) as any;
+        const manualMapping =
+          cachedAd?.rawJson && typeof cachedAd.rawJson === 'object'
+            ? cachedAd.rawJson?._autopilotMapping || null
+            : null;
         const cachedAdSet = cachedAdSetMap.get(adSetId) as any;
         const cachedCampaign = cachedCampaignMap.get(campaignId) as any;
 
@@ -1097,6 +1144,9 @@ export class MetaAdsSyncService {
           thumbnailUrl: row?.creative?.thumbnail_url || row?.creative?.image_url || thumbMap.get(metaAdId) || null,
           adSetStartTime: liveAdSet?.start_time || cachedAdSet?.startTime || null,
           adSetUpdatedTime: liveAdSet?.updated_time || cachedAdSet?.updatedAt || null,
+          manualProductCode: manualMapping?.productCode || null,
+          manualColor: manualMapping?.color || null,
+          manualMapping,
           source: 'META_ACTIVE_BULK',
         };
       });
@@ -1668,6 +1718,19 @@ export class MetaAdsSyncService {
     for (const row of ads) {
       const creative = row.creative || {};
       const storySpec = creative.object_story_spec || {};
+
+      const existingAd = await (this.prisma as any).metaAd.findFirst({
+        where: { metaAdId: row.id },
+        select: { rawJson: true },
+      });
+      const preservedMapping =
+        existingAd?.rawJson && typeof existingAd.rawJson === 'object'
+          ? existingAd.rawJson?._autopilotMapping || null
+          : null;
+      const mergedRawJson = preservedMapping
+        ? { ...row, _autopilotMapping: preservedMapping }
+        : row;
+
       await this.prisma.metaAd.upsert({
         where: { metaAdId: row.id },
         update: {
@@ -1686,7 +1749,7 @@ export class MetaAdsSyncService {
           pageId: storySpec?.page_id || null,
           callToActionType: creative.call_to_action_type || storySpec?.link_data?.call_to_action?.type || null,
           creativeJson: creative || undefined,
-          rawJson: row,
+          rawJson: mergedRawJson,
           lastSyncedAt: now,
         },
         create: {
@@ -1706,7 +1769,7 @@ export class MetaAdsSyncService {
           pageId: storySpec?.page_id || null,
           callToActionType: creative.call_to_action_type || storySpec?.link_data?.call_to_action?.type || null,
           creativeJson: creative || undefined,
-          rawJson: row,
+          rawJson: mergedRawJson,
           lastSyncedAt: now,
         },
       } as any);

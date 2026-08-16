@@ -491,7 +491,56 @@ export class MetaAdsOrderAttributionService {
 
     const productRows = productPerformance.rows || [];
 
-    const matched = rows.map((adRow) => {
+    // Manual mapping được lưu ở MetaAd.rawJson để Ads cũ không cần đổi tên trên Meta.
+    const adIds = Array.from(
+      new Set(
+        (rows || [])
+          .map((row: AnyRow) => String(row?.metaAdId || row?.adId || row?.id || '').trim())
+          .filter(Boolean),
+      ),
+    );
+
+    const dbAds = adIds.length
+      ? await (this.prisma as any).metaAd.findMany({
+          where: { metaAdId: { in: adIds } },
+          select: { metaAdId: true, rawJson: true },
+        })
+      : [];
+
+    const manualByAd = new Map<string, AnyRow>();
+    for (const dbAd of dbAds || []) {
+      const raw = dbAd?.rawJson;
+      const mapping = raw && typeof raw === 'object' ? raw?._autopilotMapping : null;
+      if (mapping?.productCode) manualByAd.set(String(dbAd.metaAdId), mapping);
+    }
+
+    const matched: Array<{ adRow: AnyRow; best: AnyRow | null; confidence: number }> = rows.map((adRow: AnyRow) => {
+      const metaAdId = String(adRow?.metaAdId || adRow?.adId || adRow?.id || '').trim();
+      const manualMapping = manualByAd.get(metaAdId) || adRow?.manualMapping || null;
+      const manualProductCode = String(
+        manualMapping?.productCode || adRow?.manualProductCode || '',
+      ).trim().toUpperCase();
+
+      if (manualProductCode) {
+        const exact = productRows.find(
+          (product: AnyRow) =>
+            String(product?.familySku || product?.sku || '').trim().toUpperCase() === manualProductCode,
+        );
+
+        if (exact) {
+          return {
+            adRow: {
+              ...adRow,
+              manualProductCode,
+              manualColor: manualMapping?.color || adRow?.manualColor || null,
+              manualMapping,
+            },
+            best: exact,
+            confidence: 100,
+          };
+        }
+      }
+
       const adName = String(adRow?.name || adRow?.adName || '');
       const adFamilies = extractSkuFamiliesFromText(adName);
       const scored = productRows
