@@ -35,6 +35,7 @@ import { PayrollModule } from "./payroll/payroll.module";
 import { OmniInboxModule } from "./omni-inbox/omni-inbox.module";
 import { MobilePushModule } from "./mobile-push/mobile-push.module";
 import { FinancialReportModule } from "./reports/financial-report.module";
+import { SampleFabricModule } from "./sample-fabric/sample-fabric.module";
 @Module({
   imports: [
     PrismaModule,
@@ -73,6 +74,7 @@ import { FinancialReportModule } from "./reports/financial-report.module";
     OmniInboxModule,
     MobilePushModule,
     FinancialReportModule,
+    SampleFabricModule,
   ],
 })
 export class AppModule {}

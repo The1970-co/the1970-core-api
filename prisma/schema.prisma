@@ -237,8 +237,8 @@ model Order {
   payments                Payment[]
   shipment                Shipment?
   omniConversationId      String?
-  omniConversation        OmniConversation? @relation(fields: [omniConversationId], references: [id], onDelete: SetNull)
-  quickOrderRequestId     String? @unique
+  omniConversation        OmniConversation?       @relation(fields: [omniConversationId], references: [id], onDelete: SetNull)
+  quickOrderRequestId     String?                 @unique
 
   @@index([omniConversationId])
   @@index([customerPhone])
@@ -573,6 +573,7 @@ model Branch {
   staffUsers             StaffUser[]              @relation("StaffMainBranch")
   staffBranchPermissions StaffBranchPermission[]
   staffBranchRoles       StaffBranchRole[]
+  fabricReceipts         FabricReceipt[]
   promotions             Promotion[]
 }
 
@@ -652,17 +653,19 @@ model AdministrativeWard {
 }
 
 model Supplier {
-  id        String            @id @default(cuid())
-  name      String
-  code      String            @unique
-  phone     String?
-  email     String?
-  address   String?
-  note      String?
-  isActive  Boolean           @default(true)
-  createdAt DateTime          @default(now())
-  updatedAt DateTime          @updatedAt
-  receipts  PurchaseReceipt[]
+  id             String            @id @default(cuid())
+  name           String
+  code           String            @unique
+  phone          String?
+  email          String?
+  address        String?
+  note           String?
+  isActive       Boolean           @default(true)
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  receipts       PurchaseReceipt[]
+  designSamples  DesignSample[]
+  fabricReceipts FabricReceipt[]
 
   @@index([name])
   @@index([isActive])
@@ -1966,13 +1969,13 @@ model PayrollOrderLink {
 }
 
 model PayrollConfig {
-  id             String  @id @default(cuid())
-  staffId        String
-  staffCode      String?
-  staffName      String?
-  branchId       String?
-  branchName     String?
-  attendanceCode String?
+  id               String  @id @default(cuid())
+  staffId          String
+  staffCode        String?
+  staffName        String?
+  branchId         String?
+  branchName       String?
+  attendanceCode   String?
   sourceTemplateId String?
 
   salaryType          String  @default("MONTHLY") // MONTHLY | DAILY | SHIFT | NONE
@@ -2410,55 +2413,54 @@ model OmniCustomer {
   @@index([name])
 }
 
-
 model OmniAssignmentSetting {
-  id                         String   @id @default("default")
-  isActive                   Boolean  @default(false)
-  mode                       String   @default("AUTO")
-  priorityOrder              Json
-  requireOnline              Boolean  @default(true)
-  branchPriorityEnabled      Boolean  @default(true)
-  lowestLoadEnabled          Boolean  @default(true)
-  draftOwnerPriorityEnabled  Boolean  @default(true)
-  keepPreviousAssignee       Boolean  @default(true)
-  keepPreviousDays           Int      @default(7)
-  reassignIfAssigneeOffline  Boolean  @default(true)
-  workingHoursOnly           Boolean  @default(false)
-  workStartMinute            Int      @default(480)
-  workEndMinute              Int      @default(1320)
-  workDays                   Json
-  outsideHoursMode           String   @default("QUEUE")
-  onlineWindowSeconds        Int      @default(90)
-  maxActiveEnabled           Boolean  @default(true)
-  maxActiveConversations     Int      @default(20)
-  maxUnreadEnabled           Boolean  @default(true)
-  maxUnreadConversations     Int      @default(10)
-  branchRoutingEnabled       Boolean  @default(true)
-  fallbackBranchId           String?
-  noCandidateMode            String   @default("UNASSIGNED")
-  onlyAssignedCanView        Boolean  @default(true)
-  managerCanViewBranch       Boolean  @default(true)
-  onlyAssignedCanReply       Boolean  @default(true)
-  shuffleEachRound           Boolean  @default(true)
-  reassignUnreadEnabled      Boolean  @default(false)
-  reassignAfterMinutes       Int      @default(10)
+  id                        String  @id @default("default")
+  isActive                  Boolean @default(false)
+  mode                      String  @default("AUTO")
+  priorityOrder             Json
+  requireOnline             Boolean @default(true)
+  branchPriorityEnabled     Boolean @default(true)
+  lowestLoadEnabled         Boolean @default(true)
+  draftOwnerPriorityEnabled Boolean @default(true)
+  keepPreviousAssignee      Boolean @default(true)
+  keepPreviousDays          Int     @default(7)
+  reassignIfAssigneeOffline Boolean @default(true)
+  workingHoursOnly          Boolean @default(false)
+  workStartMinute           Int     @default(480)
+  workEndMinute             Int     @default(1320)
+  workDays                  Json
+  outsideHoursMode          String  @default("QUEUE")
+  onlineWindowSeconds       Int     @default(90)
+  maxActiveEnabled          Boolean @default(true)
+  maxActiveConversations    Int     @default(20)
+  maxUnreadEnabled          Boolean @default(true)
+  maxUnreadConversations    Int     @default(10)
+  branchRoutingEnabled      Boolean @default(true)
+  fallbackBranchId          String?
+  noCandidateMode           String  @default("UNASSIGNED")
+  onlyAssignedCanView       Boolean @default(true)
+  managerCanViewBranch      Boolean @default(true)
+  onlyAssignedCanReply      Boolean @default(true)
+  shuffleEachRound          Boolean @default(true)
+  reassignUnreadEnabled     Boolean @default(false)
+  reassignAfterMinutes      Int     @default(10)
 
   // Hàng chờ tin nhắn ngoài giờ / qua đêm
-  morningQueueEnabled               Boolean   @default(true)
-  morningQueueInitialBatchSize      Int       @default(20)
-  morningQueueRepeatIntervalMinutes Int       @default(2)
-  morningQueueRepeatBatchSize       Int       @default(3)
+  morningQueueEnabled               Boolean @default(true)
+  morningQueueInitialBatchSize      Int     @default(20)
+  morningQueueRepeatIntervalMinutes Int     @default(2)
+  morningQueueRepeatBatchSize       Int     @default(3)
 
   // Trạng thái vận hành nội bộ của hàng chờ đầu ca
-  morningQueueRunDate               String?
-  morningQueueInitialDone           Boolean   @default(false)
-  morningQueueLastRunAt             DateTime?
-  morningQueueLastOnlineCount       Int       @default(0)
-  lastAssignedStaffId        String?
-  updatedById                String?
-  updatedByName              String?
-  createdAt                  DateTime @default(now())
-  updatedAt                  DateTime @updatedAt
+  morningQueueRunDate         String?
+  morningQueueInitialDone     Boolean   @default(false)
+  morningQueueLastRunAt       DateTime?
+  morningQueueLastOnlineCount Int       @default(0)
+  lastAssignedStaffId         String?
+  updatedById                 String?
+  updatedByName               String?
+  createdAt                   DateTime  @default(now())
+  updatedAt                   DateTime  @updatedAt
 
   members OmniAssignmentMember[]
 
@@ -2466,21 +2468,21 @@ model OmniAssignmentSetting {
 }
 
 model OmniAssignmentMember {
-  id                      String   @id @default(cuid())
-  settingId               String   @default("default")
-  staffId                 String
-  staffName               String
-  branchId                String?
-  branchName              String?
-  isActive                Boolean  @default(true)
-  receiveMessages         Boolean  @default(true)
-  receiveComments         Boolean  @default(false)
-  sortOrder               Int      @default(0)
-  weight                  Int      @default(1)
-  maxActiveConversations  Int?
-  maxUnreadConversations  Int?
-  createdAt               DateTime @default(now())
-  updatedAt               DateTime @updatedAt
+  id                     String   @id @default(cuid())
+  settingId              String   @default("default")
+  staffId                String
+  staffName              String
+  branchId               String?
+  branchName             String?
+  isActive               Boolean  @default(true)
+  receiveMessages        Boolean  @default(true)
+  receiveComments        Boolean  @default(false)
+  sortOrder              Int      @default(0)
+  weight                 Int      @default(1)
+  maxActiveConversations Int?
+  maxUnreadConversations Int?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
 
   setting OmniAssignmentSetting @relation(fields: [settingId], references: [id], onDelete: Cascade)
 
@@ -2491,36 +2493,36 @@ model OmniAssignmentMember {
 }
 
 model OmniStaffPresence {
-  staffId          String   @id
-  staffName        String?
-  status           String   @default("OFFLINE")
-  manualAway       Boolean  @default(false)
-  activeBranchId   String?
-  lastHeartbeatAt  DateTime @default(now())
-  lastActiveAt     DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  staffId         String   @id
+  staffName       String?
+  status          String   @default("OFFLINE")
+  manualAway      Boolean  @default(false)
+  activeBranchId  String?
+  lastHeartbeatAt DateTime @default(now())
+  lastActiveAt    DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   @@index([status, lastHeartbeatAt])
   @@index([activeBranchId, status])
 }
 
 model OmniAssignmentHistory {
-  id                 String   @id @default(cuid())
-  conversationId     String
-  customerName       String?
-  channel            OmniChannel?
-  branchId           String?
-  previousStaffId    String?
-  previousStaffName  String?
-  assignedStaffId    String?
-  assignedStaffName  String?
-  action             String
-  reason             String?
-  decisionDetail     Json?
-  triggerType        String?
-  createdById        String?
-  createdByName      String?
-  createdAt          DateTime @default(now())
+  id                String       @id @default(cuid())
+  conversationId    String
+  customerName      String?
+  channel           OmniChannel?
+  branchId          String?
+  previousStaffId   String?
+  previousStaffName String?
+  assignedStaffId   String?
+  assignedStaffName String?
+  action            String
+  reason            String?
+  decisionDetail    Json?
+  triggerType       String?
+  createdById       String?
+  createdByName     String?
+  createdAt         DateTime     @default(now())
 
   @@index([conversationId, createdAt])
   @@index([assignedStaffId, createdAt])
@@ -2647,16 +2649,16 @@ model OmniConversationTag {
 }
 
 model OmniNoteTemplate {
-  id             String   @id @default(cuid())
+  id             String                 @id @default(cuid())
   name           String
-  normalizedName String   @unique
+  normalizedName String                 @unique
   color          String?
-  sortOrder       Int      @default(0)
-  isActive        Boolean  @default(true)
+  sortOrder      Int                    @default(0)
+  isActive       Boolean                @default(true)
   createdById    String?
   createdByName  String?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
   notes          OmniConversationNote[]
 
   @@index([isActive, sortOrder])
@@ -2670,10 +2672,10 @@ model OmniConversationNote {
 
   templateId String?
   template   OmniNoteTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
-  staffId   String?
-  staffName String?
-  note      String
-  createdAt DateTime @default(now())
+  staffId    String?
+  staffName  String?
+  note       String
+  createdAt  DateTime          @default(now())
 
   @@index([conversationId, createdAt])
   @@index([templateId])
@@ -2741,4 +2743,230 @@ model MobilePushToken {
   @@index([platform])
   @@index([provider])
   @@index([isActive])
+}
+
+// =========================
+// SAMPLE / FABRIC MANAGEMENT
+// =========================
+
+enum DesignSampleStatus {
+  IDEA
+  FABRIC_SELECTED
+  SAMPLING
+  SAMPLE_READY
+  REVISING
+  APPROVED_FOR_PRODUCTION
+  IN_PRODUCTION
+  COMPLETED
+  ON_HOLD
+}
+
+enum FabricReceiptStatus {
+  DRAFT
+  RECEIVING
+  INSPECTING
+  COMPLETED
+  CANCELLED
+}
+
+enum FabricPriceUnit {
+  METER
+  KG
+  ROLL
+}
+
+enum FabricImageType {
+  FABRIC
+  DEFECT
+  ROUND_SAMPLE
+  SCALE
+  DOCUMENT
+  OTHER
+}
+
+model DesignSample {
+  id              String             @id @default(cuid())
+  code            String             @unique
+  name            String
+  year            Int
+  season          String?
+  category        String?
+  supplierId      String?
+  fabricBoardCode String?
+  fabricCode      String?
+  status          DesignSampleStatus @default(IDEA)
+  assigneeStaffId String?
+  assigneeName    String?
+  nextAction      String?
+  dueDate         DateTime?
+  coverImageUrl   String?
+  note            String?
+  technicalNote   String?
+  createdById     String?
+  createdByName   String?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  supplier       Supplier?                 @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  colors         DesignSampleColor[]
+  images         DesignSampleImage[]
+  progressLogs   DesignSampleProgressLog[]
+  fabricReceipts FabricReceipt[]
+
+  @@index([year])
+  @@index([status])
+  @@index([supplierId])
+  @@index([assigneeStaffId])
+  @@index([updatedAt])
+}
+
+model DesignSampleColor {
+  id             String             @id @default(cuid())
+  designSampleId String
+  name           String
+  code           String?
+  status         DesignSampleStatus @default(IDEA)
+  note           String?
+  imageUrl       String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  designSample DesignSample @relation(fields: [designSampleId], references: [id], onDelete: Cascade)
+
+  @@index([designSampleId])
+  @@index([status])
+}
+
+model DesignSampleImage {
+  id             String   @id @default(cuid())
+  designSampleId String
+  url            String
+  caption        String?
+  createdAt      DateTime @default(now())
+
+  designSample DesignSample @relation(fields: [designSampleId], references: [id], onDelete: Cascade)
+
+  @@index([designSampleId])
+}
+
+model DesignSampleProgressLog {
+  id             String              @id @default(cuid())
+  designSampleId String
+  fromStatus     DesignSampleStatus?
+  toStatus       DesignSampleStatus
+  note           String?
+  actorId        String?
+  actorName      String?
+  createdAt      DateTime            @default(now())
+
+  designSample DesignSample @relation(fields: [designSampleId], references: [id], onDelete: Cascade)
+
+  @@index([designSampleId, createdAt])
+  @@index([toStatus])
+}
+
+model FabricReceipt {
+  id                 String              @id @default(cuid())
+  receiptCode        String              @unique
+  designSampleId     String?
+  supplierId         String?
+  branchId           String?
+  fabricBoardCode    String?
+  fabricCode         String?
+  fabricName         String?
+  colorName          String?
+  colorCode          String?
+  lotCode            String?
+  supplierDeclaredM  Decimal?            @db.Decimal(12, 3)
+  supplierDeclaredKg Decimal?            @db.Decimal(12, 3)
+  actualM            Decimal?            @db.Decimal(12, 3)
+  actualKg           Decimal?            @db.Decimal(12, 3)
+  rollCount          Int                 @default(0)
+  unitPrice          Decimal?            @db.Decimal(14, 2)
+  priceUnit          FabricPriceUnit     @default(METER)
+  expectedGsm        Decimal?            @db.Decimal(10, 2)
+  measuredGsm        Decimal?            @db.Decimal(10, 2)
+  varianceApproved   Boolean             @default(false)
+  varianceApprovedBy String?
+  varianceApprovedAt DateTime?
+  status             FabricReceiptStatus @default(DRAFT)
+  receivedAt         DateTime?
+  completedAt        DateTime?
+  note               String?
+  createdById        String?
+  createdByName      String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  designSample DesignSample?        @relation(fields: [designSampleId], references: [id], onDelete: SetNull)
+  supplier     Supplier?            @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  branch       Branch?              @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  rolls        FabricReceiptRoll[]
+  measurements FabricMeasurement[]
+  images       FabricReceiptImage[]
+
+  @@index([designSampleId])
+  @@index([supplierId])
+  @@index([branchId])
+  @@index([status])
+  @@index([receivedAt])
+  @@index([updatedAt])
+}
+
+model FabricReceiptRoll {
+  id                 String   @id @default(cuid())
+  fabricReceiptId    String
+  rollCode           String?
+  supplierDeclaredM  Decimal? @db.Decimal(12, 3)
+  supplierDeclaredKg Decimal? @db.Decimal(12, 3)
+  actualM            Decimal? @db.Decimal(12, 3)
+  actualKg           Decimal? @db.Decimal(12, 3)
+  defectNote         String?
+  passed             Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  fabricReceipt FabricReceipt        @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
+  measurements  FabricMeasurement[]
+  images        FabricReceiptImage[]
+
+  @@index([fabricReceiptId])
+}
+
+model FabricMeasurement {
+  id              String   @id @default(cuid())
+  fabricReceiptId String
+  rollId          String?
+  areaCm2         Decimal  @db.Decimal(10, 2)
+  weightGrams     Decimal  @db.Decimal(10, 4)
+  gsm             Decimal  @db.Decimal(10, 2)
+  positionLabel   String?
+  imageUrl        String?
+  note            String?
+  measuredById    String?
+  measuredByName  String?
+  createdAt       DateTime @default(now())
+
+  fabricReceipt FabricReceipt      @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
+  roll          FabricReceiptRoll? @relation(fields: [rollId], references: [id], onDelete: SetNull)
+
+  @@index([fabricReceiptId, createdAt])
+  @@index([rollId])
+}
+
+model FabricReceiptImage {
+  id              String          @id @default(cuid())
+  fabricReceiptId String
+  rollId          String?
+  type            FabricImageType @default(FABRIC)
+  url             String
+  caption         String?
+  createdAt       DateTime        @default(now())
+
+  fabricReceipt FabricReceipt      @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
+  roll          FabricReceiptRoll? @relation(fields: [rollId], references: [id], onDelete: SetNull)
+
+  @@index([fabricReceiptId])
+  @@index([rollId])
+  @@index([type])
 }
