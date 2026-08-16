@@ -35,18 +35,39 @@ function extractSkuFamiliesFromText(value: any): string[] {
   return unique(matches.map(skuFamily).filter(Boolean));
 }
 
-function isFacebookSource(order: AnyRow) {
-  const source = normalizeText(order.source || order.channel || order.salesChannel || order.orderSource || '');
-  const group = normalizeText(order.sourceGroup || order.channelGroup || '');
-  const joined = `${source} ${group}`;
-  return joined.includes('facebook') || joined.includes('fb') || joined.includes('messenger') || joined.includes('manual');
+function isPosSource(order: AnyRow) {
+  const raw = normalizeText(
+    `${order?.salesChannel || ''} ${order?.channel || ''} ${order?.orderType || ''} ${order?.paymentMethod || ''} ${order?.source || ''} ${order?.orderSource || ''}`,
+  );
+  return (
+    raw.includes('pos') ||
+    raw.includes('ban le') ||
+    raw.includes('retail') ||
+    raw.includes('ban tai quay') ||
+    raw.includes('quay') ||
+    raw.includes('offline')
+  );
 }
 
-function isPosSource(order: AnyRow) {
-  const source = normalizeText(order.source || order.channel || order.salesChannel || order.orderSource || '');
-  const group = normalizeText(order.sourceGroup || order.channelGroup || '');
-  const joined = `${source} ${group}`;
-  return joined.includes('pos') || joined.includes('ban tai quay') || joined.includes('offline');
+function isFacebookSource(order: AnyRow) {
+  if (isPosSource(order)) return false;
+
+  const raw = normalizeText(
+    `${order?.salesChannel || ''} ${order?.channel || ''} ${order?.orderType || ''} ${order?.paymentMethod || ''} ${order?.paymentType || ''} ${order?.source || ''} ${order?.orderSource || ''}`,
+  );
+
+  // Giữ đúng cách Dashboard đang gom nhóm Facebook/COD/online giao hàng.
+  return (
+    raw.includes('facebook') ||
+    raw.includes('fb') ||
+    raw.includes('meta') ||
+    raw.includes('messenger') ||
+    raw.includes('cod') ||
+    raw.includes('giao hang') ||
+    raw.includes('ship') ||
+    raw.includes('delivery') ||
+    raw.includes('manual')
+  );
 }
 
 function sourceAllowed(order: AnyRow, sourceMode: string) {
@@ -225,7 +246,8 @@ export class MetaAdsOrderAttributionService {
 
     const items = rawItems.filter((item: AnyRow) => {
       const order = item?.order || {};
-      const orderAt = order?.createdAt ? new Date(order.createdAt) : null;
+      const orderAtRaw = order?.soldAt || order?.createdAt;
+      const orderAt = orderAtRaw ? new Date(orderAtRaw) : null;
       if (!orderAt || Number.isNaN(orderAt.getTime())) return false;
       if (orderAt < params.since || orderAt > params.until) return false;
       if (!sourceAllowed(order, params.sourceMode || 'facebook')) return false;
@@ -301,6 +323,12 @@ export class MetaAdsOrderAttributionService {
         cancelledOrderRevenue: 0,
         facebookOrders: 0,
         posOrders: 0,
+        facebookRevenue: 0,
+        posRevenue: 0,
+        otherRevenue: 0,
+        facebookQuantity: 0,
+        posQuantity: 0,
+        otherQuantity: 0,
         sampleOrders: [],
         cancelledSampleOrders: [],
       };
@@ -349,6 +377,7 @@ export class MetaAdsOrderAttributionService {
           sku,
           familySku: family,
           createdAt: order.createdAt,
+          soldAt: order.soldAt || null,
         };
 
         if (cancelled) {
@@ -366,6 +395,20 @@ export class MetaAdsOrderAttributionService {
       } else {
         existed.revenue += lineRevenue;
         existed.orderRevenue += orderRevenueForSample;
+
+        // Dashboard phân nhóm POS / Facebook(COD-online) / Khác.
+        // Doanh thu theo mã SP dùng revenue của dòng hàng, không gán full finalAmount của đơn
+        // cho từng sản phẩm trong đơn để tránh nhân đôi doanh thu.
+        if (isPosSource(order)) {
+          existed.posRevenue += lineRevenue;
+          existed.posQuantity += quantity;
+        } else if (isFacebookSource(order)) {
+          existed.facebookRevenue += lineRevenue;
+          existed.facebookQuantity += quantity;
+        } else {
+          existed.otherRevenue += lineRevenue;
+          existed.otherQuantity += quantity;
+        }
       }
 
       productMap.set(key, existed);
@@ -387,6 +430,13 @@ export class MetaAdsOrderAttributionService {
         shippedOrderCount: row.shippedOrderIds.size,
         facebookOrders: row.facebookOrders,
         posOrders: row.posOrders,
+        facebookRevenue: row.facebookRevenue,
+        posRevenue: row.posRevenue,
+        otherRevenue: row.otherRevenue,
+        channelRevenue: row.facebookRevenue + row.posRevenue,
+        facebookQuantity: row.facebookQuantity,
+        posQuantity: row.posQuantity,
+        otherQuantity: row.otherQuantity,
         quantity: row.quantity,
         revenue: row.revenue,
         orderRevenue: row.orderRevenue,
@@ -419,147 +469,172 @@ export class MetaAdsOrderAttributionService {
       totalCancelledRevenue: allRows.reduce((sum: number, row: any) => sum + toNumber(row.cancelledRevenue), 0),
       totalCancelledOrderRevenue: uniqueCancelledOrderRevenue,
       rows,
-      note: 'V18: SKU family + productId UUID cho link chi tiết sản phẩm + source filter + bỏ đơn huỷ + totalOrderRevenue unique theo order.',
+      note: 'V19 Dashboard-channel: soldAt ưu tiên createdAt; phân POS / Facebook-COD / Khác giống Dashboard; doanh thu SP theo line revenue.',
     };
   }
 
-  async attachProductOrdersToAds(rows: AnyRow[], params: { since: Date; until: Date; sourceMode?: string; orderMode?: string }) {
+  async attachProductOrdersToAds(
+    rows: AnyRow[],
+    params: { since: Date; until: Date; sourceMode?: string; orderMode?: string },
+  ) {
     if (!rows?.length) return rows || [];
 
+    // Luôn lấy ALL để có đủ POS + Facebook cho ROAS tổng.
+    // Việc phân kênh nằm trong từng product family, đúng logic Dashboard.
     const productPerformance = await this.getProductPerformance({
       since: params.since,
       until: params.until,
       limit: 500,
-      sourceMode: params.sourceMode || 'facebook',
+      sourceMode: 'all',
       orderMode: params.orderMode || 'valid',
     });
 
     const productRows = productPerformance.rows || [];
 
     const matched = rows.map((adRow) => {
-      const adFamilies = extractSkuFamiliesFromText(adRow.name);
+      const adName = String(adRow?.name || adRow?.adName || '');
+      const adFamilies = extractSkuFamiliesFromText(adName);
       const scored = productRows
         .map((product: AnyRow) => ({
           product,
-          score: this.scoreAdProduct(adRow.name, product, adFamilies),
+          score: this.scoreAdProduct(adName, product, adFamilies),
         }))
         .filter((x: AnyRow) => x.score >= 35)
         .sort((a: AnyRow, b: AnyRow) => b.score - a.score);
 
-      const best = scored[0]?.product || null;
-      const confidence = scored[0]?.score || 0;
-
       return {
         adRow,
-        best,
-        confidence,
+        best: scored[0]?.product || null,
+        confidence: scored[0]?.score || 0,
       };
     });
 
-    // Nếu nhiều ads cùng match 1 SKU family, không được gán full doanh thu family cho từng ads.
-    // Lúc đó doanh thu/ROAS ở row ads sẽ để dạng "family shared", chỉ dùng để tham khảo ở Product Center.
-    const familyMatchCount = new Map<string, number>();
+    // Một SKU family có thể chạy nhiều Ads. ROAS phải tính ở cấp mã SP/family:
+    // doanh thu family / TỔNG spend của toàn bộ Ads match family.
+    // Không chia full doanh thu cho từng Ads và cũng không làm ROAS = 0 khi family có nhiều Ads.
+    const familySpend = new Map<string, number>();
+    const familyAdCount = new Map<string, number>();
+
     for (const item of matched) {
       const family = skuFamily(item.best?.familySku || item.best?.sku || item.best?.key);
       if (!family) continue;
-      familyMatchCount.set(family, (familyMatchCount.get(family) || 0) + 1);
+      const spend = toNumber(item.adRow?.metrics?.spend);
+      familySpend.set(family, (familySpend.get(family) || 0) + spend);
+      familyAdCount.set(family, (familyAdCount.get(family) || 0) + 1);
     }
 
     return matched.map(({ adRow, best, confidence }) => {
-      const spend = toNumber(adRow.metrics?.spend);
-      const family = skuFamily(best?.familySku || best?.sku || best?.key);
-      const sharedFamilyCount = family ? familyMatchCount.get(family) || 0 : 0;
-      const isSharedFamily = Boolean(best && sharedFamilyCount > 1);
-      const familyRevenue = toNumber(best?.revenue);
+      if (!best) {
+        return {
+          ...adRow,
+          productAttribution: {
+            mode: 'dashboard_channel_roas_v1',
+            allocationMode: 'none',
+            label: 'Chưa match SKU family',
+            confidence: 0,
+            productId: null,
+            productIds: [],
+            sku: null,
+            familySku: null,
+            skuSamples: [],
+            productName: null,
+            orderCount: 0,
+            facebookOrders: 0,
+            posOrders: 0,
+            facebookRevenue: 0,
+            posRevenue: 0,
+            otherRevenue: 0,
+            totalRevenue: 0,
+            facebookRoas: 0,
+            posRoas: 0,
+            totalRoas: 0,
+            realRoasEstimate: 0,
+            familySpend: 0,
+            sharedFamilyCount: 0,
+            note: 'Chưa match được SKU family từ tên Ads.',
+          },
+        };
+      }
 
-      const rowRevenue = isSharedFamily ? 0 : familyRevenue;
-      const rowOrders = isSharedFamily ? 0 : toNumber(best?.orderCount);
+      const family = skuFamily(best.familySku || best.sku || best.key);
+      const spend = toNumber(familySpend.get(family));
+      const facebookRevenue = toNumber(best.facebookRevenue);
+      const posRevenue = toNumber(best.posRevenue);
+      const otherRevenue = toNumber(best.otherRevenue);
+
+      // Theo yêu cầu vận hành: ROAS tổng = (POS + Facebook) / Ads spend.
+      // "Khác" vẫn trả riêng để quan sát nhưng không cộng vào ROAS tổng.
+      const totalRevenue = facebookRevenue + posRevenue;
+      const facebookRoas = spend > 0 ? facebookRevenue / spend : 0;
+      const posRoas = spend > 0 ? posRevenue / spend : 0;
+      const totalRoas = spend > 0 ? totalRevenue / spend : 0;
+      const sharedFamilyCount = familyAdCount.get(family) || 1;
 
       return {
         ...adRow,
-        productAttribution: best
-          ? {
-              mode: 'sku_family_v4_no_duplicate_roas',
-              allocationMode: isSharedFamily ? 'family_shared' : 'single_ad_family',
-              label: isSharedFamily
-                ? `Family ${family} có ${sharedFamilyCount} ads, không chia ROAS cho từng ads`
-                : confidence >= 80
-                  ? 'Match SKU family chắc'
-                  : 'Match SKU family tham khảo',
-              confidence,
-              productId: best.productId || null,
-              productIds: best.productIds || [],
-              sku: best.familySku || best.sku,
-              familySku: best.familySku || best.sku,
-              skuSamples: best.skuSamples || [],
-              productName: best.productName,
-              orderCount: rowOrders,
-              familyOrderCount: best.orderCount,
-              grossOrderCount: best.grossOrderCount,
-              cancelledOrderCount: best.cancelledOrderCount,
-              completedOrderCount: best.completedOrderCount,
-              shippedOrderCount: best.shippedOrderCount,
-              facebookOrders: best.facebookOrders,
-              posOrders: best.posOrders,
-              quantity: isSharedFamily ? 0 : best.quantity,
-              familyQuantity: best.quantity,
-              revenue: rowRevenue,
-              orderRevenue: isSharedFamily ? 0 : best.orderRevenue,
-              familyRevenue,
-              familyOrderRevenue: best.orderRevenue,
-              cancelledRevenue: best.cancelledRevenue,
-              cancelledOrderRevenue: best.cancelledOrderRevenue,
-              grossRevenue: best.grossRevenue,
-              grossOrderRevenue: best.grossOrderRevenue,
-              averageOrderValue: best.averageOrderValue,
-              realRoasEstimate: !isSharedFamily && spend > 0 ? rowRevenue / spend : 0,
-              familyRoasEstimate: spend > 0 ? familyRevenue / spend : 0,
-              sharedFamilyCount,
-              sampleOrders: isSharedFamily ? [] : best.sampleOrders,
-              familySampleOrders: best.sampleOrders,
-              cancelledSampleOrders: best.cancelledSampleOrders,
-              note: isSharedFamily
-                ? 'Nhiều ads cùng SKU family nên không gán full doanh thu cho từng ads để tránh ROAS ảo.'
-                : 'Gom SKU cha/family. Mặc định bỏ đơn huỷ và chỉ tính Facebook.',
-            }
-          : {
-              mode: 'sku_family_v4_no_duplicate_roas',
-              allocationMode: 'none',
-              label: 'Chưa match SKU family',
-              confidence: 0,
-              productId: null,
-              productIds: [],
-              sku: null,
-              familySku: null,
-              skuSamples: [],
-              productName: null,
-              orderCount: 0,
-              familyOrderCount: 0,
-              grossOrderCount: 0,
-              cancelledOrderCount: 0,
-              completedOrderCount: 0,
-              shippedOrderCount: 0,
-              facebookOrders: 0,
-              posOrders: 0,
-              quantity: 0,
-              familyQuantity: 0,
-              revenue: 0,
-              orderRevenue: 0,
-              familyRevenue: 0,
-              familyOrderRevenue: 0,
-              cancelledRevenue: 0,
-              cancelledOrderRevenue: 0,
-              grossRevenue: 0,
-              grossOrderRevenue: 0,
-              averageOrderValue: 0,
-              realRoasEstimate: 0,
-              familyRoasEstimate: 0,
-              sharedFamilyCount: 0,
-              sampleOrders: [],
-              familySampleOrders: [],
-              cancelledSampleOrders: [],
-              note: 'Chưa match được SKU family từ tên ads.',
-            },
+        productAttribution: {
+          mode: 'dashboard_channel_roas_v1',
+          allocationMode: 'product_family_dashboard_channels',
+          label:
+            confidence >= 80
+              ? 'Match SKU family chắc · doanh thu theo chuẩn Dashboard'
+              : 'Match SKU family tham khảo · doanh thu theo chuẩn Dashboard',
+          confidence,
+          productId: best.productId || null,
+          productIds: best.productIds || [],
+          sku: best.familySku || best.sku,
+          familySku: best.familySku || best.sku,
+          skuSamples: best.skuSamples || [],
+          productName: best.productName,
+
+          orderCount: toNumber(best.orderCount),
+          familyOrderCount: toNumber(best.orderCount),
+          facebookOrders: toNumber(best.facebookOrders),
+          posOrders: toNumber(best.posOrders),
+
+          facebookQuantity: toNumber(best.facebookQuantity),
+          posQuantity: toNumber(best.posQuantity),
+          otherQuantity: toNumber(best.otherQuantity),
+          quantity: toNumber(best.quantity),
+
+          facebookRevenue,
+          posRevenue,
+          otherRevenue,
+          totalRevenue,
+
+          // Giữ các field cũ để UI cũ vẫn chạy.
+          revenue: totalRevenue,
+          orderRevenue: totalRevenue,
+          familyRevenue: totalRevenue,
+          familyOrderRevenue: totalRevenue,
+
+          facebookRoas,
+          posRoas,
+          totalRoas,
+
+          // Auto Scale và UI cũ đang đọc realRoasEstimate => chuyển sang ROAS tổng.
+          realRoasEstimate: totalRoas,
+          familyRoasEstimate: totalRoas,
+
+          familySpend: spend,
+          sharedFamilyCount,
+
+          grossOrderCount: toNumber(best.grossOrderCount),
+          cancelledOrderCount: toNumber(best.cancelledOrderCount),
+          completedOrderCount: toNumber(best.completedOrderCount),
+          shippedOrderCount: toNumber(best.shippedOrderCount),
+          cancelledRevenue: toNumber(best.cancelledRevenue),
+          cancelledOrderRevenue: toNumber(best.cancelledOrderRevenue),
+          grossRevenue: toNumber(best.grossRevenue),
+          grossOrderRevenue: toNumber(best.grossOrderRevenue),
+          averageOrderValue: toNumber(best.averageOrderValue),
+          sampleOrders: best.sampleOrders || [],
+          familySampleOrders: best.sampleOrders || [],
+          cancelledSampleOrders: best.cancelledSampleOrders || [],
+
+          note:
+            'ROAS theo mã SP: POS và Facebook/COD phân loại giống Dashboard; thời gian ưu tiên soldAt; ROAS tổng = (doanh thu POS + Facebook) / tổng Meta spend của các Ads cùng SKU family.',
+        },
       };
     });
   }

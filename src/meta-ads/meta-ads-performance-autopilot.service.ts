@@ -160,7 +160,7 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
       lastRunAt: this.lastRunAt,
       lastSummary: this.lastSummary,
       recentActions: this.actions.slice(0, 100),
-      rule: `Chạy >= ${this.minRunHours}h + ROAS rolling 24h >= ${this.scaleRoas} + spend >= ${this.minSpend} + tồn mọi size >= 10; scale Ad Set +${this.scalePercent}%, tối đa 1 lần/24h.`,
+      rule: `Chạy >= ${this.minRunHours}h + ROAS tổng (POS + Facebook) / Meta spend >= ${this.scaleRoas} + spend >= ${this.minSpend} + tồn mọi size >= 10; scale ngân sách +${this.scalePercent}%, tối đa 1 lần/24h.`,
     };
   }
 
@@ -395,13 +395,15 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
   }) {
     const { row, stock, lastScale, exactRolling24h } = input;
     const attr = (row?.productAttribution || {}) as AnyRow;
-    const roas = n(attr?.realRoasEstimate);
+    const roas = n(attr?.totalRoas ?? attr?.realRoasEstimate);
     const spend = n(row?.metrics?.spend);
     const runHours = this.runtimeHours(row);
     const reasons: string[] = [];
 
     if (!exactRolling24h) reasons.push('Meta chưa trả được rolling 24h chính xác');
-    if (attr?.allocationMode !== 'single_ad_family' || n(attr?.confidence) < 80) reasons.push('Attribution chưa đủ chắc');
+    if (attr?.allocationMode !== 'product_family_dashboard_channels' || n(attr?.confidence) < 80) {
+      reasons.push('Attribution mã SP chưa đủ chắc');
+    }
     if (runHours < this.minRunHours) reasons.push(`Mới chạy ${runHours.toFixed(1)}h < ${this.minRunHours}h`);
     if (roas < this.scaleRoas) reasons.push(`ROAS 24h ${roas.toFixed(2)} < ${this.scaleRoas}`);
     if (spend < this.minSpend) reasons.push(`Spend 24h ${Math.round(spend)} < ${Math.round(this.minSpend)}`);
@@ -442,7 +444,7 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
       {
         since,
         until: now,
-        sourceMode: 'facebook',
+        sourceMode: 'all',
         orderMode: 'valid',
       },
     )) as AnyRow[];
@@ -477,7 +479,12 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
         exactRolling24h: rolling?.exactRolling24h === true,
       });
       const attr = evaluation.attribution;
-      const internalRevenue = n(attr?.revenue || attr?.orderRevenue);
+      const internalRevenue = n(attr?.totalRevenue ?? attr?.revenue ?? attr?.orderRevenue);
+      const facebookRevenue = n(attr?.facebookRevenue);
+      const posRevenue = n(attr?.posRevenue);
+      const facebookRoas = n(attr?.facebookRoas);
+      const posRoas = n(attr?.posRoas);
+      const totalRoas = n(attr?.totalRoas ?? attr?.realRoasEstimate);
 
       return {
         metaAdId: adId,
@@ -497,8 +504,15 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
         budgetEntityId: n(row?.adSetDailyBudget) > 0 ? adSetId : n(row?.campaignDailyBudget) > 0 ? String(row?.metaCampaignId || row?.campaignId || '') : null,
         spend24h: evaluation.spend,
         revenue24h: internalRevenue,
-        roas24h: evaluation.roas,
+        facebookRevenue24h: facebookRevenue,
+        posRevenue24h: posRevenue,
+        roasFacebook24h: facebookRoas,
+        roasPos24h: posRoas,
+        roasTotal24h: totalRoas,
+        roas24h: totalRoas,
         orderCount24h: n(attr?.orderCount),
+        facebookOrders24h: n(attr?.facebookOrders),
+        posOrders24h: n(attr?.posOrders),
         productId: attr?.productId || null,
         sku: attr?.sku || attr?.familySku || null,
         familySku: attr?.familySku || null,
@@ -584,7 +598,7 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
         eligible += 1;
         if (this.runtimeLevel !== 'auto') {
           suggested += 1;
-          const reason = `Đủ điều kiện: chạy ${n(row.runHours).toFixed(1)}h, ROAS 24h ${n(row.roas24h).toFixed(2)}, tồn an toàn.`;
+          const reason = `Đủ điều kiện: chạy ${n(row.runHours).toFixed(1)}h, ROAS tổng 24h ${n(row.roas24h).toFixed(2)}, tồn an toàn.`;
           this.pushAction({
             at: new Date().toISOString(),
             type: 'SUGGEST_SCALE',
@@ -619,7 +633,7 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
             spend: n(row.spend24h),
             oldBudget: scaledResult.oldBudget,
             newBudget: scaledResult.newBudget,
-            reason: `ROAS rolling 24h ${n(row.roas24h).toFixed(2)} >= ${this.scaleRoas}; scale +${this.scalePercent}%.`,
+            reason: `ROAS tổng rolling 24h ${n(row.roas24h).toFixed(2)} >= ${this.scaleRoas}; scale +${this.scalePercent}%.`,
           });
           results.push({ ...scaledResult, metaAdId: row.metaAdId, roas24h: row.roas24h });
         } catch (error: any) {

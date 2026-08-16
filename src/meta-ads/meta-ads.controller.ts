@@ -424,33 +424,47 @@ export class MetaAdsController {
       {
         since: date.since,
         until: date.until,
-        sourceMode: 'facebook',
+        sourceMode: 'all',
         orderMode: 'valid',
       },
     );
 
     const topAds = (attributed || []).map((row: any) => {
       const attr = row?.productAttribution || {};
-      const internalRevenue = Number(attr?.revenue || 0) || 0;
-      const internalOrderRevenue = Number(attr?.orderRevenue || 0) || 0;
-      const internalRoas = Number(attr?.realRoasEstimate || 0) || 0;
+      const facebookRevenue = Number(attr?.facebookRevenue || 0) || 0;
+      const posRevenue = Number(attr?.posRevenue || 0) || 0;
+      const internalRevenue = Number(attr?.totalRevenue ?? attr?.revenue ?? 0) || 0;
+      const internalOrderRevenue = internalRevenue;
+      const facebookRoas = Number(attr?.facebookRoas || 0) || 0;
+      const posRoas = Number(attr?.posRoas || 0) || 0;
+      const totalRoas = Number(attr?.totalRoas ?? attr?.realRoasEstimate ?? 0) || 0;
 
       return {
         ...row,
 
-        // Expose trực tiếp để mobile/web không phải biết cấu trúc attribution.
+        // Chuẩn Dashboard theo mã SP.
+        facebookRevenue,
+        posRevenue,
         internalRevenue,
         internalOrderRevenue,
-        internalRoas,
+        facebookRoas,
+        posRoas,
+        totalRoas,
+        internalRoas: totalRoas,
 
-        // Đồng thời nhét vào metrics để tương thích UI đang đọc metrics.*
+        // Tương thích UI cũ + field mới cho mobile/web.
         metrics: {
           ...(row?.metrics || {}),
+          facebookRevenue,
+          posRevenue,
           internalRevenue,
           internalOrderRevenue,
-          internalRoas,
-          roasInternal: internalRoas,
-          realRoasEstimate: internalRoas,
+          facebookRoas,
+          posRoas,
+          totalRoas,
+          internalRoas: totalRoas,
+          roasInternal: totalRoas,
+          realRoasEstimate: totalRoas,
         },
       };
     });
@@ -461,9 +475,9 @@ export class MetaAdsController {
       attribution: {
         ...(result?.attribution || {}),
         enabled: true,
-        mode: 'meta_live_plus_internal_orders',
+        mode: 'dashboard_channel_roas_v1',
         note:
-          'Meta metrics lấy live từ Graph Insights; doanh thu/ROAS nội bộ attach từ orderItem/order theo SKU family, chỉ Facebook và bỏ đơn huỷ.',
+          'Doanh thu mã SP phân POS / Facebook-COD giống Dashboard; thời gian ưu tiên soldAt; ROAS tổng = (POS + Facebook) / tổng Meta spend của SKU family.',
       },
       internalRevenueSummary: topAds.reduce(
         (sum: number, row: any) => sum + (Number(row?.internalRevenue || 0) || 0),
