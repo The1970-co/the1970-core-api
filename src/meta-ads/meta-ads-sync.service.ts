@@ -952,7 +952,7 @@ export class MetaAdsSyncService {
       source: 'mobile_manual',
     };
 
-    await (this.prisma as any).metaAd.updateMany({
+    let saved = await (this.prisma as any).metaAd.updateMany({
       where: { metaAdId },
       data: {
         rawJson: {
@@ -962,10 +962,64 @@ export class MetaAdsSyncService {
       },
     });
 
+    // Một số Ads đang chạy được lấy trực tiếp từ Meta nhưng chưa từng có row trong metaAd cache DB.
+    // updateMany khi đó trả count=0 nhưng trước đây vẫn trả ok=true => UI tưởng đã lưu,
+    // còn inventory/control-center load lại thì không có manualMapping nên vẫn UNMAPPED.
+    if (Number(saved?.count || 0) === 0) {
+      await this.syncStructure(this.defaultAdAccountId, 500);
+
+      const synced = await (this.prisma as any).metaAd.findFirst({
+        where: { metaAdId },
+        select: { rawJson: true },
+      });
+
+      const syncedRaw =
+        synced?.rawJson && typeof synced.rawJson === 'object' && !Array.isArray(synced.rawJson)
+          ? synced.rawJson
+          : {};
+
+      saved = await (this.prisma as any).metaAd.updateMany({
+        where: { metaAdId },
+        data: {
+          rawJson: {
+            ...syncedRaw,
+            _autopilotMapping: mapping,
+          },
+        },
+      });
+    }
+
+    if (Number(saved?.count || 0) === 0) {
+      throw new Error(`Không lưu được mapping cho Meta Ad ${metaAdId}: chưa có Ads này trong cache DB sau khi sync`);
+    }
+
+    // Đọc lại để bảo đảm mapping thực sự đã persist trước khi báo ok.
+    const persisted = await (this.prisma as any).metaAd.findFirst({
+      where: { metaAdId },
+      select: { rawJson: true },
+    });
+    const persistedMapping =
+      persisted?.rawJson && typeof persisted.rawJson === 'object'
+        ? persisted.rawJson?._autopilotMapping || null
+        : null;
+
+    if (
+      String(persistedMapping?.productCode || '').trim().toUpperCase() !== productCode ||
+      String(persistedMapping?.color || '').trim() !== String(mapping.color || '').trim()
+    ) {
+      throw new Error(`Mapping Meta Ad ${metaAdId} chưa được lưu chắc chắn vào DB`);
+    }
+
     // Bắt lần load sau lấy DB mới, không giữ cache 60s cũ.
     this.autopilotActiveAdsCache = null;
+    this.autopilotActiveAdsInFlight = null;
 
-    return { ok: true, metaAdId, mapping };
+    return {
+      ok: true,
+      metaAdId,
+      mapping: persistedMapping,
+      persisted: true,
+    };
   }
 
   async getLiveAdsForAutopilot(limit = 500) {
