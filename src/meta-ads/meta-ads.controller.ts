@@ -399,13 +399,77 @@ export class MetaAdsController {
     @Query('level') level?: MetaInsightLevel,
     @Query('limit') limit?: string,
   ) {
-    return this.metaAdsSyncService.getLiveInsights({
+    const resolvedLevel = (level || 'ad') as MetaInsightLevel;
+
+    const result: any = await this.metaAdsSyncService.getLiveInsights({
       range: range || 'today',
       fromDate,
       toDate,
-      level: (level || 'ad') as MetaInsightLevel,
+      level: resolvedLevel,
       limit: Number(limit || 1000),
     });
+
+    // ROAS nội bộ chỉ có ý nghĩa ở level Ad:
+    // Meta metrics lấy live, còn doanh thu/order lấy từ DB nội bộ.
+    if (resolvedLevel !== 'ad') return result;
+
+    const date = parseDateRange({
+      range: range || 'today',
+      fromDate,
+      toDate,
+    });
+
+    const attributed = await this.metaAdsOrderAttributionService.attachProductOrdersToAds(
+      Array.isArray(result?.topAds) ? result.topAds : [],
+      {
+        since: date.since,
+        until: date.until,
+        sourceMode: 'facebook',
+        orderMode: 'valid',
+      },
+    );
+
+    const topAds = (attributed || []).map((row: any) => {
+      const attr = row?.productAttribution || {};
+      const internalRevenue = Number(attr?.revenue || 0) || 0;
+      const internalOrderRevenue = Number(attr?.orderRevenue || 0) || 0;
+      const internalRoas = Number(attr?.realRoasEstimate || 0) || 0;
+
+      return {
+        ...row,
+
+        // Expose trực tiếp để mobile/web không phải biết cấu trúc attribution.
+        internalRevenue,
+        internalOrderRevenue,
+        internalRoas,
+
+        // Đồng thời nhét vào metrics để tương thích UI đang đọc metrics.*
+        metrics: {
+          ...(row?.metrics || {}),
+          internalRevenue,
+          internalOrderRevenue,
+          internalRoas,
+          roasInternal: internalRoas,
+          realRoasEstimate: internalRoas,
+        },
+      };
+    });
+
+    return {
+      ...result,
+      topAds,
+      attribution: {
+        ...(result?.attribution || {}),
+        enabled: true,
+        mode: 'meta_live_plus_internal_orders',
+        note:
+          'Meta metrics lấy live từ Graph Insights; doanh thu/ROAS nội bộ attach từ orderItem/order theo SKU family, chỉ Facebook và bỏ đơn huỷ.',
+      },
+      internalRevenueSummary: topAds.reduce(
+        (sum: number, row: any) => sum + (Number(row?.internalRevenue || 0) || 0),
+        0,
+      ),
+    };
   }
 
 }
