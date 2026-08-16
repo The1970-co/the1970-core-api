@@ -277,20 +277,28 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
   ) {
     if (options.activeOnly !== false && !isMetaAdActive(ad)) return { group: null as ColorStockGroup | null, ambiguous: false, score: 0 };
 
-    // Manual mapping là nguồn ưu tiên cao nhất cho Ads cũ không có mã SP trong tên.
-    const manualProductCode = String(ad?.manualProductCode || ad?.manualMapping?.productCode || '').trim().toUpperCase();
-    const manualColor = String(ad?.manualColor || ad?.manualMapping?.color || '').trim();
+    // Manual mapping phải được ưu tiên trước heuristic tên Ads.
+    // Đây là nguồn dùng cho Ads cũ không có mã/màu trong tên.
+    const manualProductCode = String(
+      ad?.manualProductCode || ad?.manualMapping?.productCode || '',
+    ).trim().toUpperCase();
+    const manualColor = String(
+      ad?.manualColor || ad?.manualMapping?.color || '',
+    ).trim();
 
     if (manualProductCode) {
       const manualGroups = groups.filter(
-        (group) => String(group.productCode || '').trim().toUpperCase() === manualProductCode,
+        (group) =>
+          String(group.productCode || '').trim().toUpperCase() === manualProductCode,
       );
 
       if (manualGroups.length) {
         if (manualColor) {
+          const wantedColor = normalizeText(manualColor);
           const exact = manualGroups.find(
-            (group) => normalizeText(group.color) === normalizeText(manualColor),
+            (group) => normalizeText(group.color) === wantedColor,
           );
+
           if (exact) {
             return {
               group: exact,
@@ -302,6 +310,7 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
           }
         }
 
+        // Nếu mã chỉ có đúng 1 màu thì không cần bắt buộc manualColor.
         if (manualGroups.length === 1) {
           return {
             group: manualGroups[0],
@@ -312,12 +321,15 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
           };
         }
 
+        // Đã có mã nhưng màu chưa match chính xác -> không tự đoán.
         return {
           group: null as ColorStockGroup | null,
           ambiguous: true,
           score: 0,
           manual: true,
-          candidates: manualGroups.slice(0, 10).map((group) => ({ group, score: 900 })),
+          candidates: manualGroups
+            .slice(0, 10)
+            .map((group) => ({ group, score: 900 })),
         };
       }
     }
