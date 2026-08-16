@@ -4,6 +4,26 @@ import { PrismaService } from "../prisma/prisma.service";
 
 type Actor = { id?: string | null; name?: string | null; fullName?: string | null; email?: string | null };
 
+const SAMPLE_SEASONS = ["Xuân Hạ", "Thu Đông", "Đông Xuân", "Xuân Hè"] as const;
+const DEFAULT_FABRIC_COMPOSITIONS = [
+  "Cotton",
+  "Linen",
+  "Tencel",
+  "Lyocell",
+  "Viscose",
+  "Rayon",
+  "Modal",
+  "Bamboo",
+  "Polyester",
+  "Nylon",
+  "Spandex",
+  "Elastane",
+  "Wool",
+  "Cashmere",
+  "Silk",
+  "Acrylic",
+] as const;
+
 @Injectable()
 export class SampleFabricService {
   constructor(private readonly prisma: PrismaService) {}
@@ -15,14 +35,17 @@ export class SampleFabricService {
     };
   }
 
-
   private userHas(user: any, permission: string) {
     const role = String(user?.role || "").trim().toUpperCase();
     if (role === "OWNER" || role === "ADMIN") return true;
     const keys = new Set<string>();
-    for (const value of [...(user?.permissions || []), ...(user?.permissionKeys || [])]) if (value) keys.add(String(value));
+    for (const value of [...(user?.permissions || []), ...(user?.permissionKeys || [])]) {
+      if (value) keys.add(String(value));
+    }
     for (const row of user?.branchPermissions || []) {
-      for (const value of [...(row?.permissionKeys || []), ...(row?.extraPermissionKeys || [])]) if (value) keys.add(String(value));
+      for (const value of [...(row?.permissionKeys || []), ...(row?.extraPermissionKeys || [])]) {
+        if (value) keys.add(String(value));
+      }
       for (const value of row?.deniedPermissionKeys || []) keys.delete(String(value));
     }
     return keys.has("*") || keys.has(permission);
@@ -34,6 +57,26 @@ export class SampleFabricService {
     return Number.isFinite(parsed) ? parsed : null;
   }
 
+  private titleCase(value: any) {
+    return String(value || "")
+      .trim()
+      .replace(/\s+/g, " ")
+      .split(" ")
+      .map((part) => part ? part.charAt(0).toLocaleUpperCase("vi-VN") + part.slice(1).toLocaleLowerCase("vi-VN") : "")
+      .join(" ");
+  }
+
+  private normalizeSampleCode(value: any) {
+    return String(value || "").trim().toUpperCase().replace(/\s+/g, "");
+  }
+
+  private parseCompositionTokens(value?: string | null) {
+    return String(value || "")
+      .split(",")
+      .map((item) => this.titleCase(item))
+      .filter(Boolean);
+  }
+
   private async nextCode(prefix: string, model: "sample" | "receipt") {
     const day = new Date().toISOString().slice(2, 10).replace(/-/g, "");
     const base = `${prefix}${day}`;
@@ -43,19 +86,154 @@ export class SampleFabricService {
     return `${base}-${String(rows + 1).padStart(3, "0")}`;
   }
 
+  private async nextFabricSupplierCode() {
+    for (let index = 1; index < 100000; index += 1) {
+      const code = `NCCV${String(index).padStart(4, "0")}`;
+      const exists = await this.prisma.fabricSupplier.findUnique({ where: { code }, select: { id: true } });
+      if (!exists) return code;
+    }
+    throw new BadRequestException("Không thể sinh mã nhà cung cấp vải.");
+  }
+
+  async listFabricSuppliers() {
+    return this.prisma.fabricSupplier.findMany({
+      where: { isActive: true },
+      select: { id: true, code: true, name: true, phone: true, email: true, address: true, note: true },
+      orderBy: { name: "asc" },
+    });
+  }
+
+  async createFabricSupplier(body: any) {
+    const name = this.titleCase(body?.name);
+    if (!name) throw new BadRequestException("Thiếu tên nhà cung cấp vải.");
+
+    const sameName = await this.prisma.fabricSupplier.findFirst({
+      where: { name: { equals: name, mode: "insensitive" }, isActive: true },
+      select: { id: true, code: true, name: true, phone: true, email: true, address: true, note: true },
+    });
+    if (sameName) return sameName;
+
+    const code = this.normalizeSampleCode(body?.code) || await this.nextFabricSupplierCode();
+    const codeExists = await this.prisma.fabricSupplier.findUnique({ where: { code }, select: { id: true } });
+    if (codeExists) throw new BadRequestException(`Mã nhà cung cấp vải ${code} đã tồn tại.`);
+
+    return this.prisma.fabricSupplier.create({
+      data: {
+        name,
+        code,
+        phone: String(body?.phone || "").trim() || null,
+        email: String(body?.email || "").trim() || null,
+        address: String(body?.address || "").trim() || null,
+        note: String(body?.note || "").trim() || null,
+      },
+      select: { id: true, code: true, name: true, phone: true, email: true, address: true, note: true },
+    });
+  }
+
+  async checkSampleCode(codeInput: any, excludeId?: string) {
+    const code = this.normalizeSampleCode(codeInput);
+    if (!code) return { available: true, code: "", source: null, message: "" };
+
+    const sample = await this.prisma.designSample.findFirst({
+      where: {
+        code: { equals: code, mode: "insensitive" },
+        ...(excludeId ? { id: { not: excludeId } } : {}),
+      },
+      select: { id: true, code: true, name: true },
+    });
+    if (sample) {
+      return {
+        available: false,
+        code,
+        source: "design_sample",
+        message: `Mã ${code} đã có trong Quản lý mẫu mã (${sample.name}).`,
+      };
+    }
+
+    const product = await this.prisma.product.findFirst({
+      where: {
+        OR: [
+          { slug: { equals: code, mode: "insensitive" } },
+          { variants: { some: { sku: { equals: code, mode: "insensitive" } } } },
+          { variants: { some: { sku: { startsWith: `${code}-`, mode: "insensitive" } } } },
+        ],
+      },
+      select: { id: true, name: true, slug: true },
+    });
+    if (product) {
+      return {
+        available: false,
+        code,
+        source: "product",
+        message: `Mã ${code} đã tồn tại trong danh sách sản phẩm (${product.name}).`,
+      };
+    }
+
+    return { available: true, code, source: null, message: `Mã ${code} có thể sử dụng.` };
+  }
+
+  private async assertSampleCodeAvailable(code: string, excludeId?: string) {
+    const result = await this.checkSampleCode(code, excludeId);
+    if (!result.available) throw new BadRequestException(result.message);
+  }
+
   async sampleMeta() {
-    const [suppliers, staff] = await Promise.all([
-      this.prisma.supplier.findMany({ where: { isActive: true }, select: { id: true, code: true, name: true }, orderBy: { name: "asc" } }),
-      this.prisma.staffUser.findMany({ where: { isActive: true }, select: { id: true, code: true, name: true, branchId: true }, orderBy: { name: "asc" } }),
+    const [suppliers, staff, categories, productCategories, sampleCategories, compositionRows] = await Promise.all([
+      this.listFabricSuppliers(),
+      this.prisma.staffUser.findMany({
+        where: { isActive: true },
+        select: { id: true, code: true, name: true, branchId: true },
+        orderBy: { name: "asc" },
+      }),
+      this.prisma.category.findMany({
+        where: { isActive: true },
+        select: { name: true },
+        orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+      }),
+      this.prisma.product.findMany({
+        where: { category: { not: null } },
+        distinct: ["category"],
+        select: { category: true },
+      }),
+      this.prisma.designSample.findMany({
+        where: { category: { not: null } },
+        distinct: ["category"],
+        select: { category: true },
+      }),
+      this.prisma.designSample.findMany({
+        where: { fabricComposition: { not: null } },
+        select: { fabricComposition: true },
+      }),
     ]);
-    return { suppliers, staff };
+
+    const productGroups = Array.from(new Set([
+      ...categories.map((row) => this.titleCase(row.name)),
+      ...productCategories.map((row) => this.titleCase(row.category)),
+      ...sampleCategories.map((row) => this.titleCase(row.category)),
+    ].filter(Boolean))).sort((a, b) => a.localeCompare(b, "vi"));
+
+    const fabricCompositions = Array.from(new Set([
+      ...DEFAULT_FABRIC_COMPOSITIONS,
+      ...compositionRows.flatMap((row) => this.parseCompositionTokens(row.fabricComposition)),
+    ])).sort((a, b) => a.localeCompare(b, "vi"));
+
+    return {
+      suppliers,
+      staff,
+      seasons: SAMPLE_SEASONS,
+      productGroups,
+      fabricCompositions,
+    };
   }
 
   async fabricMeta() {
     const [suppliers, branches, samples] = await Promise.all([
-      this.prisma.supplier.findMany({ where: { isActive: true }, select: { id: true, code: true, name: true }, orderBy: { name: "asc" } }),
+      this.listFabricSuppliers(),
       this.prisma.branch.findMany({ where: { isActive: true }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
-      this.prisma.designSample.findMany({ select: { id: true, code: true, name: true, year: true, fabricBoardCode: true, fabricCode: true }, orderBy: [{ year: "desc" }, { updatedAt: "desc" }] }),
+      this.prisma.designSample.findMany({
+        select: { id: true, code: true, name: true, year: true, fabricBoardCode: true, fabricCode: true },
+        orderBy: [{ year: "desc" }, { updatedAt: "desc" }],
+      }),
     ]);
     return { suppliers, branches, samples };
   }
@@ -75,6 +253,7 @@ export class SampleFabricService {
           { category: { contains: q, mode: "insensitive" } },
           { fabricBoardCode: { contains: q, mode: "insensitive" } },
           { fabricCode: { contains: q, mode: "insensitive" } },
+          { fabricComposition: { contains: q, mode: "insensitive" } },
         ],
       } : {}),
     };
@@ -94,24 +273,34 @@ export class SampleFabricService {
 
   async createSample(body: any, user?: Actor) {
     const actor = this.actor(user);
-    const code = String(body?.code || "").trim() || await this.nextCode("MS", "sample");
+    let code = this.normalizeSampleCode(body?.code);
+    if (!code) code = await this.nextCode("MS", "sample");
+    await this.assertSampleCodeAvailable(code);
+
     const name = String(body?.name || "").trim();
     if (!name) throw new BadRequestException("Thiếu tên mẫu.");
+
+    const season = String(body?.season || "").trim();
+    if (season && !SAMPLE_SEASONS.includes(season as any)) {
+      throw new BadRequestException("Mùa / BST không hợp lệ.");
+    }
 
     const status = (body?.status || "IDEA") as DesignSampleStatus;
     const colors = Array.isArray(body?.colors) ? body.colors : [];
     const images = Array.isArray(body?.images) ? body.images : [];
+    const composition = this.parseCompositionTokens(body?.fabricComposition).join(", ") || null;
 
     return this.prisma.designSample.create({
       data: {
         code,
         name,
         year: Number(body?.year || new Date().getFullYear()),
-        season: body?.season || null,
-        category: body?.category || null,
+        season: season || null,
+        category: this.titleCase(body?.category) || null,
         supplierId: body?.supplierId || null,
         fabricBoardCode: body?.fabricBoardCode || null,
         fabricCode: body?.fabricCode || null,
+        fabricComposition: composition,
         status,
         assigneeStaffId: body?.assigneeStaffId || null,
         assigneeName: body?.assigneeName || null,
@@ -124,7 +313,7 @@ export class SampleFabricService {
         createdByName: actor.name,
         colors: {
           create: colors.filter((x: any) => x?.name).map((x: any) => ({
-            name: String(x.name).trim(),
+            name: this.titleCase(x.name),
             code: x.code || null,
             status: (x.status || status) as DesignSampleStatus,
             note: x.note || null,
@@ -143,6 +332,8 @@ export class SampleFabricService {
     if (!current) throw new NotFoundException("Không tìm thấy mẫu.");
     const actor = this.actor(user);
     const nextStatus = (body?.status || current.status) as DesignSampleStatus;
+    const season = body?.season !== undefined ? String(body.season || "").trim() : undefined;
+    if (season && !SAMPLE_SEASONS.includes(season as any)) throw new BadRequestException("Mùa / BST không hợp lệ.");
 
     return this.prisma.$transaction(async (tx) => {
       if (Array.isArray(body?.colors)) {
@@ -151,7 +342,7 @@ export class SampleFabricService {
           await tx.designSampleColor.createMany({
             data: body.colors.filter((x: any) => x?.name).map((x: any) => ({
               designSampleId: id,
-              name: String(x.name).trim(),
+              name: this.titleCase(x.name),
               code: x.code || null,
               status: (x.status || nextStatus) as DesignSampleStatus,
               note: x.note || null,
@@ -181,11 +372,12 @@ export class SampleFabricService {
         data: {
           ...(body?.name !== undefined ? { name: String(body.name).trim() } : {}),
           ...(body?.year !== undefined ? { year: Number(body.year) } : {}),
-          ...(body?.season !== undefined ? { season: body.season || null } : {}),
-          ...(body?.category !== undefined ? { category: body.category || null } : {}),
+          ...(body?.season !== undefined ? { season: season || null } : {}),
+          ...(body?.category !== undefined ? { category: this.titleCase(body.category) || null } : {}),
           ...(body?.supplierId !== undefined ? { supplierId: body.supplierId || null } : {}),
           ...(body?.fabricBoardCode !== undefined ? { fabricBoardCode: body.fabricBoardCode || null } : {}),
           ...(body?.fabricCode !== undefined ? { fabricCode: body.fabricCode || null } : {}),
+          ...(body?.fabricComposition !== undefined ? { fabricComposition: this.parseCompositionTokens(body.fabricComposition).join(", ") || null } : {}),
           ...(body?.status !== undefined ? { status: nextStatus } : {}),
           ...(body?.assigneeStaffId !== undefined ? { assigneeStaffId: body.assigneeStaffId || null } : {}),
           ...(body?.assigneeName !== undefined ? { assigneeName: body.assigneeName || null } : {}),

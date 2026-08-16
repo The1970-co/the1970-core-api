@@ -29,10 +29,7 @@ async function uploadSampleFabricImage(file: Express.Multer.File, folder: string
 
   const result: any = await new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
-      {
-        folder,
-        resource_type: "image",
-      },
+      { folder, resource_type: "image" },
       (error, uploaded) => {
         if (uploaded) resolve(uploaded);
         else reject(error);
@@ -56,23 +53,51 @@ export class SampleFabricController {
 
   @Get("samples/meta")
   @RequirePermissions("design_sample.view")
-  sampleMeta() { return this.service.sampleMeta(); }
+  sampleMeta() {
+    return this.service.sampleMeta();
+  }
+
+  @Get("samples/check-code")
+  @RequirePermissions("design_sample.view")
+  checkSampleCode(@Query("code") code?: string, @Query("excludeId") excludeId?: string) {
+    return this.service.checkSampleCode(code, excludeId);
+  }
+
+  @Get("fabric-suppliers")
+  @RequirePermissions("design_sample.view")
+  listFabricSuppliers() {
+    return this.service.listFabricSuppliers();
+  }
+
+  @Post("fabric-suppliers")
+  @RequirePermissions("design_sample.create")
+  createFabricSupplier(@Body() body: any) {
+    return this.service.createFabricSupplier(body);
+  }
 
   @Get("samples")
   @RequirePermissions("design_sample.view")
-  listSamples(@Query() query: any) { return this.service.listSamples(query); }
+  listSamples(@Query() query: any) {
+    return this.service.listSamples(query);
+  }
 
   @Post("samples")
   @RequirePermissions("design_sample.create")
-  createSample(@Body() body: any, @Req() req: any) { return this.service.createSample(body, req.user); }
+  createSample(@Body() body: any, @Req() req: any) {
+    return this.service.createSample(body, req.user);
+  }
 
   @Patch("samples/:id")
   @RequirePermissions("design_sample.edit")
-  updateSample(@Param("id") id: string, @Body() body: any, @Req() req: any) { return this.service.updateSample(id, body, req.user); }
+  updateSample(@Param("id") id: string, @Body() body: any, @Req() req: any) {
+    return this.service.updateSample(id, body, req.user);
+  }
 
   @Delete("samples/:id")
   @RequirePermissions("design_sample.delete")
-  deleteSample(@Param("id") id: string) { return this.service.deleteSample(id); }
+  deleteSample(@Param("id") id: string) {
+    return this.service.deleteSample(id);
+  }
 
   @Post("samples/upload")
   @RequirePermissions("design_sample.upload_images")
@@ -83,31 +108,45 @@ export class SampleFabricController {
 
   @Get("fabric-receipts/meta")
   @RequirePermissions("fabric_receipt.view")
-  fabricMeta() { return this.service.fabricMeta(); }
+  fabricMeta() {
+    return this.service.fabricMeta();
+  }
 
   @Get("fabric-receipts")
   @RequirePermissions("fabric_receipt.view")
-  listFabricReceipts(@Query() query: any, @Req() req: any) { return this.service.listFabricReceipts(query, req.user); }
+  listFabricReceipts(@Query() query: any, @Req() req: any) {
+    return this.service.listFabricReceipts(query, req.user);
+  }
 
   @Post("fabric-receipts")
   @RequirePermissions("fabric_receipt.create")
-  createFabricReceipt(@Body() body: any, @Req() req: any) { return this.service.createFabricReceipt(body, req.user); }
+  createFabricReceipt(@Body() body: any, @Req() req: any) {
+    return this.service.createFabricReceipt(body, req.user);
+  }
 
   @Patch("fabric-receipts/:id")
   @RequirePermissions("fabric_receipt.edit")
-  updateFabricReceipt(@Param("id") id: string, @Body() body: any) { return this.service.updateFabricReceipt(id, body); }
+  updateFabricReceipt(@Param("id") id: string, @Body() body: any) {
+    return this.service.updateFabricReceipt(id, body);
+  }
 
   @Patch("fabric-receipts/:id/cost")
   @RequirePermissions("fabric_receipt.cost.edit")
-  setCost(@Param("id") id: string, @Body() body: any) { return this.service.setFabricReceiptCost(id, body); }
+  setCost(@Param("id") id: string, @Body() body: any) {
+    return this.service.setFabricReceiptCost(id, body);
+  }
 
   @Post("fabric-receipts/:id/measurements")
   @RequirePermissions("fabric_receipt.measure")
-  addMeasurement(@Param("id") id: string, @Body() body: any, @Req() req: any) { return this.service.addMeasurement(id, body, req.user); }
+  addMeasurement(@Param("id") id: string, @Body() body: any, @Req() req: any) {
+    return this.service.addMeasurement(id, body, req.user);
+  }
 
   @Post("fabric-receipts/:id/images")
   @RequirePermissions("fabric_receipt.upload_images")
-  addFabricImage(@Param("id") id: string, @Body() body: any) { return this.service.addFabricImage(id, body); }
+  addFabricImage(@Param("id") id: string, @Body() body: any) {
+    return this.service.addFabricImage(id, body);
+  }
 
   @Post("fabric-receipts/upload")
   @RequirePermissions("fabric_receipt.upload_images")
@@ -118,13 +157,19 @@ export class SampleFabricController {
 
   @Post("fabric-receipts/:id/complete")
   @RequirePermissions("fabric_receipt.complete")
-  complete(@Param("id") id: string) { return this.service.completeFabricReceipt(id); }
+  complete(@Param("id") id: string) {
+    return this.service.completeFabricReceipt(id);
+  }
 
   @Post("fabric-receipts/:id/approve-variance")
   @RequirePermissions("fabric_receipt.approve_variance")
-  approveVariance(@Param("id") id: string, @Req() req: any) { return this.service.approveVariance(id, req.user); }
+  approveVariance(@Param("id") id: string, @Req() req: any) {
+    return this.service.approveVariance(id, req.user);
+  }
 
   @Delete("fabric-receipts/:id")
   @RequirePermissions("fabric_receipt.delete")
-  deleteFabricReceipt(@Param("id") id: string) { return this.service.deleteFabricReceipt(id); }
+  deleteFabricReceipt(@Param("id") id: string) {
+    return this.service.deleteFabricReceipt(id);
+  }
 }

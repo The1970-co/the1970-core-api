@@ -278,17 +278,6 @@ export class MetaAdsController {
     return this.metaAdsSyncService.setAdStatus(String(body?.metaAdId || ''), status as 'PAUSED' | 'ACTIVE');
   }
 
-  @Post('autopilot/inventory/assess')
-  assessInventoryForAds(@Body() body: { ads?: any[] } = {}) {
-    const ads = Array.isArray(body?.ads) ? body.ads.slice(0, 500) : [];
-    return this.metaAdsInventoryAutopilotService.assessAdsForScale(ads);
-  }
-
-  @Get('autopilot/inventory/mapping-options')
-  getInventoryMappingOptions(@Query('limit') limit?: string) {
-    return this.metaAdsInventoryAutopilotService.getManualMappingOptions(Number(limit || 1000));
-  }
-
   @Post('autopilot/ads/map')
   async setAdManualMapping(
     @Body() body: { metaAdId?: string; productCode?: string; color?: string } = {},
@@ -300,13 +289,16 @@ export class MetaAdsController {
     if (!metaAdId) throw new Error('Thiếu metaAdId');
     if (!productCode) throw new Error('Thiếu productCode');
 
+    // Validate bằng đúng nguồn mapping/tồn kho mà Autopilot đang dùng.
     const options = await this.metaAdsInventoryAutopilotService.getManualMappingOptions(5000);
     const rows = Array.isArray(options) ? options : (options as any)?.items || [];
 
     const product = rows.find(
       (row: any) => String(row?.productCode || '').trim().toUpperCase() === productCode,
     );
-    if (!product) throw new Error(`Không tìm thấy mã sản phẩm ${productCode} trong kho nội bộ`);
+    if (!product) {
+      throw new Error(`Không tìm thấy mã sản phẩm ${productCode} trong tồn kho nội bộ`);
+    }
 
     const colors = Array.isArray(product?.colors) ? product.colors : [];
     const finalColor =
@@ -317,25 +309,22 @@ export class MetaAdsController {
       throw new Error('Mã này có nhiều màu, cần chọn màu');
     }
 
-    if (finalColor && colors.length) {
-      const normalize = (value: any) =>
-        String(value || '')
-          .trim()
-          .toLowerCase()
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .replace(/đ/g, 'd');
-
-      if (!colors.some((item: any) => normalize(item?.color) === normalize(finalColor))) {
-        throw new Error(`Màu ${finalColor} không thuộc mã ${productCode}`);
-      }
-    }
-
     return this.metaAdsSyncService.setAutopilotAdManualMapping({
       metaAdId,
       productCode,
       color: finalColor || undefined,
     });
+  }
+
+  @Post('autopilot/inventory/assess')
+  assessInventoryForAds(@Body() body: { ads?: any[] } = {}) {
+    const ads = Array.isArray(body?.ads) ? body.ads.slice(0, 500) : [];
+    return this.metaAdsInventoryAutopilotService.assessAdsForScale(ads);
+  }
+
+  @Get('autopilot/inventory/mapping-options')
+  getInventoryMappingOptions(@Query('limit') limit?: string) {
+    return this.metaAdsInventoryAutopilotService.getManualMappingOptions(Number(limit || 1000));
   }
 
   @Get('autopilot/inventory/status')
