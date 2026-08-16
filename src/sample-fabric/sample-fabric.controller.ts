@@ -1,3 +1,4 @@
+
 import {
   BadRequestException,
   Body,
@@ -21,23 +22,16 @@ import { PermissionGuard } from "../auth/guards/permission.guard";
 import { RequirePermissions } from "../auth/decorators/require-permissions.decorator";
 import { SampleFabricService } from "./sample-fabric.service";
 
-async function uploadSampleFabricImage(file: Express.Multer.File, folder: string) {
+async function uploadImage(file: Express.Multer.File, folder: string) {
   if (!file) throw new BadRequestException("Thiếu file ảnh");
-  if (!String(file.mimetype || "").startsWith("image/")) {
-    throw new BadRequestException("Chỉ chấp nhận file ảnh");
-  }
-
+  if (!String(file.mimetype || "").startsWith("image/")) throw new BadRequestException("Chỉ chấp nhận file ảnh");
   const result: any = await new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
       { folder, resource_type: "image" },
-      (error, uploaded) => {
-        if (uploaded) resolve(uploaded);
-        else reject(error);
-      },
+      (error, uploaded) => uploaded ? resolve(uploaded) : reject(error),
     );
     Readable.from(file.buffer).pipe(stream);
   });
-
   return {
     success: true,
     filename: file.originalname,
@@ -51,6 +45,63 @@ async function uploadSampleFabricImage(file: Express.Multer.File, folder: string
 export class SampleFabricController {
   constructor(private readonly service: SampleFabricService) {}
 
+  @Get("fabric-suppliers")
+  @RequirePermissions("fabric_library.view")
+  listFabricSuppliers() {
+    return this.service.listFabricSuppliers();
+  }
+
+  @Post("fabric-suppliers")
+  @RequirePermissions("fabric_library.create")
+  createFabricSupplier(@Body() body: any) {
+    return this.service.createFabricSupplier(body);
+  }
+
+  // Thư viện / bảng vải
+  @Get("library/meta")
+  @RequirePermissions("fabric_library.view")
+  fabricLibraryMeta() {
+    return this.service.fabricLibraryMeta();
+  }
+
+  @Get("library")
+  @RequirePermissions("fabric_library.view")
+  listFabricBoards(@Query() query: any) {
+    return this.service.listFabricBoards(query);
+  }
+
+  @Get("library/:id")
+  @RequirePermissions("fabric_library.view")
+  getFabricBoard(@Param("id") id: string) {
+    return this.service.getFabricBoard(id);
+  }
+
+  @Post("library")
+  @RequirePermissions("fabric_library.create")
+  createFabricBoard(@Body() body: any, @Req() req: any) {
+    return this.service.createFabricBoard(body, req.user);
+  }
+
+  @Patch("library/:id")
+  @RequirePermissions("fabric_library.edit")
+  updateFabricBoard(@Param("id") id: string, @Body() body: any) {
+    return this.service.updateFabricBoard(id, body);
+  }
+
+  @Delete("library/:id")
+  @RequirePermissions("fabric_library.delete")
+  deleteFabricBoard(@Param("id") id: string) {
+    return this.service.deleteFabricBoard(id);
+  }
+
+  @Post("library/upload")
+  @RequirePermissions("fabric_library.upload_images")
+  @UseInterceptors(FileInterceptor("file", { limits: { fileSize: 10 * 1024 * 1024 } }))
+  uploadFabricBoardImage(@UploadedFile() file: Express.Multer.File) {
+    return uploadImage(file, "the1970/sample-fabric/library");
+  }
+
+  // Mẫu triển khai
   @Get("samples/meta")
   @RequirePermissions("design_sample.view")
   sampleMeta() {
@@ -61,18 +112,6 @@ export class SampleFabricController {
   @RequirePermissions("design_sample.view")
   checkSampleCode(@Query("code") code?: string, @Query("excludeId") excludeId?: string) {
     return this.service.checkSampleCode(code, excludeId);
-  }
-
-  @Get("fabric-suppliers")
-  @RequirePermissions("design_sample.view")
-  listFabricSuppliers() {
-    return this.service.listFabricSuppliers();
-  }
-
-  @Post("fabric-suppliers")
-  @RequirePermissions("design_sample.create")
-  createFabricSupplier(@Body() body: any) {
-    return this.service.createFabricSupplier(body);
   }
 
   @Get("samples")
@@ -99,17 +138,55 @@ export class SampleFabricController {
     return this.service.deleteSample(id);
   }
 
+  @Post("samples/:id/images")
+  @RequirePermissions("design_sample.upload_images")
+  addSampleImage(@Param("id") id: string, @Body() body: any) {
+    return this.service.addSampleImage(id, body);
+  }
+
   @Post("samples/upload")
   @RequirePermissions("design_sample.upload_images")
   @UseInterceptors(FileInterceptor("file", { limits: { fileSize: 10 * 1024 * 1024 } }))
   uploadSampleImage(@UploadedFile() file: Express.Multer.File) {
-    return uploadSampleFabricImage(file, "the1970/sample-fabric/samples");
+    return uploadImage(file, "the1970/sample-fabric/samples");
+  }
+
+  // Gửi công ty / xưởng làm mẫu
+  @Get("sample-dispatches")
+  @RequirePermissions("sample_dispatch.view")
+  listSampleDispatches(@Query() query: any) {
+    return this.service.listSampleDispatches(query);
+  }
+
+  @Post("sample-dispatches")
+  @RequirePermissions("sample_dispatch.create")
+  createSampleDispatch(@Body() body: any, @Req() req: any) {
+    return this.service.createSampleDispatch(body, req.user);
+  }
+
+  @Patch("sample-dispatches/:id")
+  @RequirePermissions("sample_dispatch.edit")
+  updateSampleDispatch(@Param("id") id: string, @Body() body: any) {
+    return this.service.updateSampleDispatch(id, body);
+  }
+
+  @Delete("sample-dispatches/:id")
+  @RequirePermissions("sample_dispatch.delete")
+  deleteSampleDispatch(@Param("id") id: string) {
+    return this.service.deleteSampleDispatch(id);
+  }
+
+  // Vải về / kiểm nhận
+  @Get("fabric-receipts/next-code")
+  @RequirePermissions("fabric_receipt.view")
+  nextFabricReceiptCode(@Query("receivedAt") receivedAt?: string) {
+    return this.service.previewFabricReceiptCode(receivedAt);
   }
 
   @Get("fabric-receipts/meta")
   @RequirePermissions("fabric_receipt.view")
-  fabricMeta() {
-    return this.service.fabricMeta();
+  fabricMeta(@Req() req: any) {
+    return this.service.fabricMeta(req.user);
   }
 
   @Get("fabric-receipts")
@@ -126,14 +203,14 @@ export class SampleFabricController {
 
   @Patch("fabric-receipts/:id")
   @RequirePermissions("fabric_receipt.edit")
-  updateFabricReceipt(@Param("id") id: string, @Body() body: any) {
-    return this.service.updateFabricReceipt(id, body);
+  updateFabricReceipt(@Param("id") id: string, @Body() body: any, @Req() req: any) {
+    return this.service.updateFabricReceipt(id, body, req.user);
   }
 
   @Patch("fabric-receipts/:id/cost")
   @RequirePermissions("fabric_receipt.cost.edit")
-  setCost(@Param("id") id: string, @Body() body: any) {
-    return this.service.setFabricReceiptCost(id, body);
+  setCost(@Param("id") id: string, @Body() body: any, @Req() req: any) {
+    return this.service.setFabricReceiptCost(id, body, req.user);
   }
 
   @Post("fabric-receipts/:id/measurements")
@@ -151,8 +228,8 @@ export class SampleFabricController {
   @Post("fabric-receipts/upload")
   @RequirePermissions("fabric_receipt.upload_images")
   @UseInterceptors(FileInterceptor("file", { limits: { fileSize: 10 * 1024 * 1024 } }))
-  uploadFabricImage(@UploadedFile() file: Express.Multer.File) {
-    return uploadSampleFabricImage(file, "the1970/sample-fabric/fabric-receipts");
+  uploadFabricReceiptImage(@UploadedFile() file: Express.Multer.File) {
+    return uploadImage(file, "the1970/sample-fabric/fabric-receipts");
   }
 
   @Post("fabric-receipts/:id/complete")

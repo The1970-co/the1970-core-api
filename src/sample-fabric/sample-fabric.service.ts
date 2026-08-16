@@ -43,7 +43,7 @@ export class SampleFabricService {
 
   private n(value: any) {
     if (value === null || value === undefined || value === "") return null;
-    const parsed = Number(String(value).replace(",", "."));
+    const parsed = Number(String(value).trim().replace(",", ".").replace(/[^0-9.-]/g, ""));
     return Number.isFinite(parsed) ? parsed : null;
   }
 
@@ -75,21 +75,68 @@ export class SampleFabricService {
     return `${base}-${String(rows + 1).padStart(3, "0")}`;
   }
 
-  private async nextFabricSupplierCode() {
+  private supplierInitial(name: any) {
+    const raw = String(name || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/Đ/g, "D")
+      .replace(/đ/g, "d")
+      .toUpperCase();
+    return raw.match(/[A-Z0-9]/)?.[0] || "X";
+  }
+
+  private async nextFabricSupplierCode(name: any) {
+    const initial = this.supplierInitial(name);
     for (let index = 1; index < 100000; index += 1) {
-      const code = `NCCV${String(index).padStart(4, "0")}`;
+      const code = `${String(index).padStart(3, "0")}-${initial}`;
       const exists = await this.prisma.fabricSupplier.findUnique({ where: { code }, select: { id: true } });
       if (!exists) return code;
     }
     throw new BadRequestException("Không thể sinh mã nhà cung cấp vải.");
   }
 
-  async listFabricSuppliers() {
-    return this.prisma.fabricSupplier.findMany({
+  private async normalizeLegacyFabricSupplierCodes() {
+    const rows = await this.prisma.fabricSupplier.findMany({
+      where: { isActive: true },
+      select: { id: true, code: true, name: true },
+      orderBy: { name: "asc" },
+    });
+    for (const row of rows) {
+      if (/^\d{3}-[A-Z0-9]$/.test(String(row.code || ""))) continue;
+      const code = await this.nextFabricSupplierCode(row.name);
+      await this.prisma.fabricSupplier.update({ where: { id: row.id }, data: { code } });
+    }
+  }
+
+  private isAdminUser(user?: any) {
+    const role = String(user?.role || "").trim().toUpperCase();
+    return role === "OWNER" || role === "ADMIN";
+  }
+
+  private supplierForUser(supplier: any, user?: any) {
+    if (!supplier) return supplier;
+    if (user === undefined || this.isAdminUser(user)) return supplier;
+    return { id: supplier.id, code: supplier.code, name: null, phone: null, email: null, address: null, note: null };
+  }
+
+  private receiptForUser(row: any, user?: any) {
+    if (!row) return row;
+    const admin = this.isAdminUser(user);
+    return {
+      ...row,
+      supplier: this.supplierForUser(row.supplier, user),
+      ...(admin ? {} : { unitPrice: null, priceUnit: null }),
+    };
+  }
+
+  async listFabricSuppliers(user?: any) {
+    await this.normalizeLegacyFabricSupplierCodes();
+    const rows = await this.prisma.fabricSupplier.findMany({
       where: { isActive: true },
       select: { id: true, code: true, name: true, phone: true, email: true, address: true, note: true },
       orderBy: { name: "asc" },
     });
+    return rows.map((row) => this.supplierForUser(row, user));
   }
 
   async createFabricSupplier(body: any) {
@@ -99,8 +146,17 @@ export class SampleFabricService {
       where: { name: { equals: name, mode: "insensitive" }, isActive: true },
       select: { id: true, code: true, name: true, phone: true, email: true, address: true, note: true },
     });
-    if (sameName) return sameName;
-    const code = this.normalizeSampleCode(body?.code) || await this.nextFabricSupplierCode();
+    if (sameName) {
+      if (!/^\d{3}-[A-Z0-9]$/.test(String(sameName.code || ""))) {
+        const code = await this.nextFabricSupplierCode(name);
+        return this.prisma.fabricSupplier.update({
+          where: { id: sameName.id }, data: { code },
+          select: { id: true, code: true, name: true, phone: true, email: true, address: true, note: true },
+        });
+      }
+      return sameName;
+    }
+    const code = this.normalizeSampleCode(body?.code) || await this.nextFabricSupplierCode(name);
     const codeExists = await this.prisma.fabricSupplier.findUnique({ where: { code }, select: { id: true } });
     if (codeExists) throw new BadRequestException(`Mã nhà cung cấp vải ${code} đã tồn tại.`);
     return this.prisma.fabricSupplier.create({
@@ -113,6 +169,37 @@ export class SampleFabricService {
       },
       select: { id: true, code: true, name: true, phone: true, email: true, address: true, note: true },
     });
+  }
+
+  private receiptDateSuffix(value?: any) {
+    const raw = String(value || "").trim();
+    const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (match) return `${match[3]}${match[2]}${match[1]}`;
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Ho_Chi_Minh", day: "2-digit", month: "2-digit", year: "numeric",
+    }).formatToParts(new Date());
+    const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return `${map.day}${map.month}${map.year}`;
+  }
+
+  private async nextFabricReceiptCode(receivedAt?: any) {
+    const suffix = this.receiptDateSuffix(receivedAt);
+    const rows = await this.prisma.fabricReceipt.findMany({
+      where: { receiptCode: { endsWith: `-${suffix}` } },
+      select: { receiptCode: true },
+    });
+    const used = new Set(rows.map((row) => {
+      const match = String(row.receiptCode || "").match(/^QC-(\d+)-\d{8}$/);
+      return match ? Number(match[1]) : 0;
+    }).filter(Boolean));
+    for (let index = 1; index < 100000; index += 1) {
+      if (!used.has(index)) return `QC-${String(index).padStart(3, "0")}-${suffix}`;
+    }
+    throw new BadRequestException("Không thể sinh mã phiếu vải về.");
+  }
+
+  async previewFabricReceiptCode(receivedAt?: any) {
+    return { code: await this.nextFabricReceiptCode(receivedAt) };
   }
 
   private async productGroupsAndCompositions() {
@@ -691,14 +778,15 @@ export class SampleFabricService {
   // -------------------------
   // FABRIC RECEIPTS
   // -------------------------
-  async fabricMeta() {
+  async fabricMeta(user?: any) {
     const [suppliers, branches, samples, boards] = await Promise.all([
-      this.listFabricSuppliers(),
+      this.listFabricSuppliers(user),
       this.prisma.branch.findMany({ where: { isActive: true }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
       this.prisma.designSample.findMany({ select: { id: true, code: true, name: true, year: true, fabricBoardId: true, fabricColorId: true }, orderBy: [{ year: "desc" }, { updatedAt: "desc" }] }),
       this.prisma.fabricBoard.findMany({ where: { isActive: true }, include: { supplier: true, colors: true }, orderBy: { updatedAt: "desc" } }),
     ]);
-    return { suppliers, branches, samples, boards };
+    const safeBoards = boards.map((board: any) => ({ ...board, supplier: this.supplierForUser(board.supplier, user) }));
+    return { suppliers, branches, samples, boards: safeBoards };
   }
 
   async listFabricReceipts(query: { q?: string; status?: string; branchId?: string; supplierId?: string } | undefined, user?: any) {
@@ -731,18 +819,17 @@ export class SampleFabricService {
       },
       orderBy: { updatedAt: "desc" },
     });
-    const canViewCost = this.userHas(user, "fabric_receipt.cost.view") || this.userHas(user, "fabric_receipt.cost.edit");
-    return canViewCost ? rows : rows.map((row: any) => ({ ...row, unitPrice: null }));
+    return rows.map((row: any) => this.receiptForUser(row, user));
   }
 
   async createFabricReceipt(body: any, user?: Actor) {
     const actor = this.actor(user);
-    const receiptCode = String(body?.receiptCode || "").trim() || await this.nextCode("NV", "receipt");
+    const receiptCode = String(body?.receiptCode || "").trim() || await this.nextFabricReceiptCode(body?.receivedAt);
     const rolls = Array.isArray(body?.rolls) ? body.rolls : [];
     const status = (body?.status || "DRAFT") as FabricReceiptStatus;
     const board = body?.fabricBoardId ? await this.prisma.fabricBoard.findUnique({ where: { id: body.fabricBoardId } }) : null;
     const color = body?.fabricColorId ? await this.prisma.fabricBoardColor.findUnique({ where: { id: body.fabricColorId } }) : null;
-    return this.prisma.fabricReceipt.create({
+    const created = await this.prisma.fabricReceipt.create({
       data: {
         receiptCode,
         designSampleId: body?.designSampleId || null,
@@ -779,13 +866,14 @@ export class SampleFabricService {
       },
       include: { supplier: true, branch: true, designSample: true, fabricBoard: true, fabricColor: true, rolls: true, measurements: true, images: true },
     });
+    return this.receiptForUser(created, user);
   }
 
-  async updateFabricReceipt(id: string, body: any) {
+  async updateFabricReceipt(id: string, body: any, user?: any) {
     const found = await this.prisma.fabricReceipt.findUnique({ where: { id } });
     if (!found) throw new NotFoundException("Không tìm thấy phiếu vải về.");
     if (found.status === "COMPLETED") throw new BadRequestException("Phiếu đã hoàn tất.");
-    return this.prisma.$transaction(async (tx) => {
+    const updated = await this.prisma.$transaction(async (tx) => {
       if (Array.isArray(body?.rolls)) {
         await tx.fabricReceiptRoll.deleteMany({ where: { fabricReceiptId: id } });
         if (body.rolls.length) await tx.fabricReceiptRoll.createMany({ data: body.rolls.map((x: any) => ({
@@ -824,9 +912,11 @@ export class SampleFabricService {
         include: { supplier: true, branch: true, designSample: true, fabricBoard: true, fabricColor: true, rolls: true, measurements: true, images: true },
       });
     });
+    return this.receiptForUser(updated, user);
   }
 
-  async setFabricReceiptCost(id: string, body: any) {
+  async setFabricReceiptCost(id: string, body: any, user?: any) {
+    if (!this.isAdminUser(user)) throw new BadRequestException("Chỉ Admin/Owner được xem hoặc sửa đơn giá vải.");
     const found = await this.prisma.fabricReceipt.findUnique({ where: { id }, select: { id: true } });
     if (!found) throw new NotFoundException("Không tìm thấy phiếu vải về.");
     return this.prisma.fabricReceipt.update({
