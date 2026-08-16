@@ -57,6 +57,18 @@ export class SampleFabricController {
     return this.service.createFabricSupplier(body);
   }
 
+  @Patch("fabric-suppliers/:id")
+  @RequirePermissions("fabric_library.edit")
+  updateFabricSupplier(@Param("id") id: string, @Body() body: any) {
+    return this.service.updateFabricSupplier(id, body);
+  }
+
+  @Delete("fabric-suppliers/:id")
+  @RequirePermissions("fabric_library.delete")
+  deactivateFabricSupplier(@Param("id") id: string) {
+    return this.service.deactivateFabricSupplier(id);
+  }
+
   // Thư viện / bảng vải
   @Get("library/meta")
   @RequirePermissions("fabric_library.view")

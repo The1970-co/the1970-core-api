@@ -171,6 +171,58 @@ export class SampleFabricService {
     });
   }
 
+  async updateFabricSupplier(id: string, body: any) {
+    const existing = await this.prisma.fabricSupplier.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException("Không tìm thấy nhà cung cấp vải.");
+
+    const name = body?.name !== undefined ? this.titleCase(body.name) : existing.name;
+    if (!name) throw new BadRequestException("Thiếu tên nhà cung cấp vải.");
+
+    let code = body?.code !== undefined ? this.normalizeSampleCode(body.code) : existing.code;
+    if (!code) code = await this.nextFabricSupplierCode(name);
+
+    const duplicateCode = await this.prisma.fabricSupplier.findFirst({
+      where: { code, NOT: { id } },
+      select: { id: true },
+    });
+    if (duplicateCode) throw new BadRequestException(`Mã nhà cung cấp vải ${code} đã tồn tại.`);
+
+    const duplicateName = await this.prisma.fabricSupplier.findFirst({
+      where: { name: { equals: name, mode: "insensitive" }, isActive: true, NOT: { id } },
+      select: { id: true },
+    });
+    if (duplicateName) throw new BadRequestException(`Nhà cung cấp vải ${name} đã tồn tại.`);
+
+    return this.prisma.fabricSupplier.update({
+      where: { id },
+      data: {
+        name,
+        code,
+        ...(body?.phone !== undefined ? { phone: String(body.phone || "").trim() || null } : {}),
+        ...(body?.email !== undefined ? { email: String(body.email || "").trim() || null } : {}),
+        ...(body?.address !== undefined ? { address: String(body.address || "").trim() || null } : {}),
+        ...(body?.note !== undefined ? { note: String(body.note || "").trim() || null } : {}),
+      },
+      select: { id: true, code: true, name: true, phone: true, email: true, address: true, note: true },
+    });
+  }
+
+  async deactivateFabricSupplier(id: string) {
+    const existing = await this.prisma.fabricSupplier.findUnique({
+      where: { id },
+      select: { id: true, code: true, name: true, isActive: true },
+    });
+    if (!existing) throw new NotFoundException("Không tìm thấy nhà cung cấp vải.");
+    if (!existing.isActive) return { success: true, id };
+
+    await this.prisma.fabricSupplier.update({
+      where: { id },
+      data: { isActive: false },
+    });
+    return { success: true, id };
+  }
+
+
   private receiptDateSuffix(value?: any) {
     const raw = String(value || "").trim();
     const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
