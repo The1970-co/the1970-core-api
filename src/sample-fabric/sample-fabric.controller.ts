@@ -138,6 +138,13 @@ export class SampleFabricController {
     return this.service.createSample(body, req.user);
   }
 
+  @Post("samples/quick")
+  @RequirePermissions("design_sample.create")
+  createQuickSample(@Body() body: any, @Req() req: any) {
+    return this.service.createQuickSample(body, req.user);
+  }
+
+
   @Patch("samples/:id")
   @RequirePermissions("design_sample.edit")
   updateSample(@Param("id") id: string, @Body() body: any, @Req() req: any) {
@@ -223,6 +230,12 @@ export class SampleFabricController {
   @RequirePermissions("fabric_receipt.cost.edit")
   setCost(@Param("id") id: string, @Body() body: any, @Req() req: any) {
     return this.service.setFabricReceiptCost(id, body, req.user);
+  }
+
+  @Patch("fabric-receipts/:id/rolls/:rollId")
+  @RequirePermissions("fabric_receipt.edit")
+  updateFabricReceiptRoll(@Param("id") id: string, @Param("rollId") rollId: string, @Body() body: any) {
+    return this.service.updateFabricReceiptRoll(id, rollId, body);
   }
 
   @Post("fabric-receipts/:id/measurements")

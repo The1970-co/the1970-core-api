@@ -603,6 +603,25 @@ export class SampleFabricService {
     });
   }
 
+  async createQuickSample(body: any, user?: Actor) {
+    const sampleImageUrl = String(body?.sampleImageUrl || "").trim();
+    const fabricReferenceImageUrl = String(body?.fabricReferenceImageUrl || "").trim();
+    return this.createSample({
+      name: body?.name,
+      code: body?.code,
+      year: body?.year || new Date().getFullYear(),
+      season: body?.season || null,
+      category: body?.category || null,
+      status: body?.status || "IDEA",
+      note: body?.note || null,
+      coverImageUrl: sampleImageUrl || fabricReferenceImageUrl || null,
+      images: [
+        ...(sampleImageUrl ? [{ type: "SAMPLE", url: sampleImageUrl, caption: "Ảnh mẫu cần làm" }] : []),
+        ...(fabricReferenceImageUrl ? [{ type: "REFERENCE", url: fabricReferenceImageUrl, caption: "Ảnh bảng vải chụp nhanh" }] : []),
+      ],
+    }, user);
+  }
+
   async updateSample(id: string, body: any, user?: Actor) {
     const current = await this.prisma.designSample.findUnique({ where: { id } });
     if (!current) throw new NotFoundException("Không tìm thấy mẫu.");
@@ -908,6 +927,8 @@ export class SampleFabricService {
         createdByName: actor.name,
         rolls: { create: rolls.map((x: any) => ({
           rollCode: x.rollCode || null,
+          colorName: String(x.colorName || body?.colorName || color?.name || "").trim() || null,
+          colorCode: String(x.colorCode || body?.colorCode || color?.code || "").trim() || null,
           supplierDeclaredM: this.n(x.supplierDeclaredM),
           supplierDeclaredKg: this.n(x.supplierDeclaredKg),
           actualM: this.n(x.actualM),
@@ -926,17 +947,19 @@ export class SampleFabricService {
     if (!found) throw new NotFoundException("Không tìm thấy phiếu vải về.");
     if (found.status === "COMPLETED") throw new BadRequestException("Phiếu đã hoàn tất.");
     const updated = await this.prisma.$transaction(async (tx) => {
+      const board = body?.fabricBoardId ? await tx.fabricBoard.findUnique({ where: { id: body.fabricBoardId } }) : null;
+      const color = body?.fabricColorId ? await tx.fabricBoardColor.findUnique({ where: { id: body.fabricColorId } }) : null;
       if (Array.isArray(body?.rolls)) {
         await tx.fabricReceiptRoll.deleteMany({ where: { fabricReceiptId: id } });
         if (body.rolls.length) await tx.fabricReceiptRoll.createMany({ data: body.rolls.map((x: any) => ({
           fabricReceiptId: id, rollCode: x.rollCode || null,
+          colorName: String(x.colorName || body?.colorName || color?.name || "").trim() || null,
+          colorCode: String(x.colorCode || body?.colorCode || color?.code || "").trim() || null,
           supplierDeclaredM: this.n(x.supplierDeclaredM), supplierDeclaredKg: this.n(x.supplierDeclaredKg),
           actualM: this.n(x.actualM), actualKg: this.n(x.actualKg),
           defectNote: x.defectNote || null, passed: x.passed !== false,
         })) });
       }
-      const board = body?.fabricBoardId ? await tx.fabricBoard.findUnique({ where: { id: body.fabricBoardId } }) : null;
-      const color = body?.fabricColorId ? await tx.fabricBoardColor.findUnique({ where: { id: body.fabricColorId } }) : null;
       return tx.fabricReceipt.update({
         where: { id },
         data: {
@@ -973,6 +996,25 @@ export class SampleFabricService {
     if (!found) throw new NotFoundException("Không tìm thấy phiếu vải về.");
     return this.prisma.fabricReceipt.update({
       where: { id }, data: { unitPrice: this.n(body?.unitPrice), priceUnit: body?.priceUnit || "METER" },
+    });
+  }
+
+  async updateFabricReceiptRoll(receiptId: string, rollId: string, body: any) {
+    const roll = await this.prisma.fabricReceiptRoll.findFirst({ where: { id: rollId, fabricReceiptId: receiptId } });
+    if (!roll) throw new NotFoundException("Không tìm thấy cây vải.");
+    return this.prisma.fabricReceiptRoll.update({
+      where: { id: rollId },
+      data: {
+        ...(body?.rollCode !== undefined ? { rollCode: String(body.rollCode || "").trim() || null } : {}),
+        ...(body?.colorName !== undefined ? { colorName: String(body.colorName || "").trim() || null } : {}),
+        ...(body?.colorCode !== undefined ? { colorCode: String(body.colorCode || "").trim() || null } : {}),
+        ...(body?.supplierDeclaredM !== undefined ? { supplierDeclaredM: this.n(body.supplierDeclaredM) } : {}),
+        ...(body?.supplierDeclaredKg !== undefined ? { supplierDeclaredKg: this.n(body.supplierDeclaredKg) } : {}),
+        ...(body?.actualM !== undefined ? { actualM: this.n(body.actualM) } : {}),
+        ...(body?.actualKg !== undefined ? { actualKg: this.n(body.actualKg) } : {}),
+        ...(body?.defectNote !== undefined ? { defectNote: body.defectNote || null } : {}),
+        ...(body?.passed !== undefined ? { passed: body.passed !== false } : {}),
+      },
     });
   }
 
