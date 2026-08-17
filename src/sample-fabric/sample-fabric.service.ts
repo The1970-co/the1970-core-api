@@ -57,6 +57,12 @@ export class SampleFabricService {
     return String(value || "").trim().toUpperCase().replace(/\s+/g, "");
   }
 
+  private normalizeColorCode(value: any) {
+    const raw = String(value || "").trim();
+    if (!raw) return null;
+    return `#${raw.replace(/^#+/, "")}`;
+  }
+
   private parseTokens(value: any) {
     if (Array.isArray(value)) return value.map((x) => this.titleCase(x)).filter(Boolean);
     return String(value || "").split(",").map((x) => this.titleCase(x)).filter(Boolean);
@@ -237,17 +243,14 @@ export class SampleFabricService {
   private async nextFabricReceiptCode(receivedAt?: any) {
     const suffix = this.receiptDateSuffix(receivedAt);
     const rows = await this.prisma.fabricReceipt.findMany({
-      where: { receiptCode: { endsWith: `-${suffix}` } },
+      where: { receiptCode: { startsWith: "NV-" } },
       select: { receiptCode: true },
     });
-    const used = new Set(rows.map((row) => {
-      const match = String(row.receiptCode || "").match(/^QC-(\d+)-\d{8}$/);
-      return match ? Number(match[1]) : 0;
-    }).filter(Boolean));
-    for (let index = 1; index < 100000; index += 1) {
-      if (!used.has(index)) return `QC-${String(index).padStart(3, "0")}-${suffix}`;
-    }
-    throw new BadRequestException("Không thể sinh mã phiếu vải về.");
+    const max = rows.reduce((current, row) => {
+      const match = String(row.receiptCode || "").match(/^NV-(\d+)-\d{8}$/);
+      return Math.max(current, Number(match?.[1] || 0));
+    }, 0);
+    return `NV-${String(max + 1).padStart(3, "0")}-${suffix}`;
   }
 
   async previewFabricReceiptCode(receivedAt?: any) {
@@ -381,7 +384,7 @@ export class SampleFabricService {
         createdByName: actor.name,
         colors: { create: colors.filter((x: any) => x?.name).map((x: any) => ({
           name: this.titleCase(x.name),
-          code: this.normalizeSampleCode(x.code) || null,
+          code: this.normalizeColorCode(x.code),
           imageUrl: x.imageUrl || null,
           note: x.note || null,
         })) },
@@ -406,7 +409,7 @@ export class SampleFabricService {
             data: body.colors.filter((x: any) => x?.name).map((x: any) => ({
               fabricBoardId: id,
               name: this.titleCase(x.name),
-              code: this.normalizeSampleCode(x.code) || null,
+              code: this.normalizeColorCode(x.code),
               imageUrl: x.imageUrl || null,
               note: x.note || null,
             })),
@@ -485,7 +488,7 @@ export class SampleFabricService {
   }
 
   async sampleMeta() {
-    const [staff, boards, vocab] = await Promise.all([
+    const [staff, boards, factories, vocab] = await Promise.all([
       this.prisma.staffUser.findMany({
         where: { isActive: true },
         select: { id: true, code: true, name: true, branchId: true },
@@ -496,9 +499,14 @@ export class SampleFabricService {
         include: { supplier: { select: { id: true, code: true, name: true } }, colors: { orderBy: { createdAt: "asc" } } },
         orderBy: { updatedAt: "desc" },
       }),
+      this.prisma.productionPartner.findMany({
+        where: { isActive: true },
+        select: { id: true, code: true, name: true, contactName: true, phone: true },
+        orderBy: { name: "asc" },
+      }),
       this.productGroupsAndCompositions(),
     ]);
-    return { staff, boards, seasons: SAMPLE_SEASONS, ...vocab };
+    return { staff, boards, factories, seasons: SAMPLE_SEASONS, ...vocab };
   }
 
   private async sampleBoardSnapshot(fabricBoardId?: string | null) {
@@ -578,6 +586,10 @@ export class SampleFabricService {
         category: this.titleCase(body?.category) || null,
         fabricBoardId: body?.fabricBoardId || null,
         fabricColorId: body?.fabricColorId || null,
+        fabricColorName: this.titleCase(body?.fabricColorName) || null,
+        fabricColorCode: this.normalizeColorCode(body?.fabricColorCode),
+        sampleFactoryId: body?.sampleFactoryId || null,
+        sampleFactoryName: body?.sampleFactoryName || null,
         supplierId: body?.supplierId || board?.supplierId || null,
         fabricBoardCode: this.normalizeSampleCode(body?.fabricBoardCode) || board?.boardCode || null,
         fabricCode: this.normalizeSampleCode(body?.fabricCode) || board?.fabricCode || null,
@@ -657,6 +669,10 @@ export class SampleFabricService {
           ...(body?.category !== undefined ? { category: this.titleCase(body.category) || null } : {}),
           ...(body?.fabricBoardId !== undefined ? { fabricBoardId: body.fabricBoardId || null } : {}),
           ...(body?.fabricColorId !== undefined ? { fabricColorId: body.fabricColorId || null } : {}),
+          ...(body?.fabricColorName !== undefined ? { fabricColorName: this.titleCase(body.fabricColorName) || null } : {}),
+          ...(body?.fabricColorCode !== undefined ? { fabricColorCode: this.normalizeColorCode(body.fabricColorCode) } : {}),
+          ...(body?.sampleFactoryId !== undefined ? { sampleFactoryId: body.sampleFactoryId || null } : {}),
+          ...(body?.sampleFactoryName !== undefined ? { sampleFactoryName: body.sampleFactoryName || null } : {}),
           ...(body?.supplierId !== undefined || body?.fabricBoardId !== undefined ? { supplierId: body?.supplierId || board?.supplierId || null } : {}),
           ...(body?.fabricBoardCode !== undefined || body?.fabricBoardId !== undefined ? { fabricBoardCode: this.normalizeSampleCode(body?.fabricBoardCode) || board?.boardCode || null } : {}),
           ...(body?.fabricCode !== undefined || body?.fabricBoardId !== undefined ? { fabricCode: this.normalizeSampleCode(body?.fabricCode) || board?.fabricCode || null } : {}),
@@ -723,6 +739,8 @@ export class SampleFabricService {
           { fabricBoard: { boardCode: { contains: q, mode: "insensitive" } } },
           { fabricBoard: { fabricCode: { contains: q, mode: "insensitive" } } },
           { fabricColor: { code: { contains: q, mode: "insensitive" } } },
+          { colorCode: { contains: q, mode: "insensitive" } },
+          { colorName: { contains: q, mode: "insensitive" } },
         ] } : {}),
       },
       include: {
@@ -758,6 +776,10 @@ export class SampleFabricService {
           category: this.titleCase(body?.category) || null,
           fabricBoardId,
           fabricColorId: body?.fabricColorId || null,
+          fabricColorName: this.titleCase(body?.colorName) || null,
+          fabricColorCode: this.normalizeColorCode(body?.colorCode),
+          sampleFactoryId: body?.sampleFactoryId || null,
+          sampleFactoryName: recipientName,
           supplierId: board?.supplierId || null,
           fabricBoardCode: board?.boardCode || null,
           fabricCode: board?.fabricCode || null,
@@ -783,6 +805,8 @@ export class SampleFabricService {
         designSampleId,
         fabricBoardId,
         fabricColorId: body?.fabricColorId || designSample.fabricColorId || null,
+        colorName: this.titleCase(body?.colorName || designSample.fabricColorName) || null,
+        colorCode: this.normalizeColorCode(body?.colorCode || designSample.fabricColorCode),
         recipientName,
         recipientType: this.titleCase(body?.recipientType) || null,
         recipientContact: body?.recipientContact || null,
@@ -800,6 +824,10 @@ export class SampleFabricService {
       where: { id: designSampleId },
       data: {
         status: "SAMPLING",
+        sampleFactoryId: body?.sampleFactoryId || designSample.sampleFactoryId || null,
+        sampleFactoryName: recipientName,
+        fabricColorName: this.titleCase(body?.colorName || designSample.fabricColorName) || null,
+        fabricColorCode: this.normalizeColorCode(body?.colorCode || designSample.fabricColorCode),
         nextAction: `Đang làm mẫu tại ${recipientName}`,
         dueDate: body?.dueDate ? new Date(body.dueDate) : designSample.dueDate,
       },
@@ -817,6 +845,8 @@ export class SampleFabricService {
         ...(body?.recipientName !== undefined ? { recipientName: this.titleCase(body.recipientName) } : {}),
         ...(body?.recipientType !== undefined ? { recipientType: this.titleCase(body.recipientType) || null } : {}),
         ...(body?.recipientContact !== undefined ? { recipientContact: body.recipientContact || null } : {}),
+        ...(body?.colorName !== undefined ? { colorName: this.titleCase(body.colorName) || null } : {}),
+        ...(body?.colorCode !== undefined ? { colorCode: this.normalizeColorCode(body.colorCode) } : {}),
         ...(body?.sentAt !== undefined ? { sentAt: new Date(body.sentAt) } : {}),
         ...(body?.sentById !== undefined ? { sentById: body.sentById || null } : {}),
         ...(body?.sentByName !== undefined ? { sentByName: body.sentByName || null } : {}),
@@ -853,7 +883,7 @@ export class SampleFabricService {
     const [suppliers, branches, samples, boards] = await Promise.all([
       this.listFabricSuppliers(user),
       this.prisma.branch.findMany({ where: { isActive: true }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
-      this.prisma.designSample.findMany({ select: { id: true, code: true, name: true, year: true, fabricBoardId: true, fabricColorId: true }, orderBy: [{ year: "desc" }, { updatedAt: "desc" }] }),
+      this.prisma.designSample.findMany({ select: { id: true, code: true, name: true, year: true, fabricBoardId: true, fabricColorId: true, fabricColorName: true, fabricColorCode: true }, orderBy: [{ year: "desc" }, { updatedAt: "desc" }] }),
       this.prisma.fabricBoard.findMany({ where: { isActive: true }, include: { supplier: true, colors: true }, orderBy: { updatedAt: "desc" } }),
     ]);
     const safeBoards = boards.map((board: any) => ({ ...board, supplier: this.supplierForUser(board.supplier, user) }));
@@ -884,7 +914,7 @@ export class SampleFabricService {
         designSample: { select: { id: true, code: true, name: true, year: true } },
         fabricBoard: { select: { id: true, boardCode: true, fabricCode: true, name: true } },
         fabricColor: { select: { id: true, name: true, code: true } },
-        rolls: { orderBy: { createdAt: "asc" } },
+        rolls: { include: { images: { orderBy: { createdAt: "desc" } } }, orderBy: { createdAt: "asc" } },
         measurements: { orderBy: { createdAt: "desc" } },
         images: { orderBy: { createdAt: "desc" } },
       },
@@ -912,7 +942,7 @@ export class SampleFabricService {
         fabricCode: body?.fabricCode || board?.fabricCode || null,
         fabricName: body?.fabricName || board?.name || null,
         colorName: body?.colorName || color?.name || null,
-        colorCode: body?.colorCode || color?.code || null,
+        colorCode: this.normalizeColorCode(body?.colorCode || color?.code),
         lotCode: body?.lotCode || null,
         supplierDeclaredM: this.n(body?.supplierDeclaredM),
         supplierDeclaredKg: this.n(body?.supplierDeclaredKg),
@@ -928,7 +958,7 @@ export class SampleFabricService {
         rolls: { create: rolls.map((x: any) => ({
           rollCode: x.rollCode || null,
           colorName: String(x.colorName || body?.colorName || color?.name || "").trim() || null,
-          colorCode: String(x.colorCode || body?.colorCode || color?.code || "").trim() || null,
+          colorCode: this.normalizeColorCode(x.colorCode || body?.colorCode || color?.code),
           supplierDeclaredM: this.n(x.supplierDeclaredM),
           supplierDeclaredKg: this.n(x.supplierDeclaredKg),
           actualM: this.n(x.actualM),
@@ -937,7 +967,7 @@ export class SampleFabricService {
           passed: x.passed !== false,
         })) },
       },
-      include: { supplier: true, branch: true, designSample: true, fabricBoard: true, fabricColor: true, rolls: true, measurements: true, images: true },
+      include: { supplier: true, branch: true, designSample: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, measurements: true, images: true },
     });
     return this.receiptForUser(created, user);
   }
@@ -950,15 +980,31 @@ export class SampleFabricService {
       const board = body?.fabricBoardId ? await tx.fabricBoard.findUnique({ where: { id: body.fabricBoardId } }) : null;
       const color = body?.fabricColorId ? await tx.fabricBoardColor.findUnique({ where: { id: body.fabricColorId } }) : null;
       if (Array.isArray(body?.rolls)) {
-        await tx.fabricReceiptRoll.deleteMany({ where: { fabricReceiptId: id } });
-        if (body.rolls.length) await tx.fabricReceiptRoll.createMany({ data: body.rolls.map((x: any) => ({
-          fabricReceiptId: id, rollCode: x.rollCode || null,
-          colorName: String(x.colorName || body?.colorName || color?.name || "").trim() || null,
-          colorCode: String(x.colorCode || body?.colorCode || color?.code || "").trim() || null,
-          supplierDeclaredM: this.n(x.supplierDeclaredM), supplierDeclaredKg: this.n(x.supplierDeclaredKg),
-          actualM: this.n(x.actualM), actualKg: this.n(x.actualKg),
-          defectNote: x.defectNote || null, passed: x.passed !== false,
-        })) });
+        const keepIds: string[] = [];
+        for (const x of body.rolls) {
+          const data = {
+            rollCode: x.rollCode || null,
+            colorName: String(x.colorName || body?.colorName || color?.name || "").trim() || null,
+            colorCode: this.normalizeColorCode(x.colorCode || body?.colorCode || color?.code),
+            supplierDeclaredM: this.n(x.supplierDeclaredM),
+            supplierDeclaredKg: this.n(x.supplierDeclaredKg),
+            actualM: this.n(x.actualM),
+            actualKg: this.n(x.actualKg),
+            defectNote: x.defectNote || null,
+            passed: x.passed !== false,
+          };
+          if (x.id) {
+            const existing = await tx.fabricReceiptRoll.findFirst({ where: { id: x.id, fabricReceiptId: id }, select: { id: true } });
+            if (existing) {
+              await tx.fabricReceiptRoll.update({ where: { id: x.id }, data });
+              keepIds.push(x.id);
+              continue;
+            }
+          }
+          const createdRoll = await tx.fabricReceiptRoll.create({ data: { fabricReceiptId: id, ...data } });
+          keepIds.push(createdRoll.id);
+        }
+        await tx.fabricReceiptRoll.deleteMany({ where: { fabricReceiptId: id, ...(keepIds.length ? { id: { notIn: keepIds } } : {}) } });
       }
       return tx.fabricReceipt.update({
         where: { id },
@@ -972,7 +1018,7 @@ export class SampleFabricService {
           ...(body?.fabricCode !== undefined || board ? { fabricCode: body.fabricCode || board?.fabricCode || null } : {}),
           ...(body?.fabricName !== undefined || board ? { fabricName: body.fabricName || board?.name || null } : {}),
           ...(body?.colorName !== undefined || color ? { colorName: body.colorName || color?.name || null } : {}),
-          ...(body?.colorCode !== undefined || color ? { colorCode: body.colorCode || color?.code || null } : {}),
+          ...(body?.colorCode !== undefined || color ? { colorCode: this.normalizeColorCode(body.colorCode || color?.code) } : {}),
           ...(body?.lotCode !== undefined ? { lotCode: body.lotCode || null } : {}),
           ...(body?.supplierDeclaredM !== undefined ? { supplierDeclaredM: this.n(body.supplierDeclaredM) } : {}),
           ...(body?.supplierDeclaredKg !== undefined ? { supplierDeclaredKg: this.n(body.supplierDeclaredKg) } : {}),
@@ -984,7 +1030,7 @@ export class SampleFabricService {
           ...(body?.receivedAt !== undefined ? { receivedAt: body.receivedAt ? new Date(body.receivedAt) : null } : {}),
           ...(body?.note !== undefined ? { note: body.note || null } : {}),
         },
-        include: { supplier: true, branch: true, designSample: true, fabricBoard: true, fabricColor: true, rolls: true, measurements: true, images: true },
+        include: { supplier: true, branch: true, designSample: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, measurements: true, images: true },
       });
     });
     return this.receiptForUser(updated, user);
@@ -1007,7 +1053,7 @@ export class SampleFabricService {
       data: {
         ...(body?.rollCode !== undefined ? { rollCode: String(body.rollCode || "").trim() || null } : {}),
         ...(body?.colorName !== undefined ? { colorName: String(body.colorName || "").trim() || null } : {}),
-        ...(body?.colorCode !== undefined ? { colorCode: String(body.colorCode || "").trim() || null } : {}),
+        ...(body?.colorCode !== undefined ? { colorCode: this.normalizeColorCode(body.colorCode) } : {}),
         ...(body?.supplierDeclaredM !== undefined ? { supplierDeclaredM: this.n(body.supplierDeclaredM) } : {}),
         ...(body?.supplierDeclaredKg !== undefined ? { supplierDeclaredKg: this.n(body.supplierDeclaredKg) } : {}),
         ...(body?.actualM !== undefined ? { actualM: this.n(body.actualM) } : {}),
