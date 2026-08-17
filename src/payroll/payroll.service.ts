@@ -93,6 +93,12 @@ export class PayrollService {
     return new Date(`${text}T23:59:59.999+07:00`);
   }
 
+  private dayBefore(value: string | Date) {
+    const date = this.startOfDate(value);
+    date.setDate(date.getDate() - 1);
+    return this.endOfDate(date);
+  }
+
   private userName(user?: AnyUser) {
     return user?.name || user?.username || user?.email || user?.code || null;
   }
@@ -423,7 +429,8 @@ export class PayrollService {
     const where: Prisma.PayrollConfigWhereInput = {};
     if (branchId) where.OR = [{ branchId }, { branchId: null }];
     if (query.staffId) where.staffId = String(query.staffId);
-    if (query.isActive !== undefined && query.isActive !== "ALL") where.isActive = String(query.isActive) !== "false";
+    if (query.isActive === undefined) where.isActive = true;
+    else if (query.isActive !== "ALL") where.isActive = String(query.isActive) !== "false";
     if (query.q?.trim()) {
       const q = query.q.trim();
       where.OR = [
@@ -742,9 +749,30 @@ export class PayrollService {
           results.push({ staffId: staff.id, staffName: staff.name, status: "SKIPPED", configId: existing.id });
           continue;
         }
-        const updatedConfig = await this.prisma.payrollConfig.update({ where: { id: existing.id }, data: { ...data, attendanceCode: existing.attendanceCode || undefined } as any });
-        updated += 1;
-        results.push({ staffId: staff.id, staffName: staff.name, status: "UPDATED", configId: updatedConfig.id });
+
+        // Không ghi đè effectiveFrom của cấu hình cũ. Khi đổi lương từ một ngày mới,
+        // đóng phiên bản cũ ở ngày trước đó và tạo phiên bản mới để kỳ lương quá khứ
+        // vẫn dùng được cấu hình lịch sử.
+        const nextEffectiveFrom = this.startOfDate(effectiveFrom);
+        const existingEffectiveFrom = this.startOfDate(existing.effectiveFrom);
+        if (nextEffectiveFrom > existingEffectiveFrom) {
+          await this.prisma.payrollConfig.update({
+            where: { id: existing.id },
+            data: { effectiveTo: this.dayBefore(nextEffectiveFrom), isActive: false } as any,
+          });
+          const createdConfig = await this.prisma.payrollConfig.create({
+            data: { ...data, attendanceCode: existing.attendanceCode || undefined, effectiveFrom: nextEffectiveFrom, effectiveTo: null, isActive: true } as any,
+          });
+          updated += 1;
+          results.push({ staffId: staff.id, staffName: staff.name, status: "VERSIONED", configId: createdConfig.id });
+        } else {
+          const updatedConfig = await this.prisma.payrollConfig.update({
+            where: { id: existing.id },
+            data: { ...data, attendanceCode: existing.attendanceCode || undefined } as any,
+          });
+          updated += 1;
+          results.push({ staffId: staff.id, staffName: staff.name, status: "UPDATED", configId: updatedConfig.id });
+        }
       } else {
         const createdConfig = await this.prisma.payrollConfig.create({ data: data as any });
         created += 1;
@@ -756,13 +784,44 @@ export class PayrollService {
   }
 
   private async activeConfigsForPeriod(period: any) {
-    const where: Prisma.PayrollConfigWhereInput = {
-      isActive: true,
-      effectiveFrom: { lte: period.toDate },
-      OR: [{ effectiveTo: null }, { effectiveTo: { gte: period.fromDate } }],
-    };
-    if (period.branchId) where.AND = [{ OR: [{ branchId: period.branchId }, { branchId: null }] }];
-    return this.prisma.payrollConfig.findMany({ where, orderBy: [{ branchName: "asc" }, { staffName: "asc" }] });
+    const branchWhere: Prisma.PayrollConfigWhereInput = {};
+    if (period.branchId) branchWhere.OR = [{ branchId: period.branchId }, { branchId: null }];
+
+    const allConfigs = await this.prisma.payrollConfig.findMany({
+      where: branchWhere,
+      orderBy: [{ staffId: "asc" }, { effectiveFrom: "asc" }, { updatedAt: "asc" }],
+    });
+
+    const byStaff = new Map<string, any[]>();
+    for (const config of allConfigs as any[]) {
+      const rows = byStaff.get(String(config.staffId)) || [];
+      rows.push(config);
+      byStaff.set(String(config.staffId), rows);
+    }
+
+    const selected: any[] = [];
+    for (const rows of byStaff.values()) {
+      const overlapping = rows.filter((config) => {
+        const from = new Date(config.effectiveFrom);
+        const to = config.effectiveTo ? new Date(config.effectiveTo) : null;
+        return from <= period.toDate && (!to || to >= period.fromDate);
+      });
+
+      if (overlapping.length) {
+        selected.push(overlapping[overlapping.length - 1]);
+        continue;
+      }
+
+      // Fallback cho dữ liệu cũ đã bị overwrite ngày hiệu lực (ví dụ đổi sang 15/08
+      // làm kỳ tháng 7 mất nhân viên). Không có bản lịch sử thì dùng bản sớm nhất sau kỳ.
+      const fallback = rows.find((config) => new Date(config.effectiveFrom) > period.toDate);
+      if (fallback) selected.push(fallback);
+    }
+
+    return selected.sort((a, b) =>
+      String(a.branchName || "").localeCompare(String(b.branchName || ""), "vi") ||
+      String(a.staffName || "").localeCompare(String(b.staffName || ""), "vi"),
+    );
   }
 
   async calculatePeriod(id: string, body: { workingDaysByStaff?: Record<string, number>; force?: boolean } = {}, user?: AnyUser) {
@@ -1221,6 +1280,186 @@ export class PayrollService {
     }).catch(() => null);
 
     if (body.autoCalculate) await this.calculatePeriod(id, { force: true }, user);
+    return this.getPeriod(id, user);
+  }
+
+  async deletePeriod(id: string, user?: AnyUser) {
+    const period = await this.prisma.payrollPeriod.findUnique({
+      where: { id },
+      include: { lines: { select: { id: true } } },
+    });
+    if (!period) throw new NotFoundException("Không tìm thấy kỳ lương.");
+    this.scopedBranchId(user, period.branchId || null);
+
+    if (String(period.status || "DRAFT").toUpperCase() !== "DRAFT") {
+      throw new BadRequestException("Chỉ được xóa kỳ lương đang ở trạng thái Nháp.");
+    }
+
+    const lineIds = period.lines.map((line) => line.id);
+    await this.prisma.$transaction(async (tx) => {
+      if (lineIds.length) {
+        await tx.payrollOrderLink.deleteMany({ where: { payrollLineId: { in: lineIds } } });
+        await tx.payrollAdjustment.deleteMany({ where: { payrollLineId: { in: lineIds } } });
+        await tx.payrollLine.deleteMany({ where: { id: { in: lineIds } } });
+      }
+      await tx.payrollPeriod.delete({ where: { id } });
+    });
+
+    return { ok: true, id };
+  }
+
+  async calculateThirteenthSalary(id: string, body: { force?: boolean } = {}, user?: AnyUser) {
+    const period = await this.prisma.payrollPeriod.findUnique({ where: { id } });
+    if (!period) throw new NotFoundException("Không tìm thấy kỳ lương.");
+    this.scopedBranchId(user, period.branchId || null);
+
+    const status = String(period.status || "DRAFT").toUpperCase();
+    if (["LOCKED", "PAID", "PARTIALLY_PAID"].includes(status) && !body.force) {
+      throw new BadRequestException("Kỳ lương đã khóa hoặc đã trả, không thể tính lại lương tháng 13.");
+    }
+
+    const configs = await this.activeConfigsForPeriod(period);
+    if (!configs.length) throw new BadRequestException("Chưa có cấu hình lương nhân viên phù hợp.");
+
+    const start12Months = new Date(period.fromDate);
+    start12Months.setMonth(start12Months.getMonth() - 12);
+
+    const historyWhere: any = {
+      period: {
+        fromDate: { gte: start12Months, lt: period.fromDate },
+        status: { in: ["CALCULATED", "LOCKED", "PARTIALLY_PAID", "PAID"] },
+        NOT: { note: { contains: "[SALARY_13]" } },
+      },
+    };
+    if (period.branchId) historyWhere.branchId = period.branchId;
+
+    const history = await this.prisma.payrollLine.findMany({
+      where: historyWhere,
+      include: { period: { select: { fromDate: true } } },
+      orderBy: { createdAt: "asc" },
+    });
+
+    const monthlyNetByStaff = new Map<string, Map<string, number>>();
+    for (const line of history as any[]) {
+      const staffId = String(line.staffId);
+      const monthKey = new Date(line.period.fromDate).toISOString().slice(0, 7);
+      const months = monthlyNetByStaff.get(staffId) || new Map<string, number>();
+      months.set(monthKey, (months.get(monthKey) || 0) + this.toNumber(line.netPay));
+      monthlyNetByStaff.set(staffId, months);
+    }
+
+    const staffIds = Array.from(new Set(configs.map((config: any) => String(config.staffId))));
+    const staffRows = await this.prisma.staffUser.findMany({
+      where: { id: { in: staffIds } },
+      select: { id: true, code: true, name: true, branchId: true, branchName: true },
+    });
+    const staffMap = new Map(staffRows.map((staff) => [String(staff.id), staff]));
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.payrollLine.deleteMany({ where: { periodId: id } });
+
+      let totalStaff = 0;
+      let totalNet = 0;
+
+      for (const config of configs as any[]) {
+        const staff = staffMap.get(String(config.staffId));
+        if (!staff) continue;
+
+        const monthly = monthlyNetByStaff.get(String(config.staffId)) || new Map<string, number>();
+        let twelveMonthTotal = 0;
+        const cursor = new Date(period.fromDate);
+        for (let i = 1; i <= 12; i += 1) {
+          const monthDate = new Date(cursor.getFullYear(), cursor.getMonth() - i, 1);
+          const monthKey = `${monthDate.getFullYear()}-${String(monthDate.getMonth() + 1).padStart(2, "0")}`;
+          twelveMonthTotal += monthly.get(monthKey) || 0;
+        }
+        const average = Math.round(twelveMonthTotal / 12);
+
+        const lineBranchId = period.branchId || config.branchId || staff.branchId || null;
+        const lineBranchName = period.branchName || config.branchName || staff.branchName || null;
+
+        await tx.payrollLine.create({
+          data: {
+            periodId: id,
+            staffId: staff.id,
+            staffCode: staff.code,
+            staffName: staff.name,
+            branchId: lineBranchId,
+            branchName: lineBranchName,
+            salaryType: "MONTHLY",
+            baseSalary: this.money(average),
+            dailyRate: this.money(0),
+            workingDays: this.decimal2(0),
+            standardDays: this.decimal2(config.standardWorkingDays || 26),
+            proratedSalary: this.money(average),
+            orderAttributionMode: this.normalizeAttributionMode(config.orderAttributionMode),
+            successOrderCount: 0,
+            successItemQty: 0,
+            revenueAmount: this.money(0),
+            normalHours: this.decimal2(0),
+            overtimeHours: this.decimal2(0),
+            overtimeRate: this.decimal2(0),
+            holidayHours: this.decimal2(0),
+            overtime3Hours: this.decimal2(0),
+            overtime4Hours: this.decimal2(0),
+            holidayRate: this.decimal2(0),
+            convertedWorkingHours: this.decimal2(0),
+            hourlyRate: this.money(0),
+            hourlyAmount: this.money(0),
+            overtimeAmount: this.money(0),
+            overtimeBreakdown: [] as any,
+            paidLeaveDays: this.decimal2(0),
+            paidLeaveHoursPerDay: this.decimal2(0),
+            paidLeaveAmount: this.money(0),
+            mealAllowanceAmount: this.money(0),
+            insuranceDeduction: this.money(0),
+            taggedProductQty: 0,
+            taggedProductRate: this.money(0),
+            taggedProductAmount: this.money(0),
+            ghnCodOrderCount: 0,
+            ghnCodBonusPerOrder: this.money(0),
+            ghnCodBonusAmount: this.money(0),
+            commissionByOrder: this.money(0),
+            commissionByItem: this.money(0),
+            commissionByPercent: this.money(0),
+            commissionTotal: this.money(0),
+            allowance: this.money(0),
+            grossPay: this.money(average),
+            netPay: this.money(average),
+            status: "CALCULATED",
+          } as any,
+        });
+
+        totalStaff += 1;
+        totalNet += average;
+      }
+
+      await tx.payrollPeriod.update({
+        where: { id },
+        data: {
+          status: "CALCULATED",
+          totalStaff,
+          totalOrders: 0,
+          totalItems: 0,
+          totalRevenue: this.money(0),
+          totalHourlyAmount: this.money(0),
+          totalTaggedProductAmount: this.money(0),
+          totalMealAllowance: this.money(0),
+          totalInsuranceDeduction: this.money(0),
+          totalGhnCodBonus: this.money(0),
+          totalAttendanceWarnings: 0,
+          totalLateMinutes: 0,
+          totalEarlyMinutes: 0,
+          totalGross: this.money(totalNet),
+          totalNet: this.money(totalNet),
+          totalPaid: this.money(0),
+          note: period.note?.includes("[SALARY_13]")
+            ? period.note
+            : `[SALARY_13]${period.note ? ` ${period.note}` : ""}`,
+        } as any,
+      });
+    });
+
     return this.getPeriod(id, user);
   }
 

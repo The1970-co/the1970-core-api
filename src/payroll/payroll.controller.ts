@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, Req, Res, UploadedFile, UseGuards, UseInterceptors } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Res, UploadedFile, UseGuards, UseInterceptors } from "@nestjs/common";
 import type { Request, Response } from "express";
 import { FileInterceptor } from "@nestjs/platform-express";
 import { JwtGuard } from "../auth/jwt.guard";
@@ -54,6 +54,12 @@ export class PayrollController {
     return this.payrollService.getPeriod(id, req.user);
   }
 
+  @Delete("periods/:id")
+  @RequirePermissions("payroll.create")
+  deletePeriod(@Param("id") id: string, @Req() req: Request & { user?: any }) {
+    return this.payrollService.deletePeriod(id, req.user);
+  }
+
   @Get("periods/:id/export")
   @RequirePermissions("payroll.export")
   async exportPeriod(@Param("id") id: string, @Req() req: Request & { user?: any }, @Res() res: Response) {
@@ -67,6 +73,12 @@ export class PayrollController {
   @RequirePermissions("payroll.calculate")
   calculate(@Param("id") id: string, @Body() body: any, @Req() req: Request & { user?: any }) {
     return this.payrollService.calculatePeriod(id, body || {}, req.user);
+  }
+
+  @Post("periods/:id/calculate-thirteenth")
+  @RequirePermissions("payroll.calculate")
+  calculateThirteenth(@Param("id") id: string, @Body() body: any, @Req() req: Request & { user?: any }) {
+    return this.payrollService.calculateThirteenthSalary(id, body || {}, req.user);
   }
 
   @Post("periods/:id/import-attendance/preview")
