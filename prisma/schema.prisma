@@ -3212,9 +3212,10 @@ model ProductionAccessoryItem {
   imageUrl   String?
   unit       ProductionAccessoryUnit @default(PIECE)
   stockQty   Decimal                 @default(0) @db.Decimal(14, 3)
-  unitPrice  Decimal?                @db.Decimal(14, 2)
-  supplierId String?
-  note       String?
+  unitPrice      Decimal?                @db.Decimal(14, 2)
+  supplierId     String?
+  specifications Json?
+  note           String?
   isActive   Boolean                 @default(true)
   createdAt  DateTime                @default(now())
   updatedAt  DateTime                @updatedAt

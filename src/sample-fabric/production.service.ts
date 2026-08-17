@@ -311,6 +311,7 @@ export class ProductionService {
         stockQty: this.n(body?.stockQty) || 0,
         unitPrice: this.n(body?.unitPrice),
         supplierId: body?.supplierId || null,
+        specifications: body?.specifications && typeof body.specifications === "object" ? body.specifications : null,
         note: body?.note || null,
       },
     });
@@ -328,6 +329,7 @@ export class ProductionService {
         ...(body?.stockQty !== undefined ? { stockQty: this.n(body.stockQty) || 0 } : {}),
         ...(body?.unitPrice !== undefined ? { unitPrice: this.n(body.unitPrice) } : {}),
         ...(body?.supplierId !== undefined ? { supplierId: body.supplierId || null } : {}),
+        ...(body?.specifications !== undefined ? { specifications: body.specifications && typeof body.specifications === "object" ? body.specifications : null } : {}),
         ...(body?.note !== undefined ? { note: body.note || null } : {}),
       },
     });
