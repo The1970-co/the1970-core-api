@@ -421,7 +421,60 @@ export class PayrollService {
     });
     if (!period) throw new NotFoundException("Không tìm thấy kỳ lương.");
     this.scopedBranchId(user, period.branchId || null);
-    return period;
+
+    // Gắn tên mẫu cấu hình lương vào từng dòng để UI biết nhân viên đang
+    // được tính theo mẫu nào trong chính khoảng thời gian của kỳ lương này.
+    const staffIds = Array.from(new Set((period.lines || []).map((line: any) => String(line.staffId || "")).filter(Boolean)));
+    if (!staffIds.length) return period;
+
+    const configWhere: Prisma.PayrollConfigWhereInput = {
+      staffId: { in: staffIds },
+      isActive: true,
+      effectiveFrom: { lte: period.toDate },
+      OR: [{ effectiveTo: null }, { effectiveTo: { gte: period.fromDate } }],
+    };
+    if (period.branchId) {
+      configWhere.AND = [{ OR: [{ branchId: period.branchId }, { branchId: null }] }];
+    }
+
+    const periodConfigs = await this.prisma.payrollConfig.findMany({
+      where: configWhere,
+      orderBy: [{ effectiveFrom: "desc" }, { updatedAt: "desc" }],
+    });
+
+    const configByStaff = new Map<string, any>();
+    for (const config of periodConfigs as any[]) {
+      const key = String(config.staffId || "");
+      if (key && !configByStaff.has(key)) configByStaff.set(key, config);
+    }
+
+    const templateIds = Array.from(new Set(
+      periodConfigs.map((config: any) => String(config.sourceTemplateId || "")).filter(Boolean),
+    ));
+    const templates = templateIds.length
+      ? await (this.prisma as any).payrollBranchConfigTemplate.findMany({
+          where: { id: { in: templateIds } },
+          select: { id: true, name: true },
+        })
+      : [];
+    const templateNameById = new Map<string, string>(
+      templates.map((template: any) => [String(template.id), String(template.name || "Mẫu lương")]),
+    );
+
+    return {
+      ...period,
+      lines: (period.lines || []).map((line: any) => {
+        const config = configByStaff.get(String(line.staffId || ""));
+        const sourceTemplateId = config?.sourceTemplateId ? String(config.sourceTemplateId) : null;
+        return {
+          ...line,
+          sourceTemplateId,
+          sourceTemplateName: sourceTemplateId
+            ? (templateNameById.get(sourceTemplateId) || "Mẫu đã xóa / không còn hoạt động")
+            : "Cấu hình riêng",
+        };
+      }),
+    };
   }
 
   async listConfigs(query: any, user?: AnyUser) {
