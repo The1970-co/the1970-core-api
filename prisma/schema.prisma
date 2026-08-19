@@ -2970,6 +2970,7 @@ model DesignSample {
   progressLogs      DesignSampleProgressLog[]
   fabricReceipts    FabricReceipt[]
   sampleDispatches  FabricSampleDispatch[]
+  measurementProfile DesignSampleMeasurementProfile?
 
   @@index([year])
   @@index([status])
@@ -2979,6 +2980,159 @@ model DesignSample {
   @@index([producedProductId])
   @@index([assigneeStaffId])
   @@index([updatedAt])
+}
+
+// ============================================================
+// MEASUREMENT LIBRARY / BẢNG THÔNG SỐ MẪU
+// ============================================================
+// Template dùng lại nhiều lần. Khi gắn vào DesignSample, hệ thống phải
+// copy thành DesignSampleMeasurementProfile để giữ snapshot lịch sử.
+
+model MeasurementTemplate {
+  id          String                @id @default(cuid())
+  name        String
+  productKind ProductionProductKind @default(OTHER)
+  unitDefault String                @default("cm")
+  note        String?
+  isActive    Boolean               @default(true)
+  createdById String?
+  createdByName String?
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+
+  sizes          MeasurementTemplateSize[]
+  rows           MeasurementTemplateRow[]
+  sampleProfiles DesignSampleMeasurementProfile[]
+
+  @@index([name])
+  @@index([productKind])
+  @@index([isActive])
+  @@index([updatedAt])
+}
+
+model MeasurementTemplateSize {
+  id         String   @id @default(cuid())
+  templateId String
+  size       String
+  sortOrder  Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  template MeasurementTemplate       @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  values   MeasurementTemplateValue[]
+
+  @@unique([templateId, size])
+  @@index([templateId, sortOrder])
+}
+
+model MeasurementTemplateRow {
+  id         String   @id @default(cuid())
+  templateId String
+  code       String?
+  name       String
+  nameEn     String?
+  unit       String   @default("cm")
+  sortOrder  Int      @default(0)
+  note       String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  template MeasurementTemplate       @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  values   MeasurementTemplateValue[]
+
+  @@index([templateId, sortOrder])
+  @@index([templateId, name])
+}
+
+model MeasurementTemplateValue {
+  id        String   @id @default(cuid())
+  rowId     String
+  sizeId    String
+  value     Decimal? @db.Decimal(10, 3)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  row  MeasurementTemplateRow  @relation(fields: [rowId], references: [id], onDelete: Cascade)
+  size MeasurementTemplateSize @relation(fields: [sizeId], references: [id], onDelete: Cascade)
+
+  @@unique([rowId, sizeId])
+  @@index([rowId])
+  @@index([sizeId])
+}
+
+// Snapshot bảng thông số gắn với đúng 1 mẫu.
+// Sửa template gốc sau này không làm thay đổi thông số của mẫu đã triển khai.
+model DesignSampleMeasurementProfile {
+  id                   String                @id @default(cuid())
+  designSampleId       String                @unique
+  sourceTemplateId     String?
+  templateNameSnapshot String
+  productKind          ProductionProductKind @default(OTHER)
+  unitDefault          String                @default("cm")
+  note                 String?
+  createdById          String?
+  createdByName        String?
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+
+  designSample   DesignSample         @relation(fields: [designSampleId], references: [id], onDelete: Cascade)
+  sourceTemplate MeasurementTemplate? @relation(fields: [sourceTemplateId], references: [id], onDelete: SetNull)
+  sizes          DesignSampleMeasurementSize[]
+  rows           DesignSampleMeasurementRow[]
+
+  @@index([sourceTemplateId])
+  @@index([productKind])
+  @@index([updatedAt])
+}
+
+model DesignSampleMeasurementSize {
+  id        String   @id @default(cuid())
+  profileId String
+  size      String
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  profile DesignSampleMeasurementProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  values  DesignSampleMeasurementValue[]
+
+  @@unique([profileId, size])
+  @@index([profileId, sortOrder])
+}
+
+model DesignSampleMeasurementRow {
+  id        String   @id @default(cuid())
+  profileId String
+  code      String?
+  name      String
+  nameEn    String?
+  unit      String   @default("cm")
+  sortOrder Int      @default(0)
+  note      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  profile DesignSampleMeasurementProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  values  DesignSampleMeasurementValue[]
+
+  @@index([profileId, sortOrder])
+  @@index([profileId, name])
+}
+
+model DesignSampleMeasurementValue {
+  id        String   @id @default(cuid())
+  rowId     String
+  sizeId    String
+  value     Decimal? @db.Decimal(10, 3)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  row  DesignSampleMeasurementRow  @relation(fields: [rowId], references: [id], onDelete: Cascade)
+  size DesignSampleMeasurementSize @relation(fields: [sizeId], references: [id], onDelete: Cascade)
+
+  @@unique([rowId, sizeId])
+  @@index([rowId])
+  @@index([sizeId])
 }
 
 model DesignSampleColor {
