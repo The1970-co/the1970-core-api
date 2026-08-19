@@ -40,6 +40,36 @@ async function uploadImage(file: Express.Multer.File, folder: string) {
   };
 }
 
+async function uploadSampleFile(file: Express.Multer.File, folder: string) {
+  if (!file) throw new BadRequestException("Thiếu file");
+  const original = String(file.originalname || "file").trim();
+  const ext = original.includes(".") ? `.${original.split(".").pop()?.toLowerCase()}` : "";
+  const allowed = new Set([".pdf",".dxf",".dwg",".ai",".plt",".zip",".rar",".7z",".astm",".aama",".rul",".mdl",".pds",".hpgl",".svg"]);
+  if (!allowed.has(ext)) throw new BadRequestException("File rập không đúng định dạng hỗ trợ.");
+  const safeName = original.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-+/g, "-");
+  const result: any = await new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder,
+        resource_type: "raw",
+        public_id: `${Date.now()}-${safeName}`,
+        use_filename: false,
+        unique_filename: false,
+      } as any,
+      (error, uploaded) => uploaded ? resolve(uploaded) : reject(error),
+    );
+    Readable.from(file.buffer).pipe(stream);
+  });
+  return {
+    success: true,
+    filename: original,
+    mimetype: file.mimetype || "application/octet-stream",
+    size: Number(file.size || file.buffer?.length || 0),
+    url: result?.secure_url || result?.url || "",
+    public_id: result?.public_id,
+  };
+}
+
 @UseGuards(JwtGuard, PermissionGuard)
 @Controller("sample-fabric")
 export class SampleFabricController {
@@ -168,6 +198,13 @@ export class SampleFabricController {
   @UseInterceptors(FileInterceptor("file", { limits: { fileSize: 10 * 1024 * 1024 } }))
   uploadSampleImage(@UploadedFile() file: Express.Multer.File) {
     return uploadImage(file, "the1970/sample-fabric/samples");
+  }
+
+  @Post("samples/upload-file")
+  @RequirePermissions("design_sample.upload_images")
+  @UseInterceptors(FileInterceptor("file", { limits: { fileSize: 40 * 1024 * 1024 } }))
+  uploadSamplePatternFile(@UploadedFile() file: Express.Multer.File) {
+    return uploadSampleFile(file, "the1970/sample-fabric/sample-files");
   }
 
   // Gửi công ty / xưởng làm mẫu
