@@ -131,7 +131,13 @@ export class SampleFabricService {
     return {
       ...row,
       supplier: this.supplierForUser(row.supplier, user),
-      ...(admin ? {} : { unitPrice: null, priceUnit: null }),
+      ...(admin ? {} : {
+        unitPrice: null,
+        priceUnit: null,
+        priceCurrency: null,
+        exchangeRateToVnd: null,
+        unitPriceVnd: null,
+      }),
     };
   }
 
@@ -1040,8 +1046,29 @@ export class SampleFabricService {
     if (!this.isAdminUser(user)) throw new BadRequestException("Chỉ Admin/Owner được xem hoặc sửa đơn giá vải.");
     const found = await this.prisma.fabricReceipt.findUnique({ where: { id }, select: { id: true } });
     if (!found) throw new NotFoundException("Không tìm thấy phiếu vải về.");
+
+    const unitPrice = this.n(body?.unitPrice);
+    const priceCurrency = String(body?.priceCurrency || "VND").trim().toUpperCase() === "CNY" ? "CNY" : "VND";
+    const exchangeRateToVnd = priceCurrency === "CNY" ? this.n(body?.exchangeRateToVnd) : 1;
+
+    if (priceCurrency === "CNY" && (!exchangeRateToVnd || exchangeRateToVnd <= 0)) {
+      throw new BadRequestException("Thiếu tỷ giá CNY → VND.");
+    }
+
+    const unitPriceVnd =
+      unitPrice === null
+        ? null
+        : Number(unitPrice) * Number(exchangeRateToVnd || 1);
+
     return this.prisma.fabricReceipt.update({
-      where: { id }, data: { unitPrice: this.n(body?.unitPrice), priceUnit: body?.priceUnit || "METER" },
+      where: { id },
+      data: {
+        unitPrice,
+        priceUnit: body?.priceUnit || "METER",
+        priceCurrency,
+        exchangeRateToVnd,
+        unitPriceVnd,
+      },
     });
   }
 
