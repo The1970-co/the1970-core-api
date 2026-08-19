@@ -63,6 +63,16 @@ export class SampleFabricService {
     return `#${raw.replace(/^#+/, "")}`;
   }
 
+  private normalizeColorCodes(value: any) {
+    const values = String(value || "")
+      .split(/[;,\s]+/)
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .map((x) => this.normalizeColorCode(x))
+      .filter(Boolean);
+    return values.length ? Array.from(new Set(values)).join(", ") : null;
+  }
+
   private parseTokens(value: any) {
     if (Array.isArray(value)) return value.map((x) => this.titleCase(x)).filter(Boolean);
     return String(value || "").split(",").map((x) => this.titleCase(x)).filter(Boolean);
@@ -121,17 +131,17 @@ export class SampleFabricService {
 
   private supplierForUser(supplier: any, user?: any) {
     if (!supplier) return supplier;
-    if (user === undefined || this.isAdminUser(user)) return supplier;
+    if (user === undefined || this.userHas(user, "fabric_receipt.supplier_identity.view")) return supplier;
     return { id: supplier.id, code: supplier.code, name: null, phone: null, email: null, address: null, note: null };
   }
 
   private receiptForUser(row: any, user?: any) {
     if (!row) return row;
-    const admin = this.isAdminUser(user);
+    const canViewCost = user === undefined || this.userHas(user, "fabric_receipt.cost.view") || this.userHas(user, "fabric_receipt.cost.edit");
     return {
       ...row,
       supplier: this.supplierForUser(row.supplier, user),
-      ...(admin ? {} : {
+      ...(canViewCost ? {} : {
         unitPrice: null,
         priceUnit: null,
         priceCurrency: null,
@@ -948,7 +958,7 @@ export class SampleFabricService {
         fabricCode: body?.fabricCode || board?.fabricCode || null,
         fabricName: body?.fabricName || board?.name || null,
         colorName: body?.colorName || color?.name || null,
-        colorCode: this.normalizeColorCode(body?.colorCode || color?.code),
+        colorCode: this.normalizeColorCodes(body?.colorCode || color?.code),
         lotCode: body?.lotCode || null,
         supplierDeclaredM: this.n(body?.supplierDeclaredM),
         supplierDeclaredKg: this.n(body?.supplierDeclaredKg),
@@ -1024,7 +1034,7 @@ export class SampleFabricService {
           ...(body?.fabricCode !== undefined || board ? { fabricCode: body.fabricCode || board?.fabricCode || null } : {}),
           ...(body?.fabricName !== undefined || board ? { fabricName: body.fabricName || board?.name || null } : {}),
           ...(body?.colorName !== undefined || color ? { colorName: body.colorName || color?.name || null } : {}),
-          ...(body?.colorCode !== undefined || color ? { colorCode: this.normalizeColorCode(body.colorCode || color?.code) } : {}),
+          ...(body?.colorCode !== undefined || color ? { colorCode: this.normalizeColorCodes(body.colorCode || color?.code) } : {}),
           ...(body?.lotCode !== undefined ? { lotCode: body.lotCode || null } : {}),
           ...(body?.supplierDeclaredM !== undefined ? { supplierDeclaredM: this.n(body.supplierDeclaredM) } : {}),
           ...(body?.supplierDeclaredKg !== undefined ? { supplierDeclaredKg: this.n(body.supplierDeclaredKg) } : {}),
@@ -1043,7 +1053,7 @@ export class SampleFabricService {
   }
 
   async setFabricReceiptCost(id: string, body: any, user?: any) {
-    if (!this.isAdminUser(user)) throw new BadRequestException("Chỉ Admin/Owner được xem hoặc sửa đơn giá vải.");
+    if (!this.userHas(user, "fabric_receipt.cost.edit")) throw new BadRequestException("Không có quyền sửa đơn giá / tỷ giá vải.");
     const found = await this.prisma.fabricReceipt.findUnique({ where: { id }, select: { id: true } });
     if (!found) throw new NotFoundException("Không tìm thấy phiếu vải về.");
 
