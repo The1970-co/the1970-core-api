@@ -16,6 +16,41 @@ export class ProductionService {
     };
   }
 
+  private userHas(user: any, permission: string) {
+    const roles = [user?.role, ...(Array.isArray(user?.roles) ? user.roles : [])]
+      .map((x) => String(x || "").trim().toLowerCase())
+      .filter(Boolean);
+    if (roles.includes("owner") || roles.includes("admin")) return true;
+
+    const keys = new Set<string>();
+    for (const value of [...(user?.permissions || []), ...(user?.permissionKeys || [])]) if (value) keys.add(String(value));
+    const rows = Array.isArray(user?.branchPermissions) ? user.branchPermissions : [];
+    const activeBranchId = String(user?.activeBranchId || user?.branchId || "").trim();
+    const scopedRows = activeBranchId
+      ? rows.filter((row: any) => String(row?.branchId || row?.branch?.id || "").trim() === activeBranchId)
+      : [];
+    const rowsToUse = scopedRows.length ? scopedRows : rows;
+    for (const row of rowsToUse) {
+      for (const value of [...(row?.permissionKeys || []), ...(row?.extraPermissionKeys || [])]) if (value) keys.add(String(value));
+      for (const value of row?.deniedPermissionKeys || []) keys.delete(String(value));
+    }
+    return keys.has("*") || keys.has(permission);
+  }
+
+  private accessorySupplierForUser(row: any, user?: any) {
+    if (!row) return row;
+    if (this.userHas(user, "accessories.supplier_identity.view")) return row;
+    return { id: row.id, code: row.code, name: null, phone: null, email: null, address: null, note: null, isActive: row.isActive };
+  }
+
+  private accessoryForUser(row: any, user?: any) {
+    if (!row) return row;
+    return {
+      ...row,
+      ...(this.userHas(user, "accessories.cost.view") ? {} : { unitPrice: null }),
+    };
+  }
+
   private n(value: any) {
     if (value === null || value === undefined || value === "") return null;
     const clean = typeof value === "string" ? value.replace(/[^\d,.\-]/g, "").replace(",", ".") : value;
@@ -75,7 +110,7 @@ export class ProductionService {
     return `SX-${String(max + 1).padStart(3, "0")}-${suffix}`;
   }
 
-  async meta() {
+  async meta(user?: any) {
     const [samples, products, factories, accessories, rolls] = await Promise.all([
       this.prisma.designSample.findMany({
         where: { status: { not: "ON_HOLD" } },
@@ -115,7 +150,7 @@ export class ProductionService {
       samples,
       products: products.map((p: any) => ({ ...p, code: this.productCode(p) })),
       factories,
-      accessories,
+      accessories: accessories.map((row: any) => this.accessoryForUser(row, user)),
       rolls,
     };
   }
@@ -240,8 +275,9 @@ export class ProductionService {
     return this.prisma.productionPartner.update({ where: { id }, data: { isActive: false } });
   }
 
-  listAccessorySuppliers() {
-    return this.prisma.productionAccessorySupplier.findMany({ where: { isActive: true }, orderBy: { name: "asc" } });
+  async listAccessorySuppliers(user?: any) {
+    const rows = await this.prisma.productionAccessorySupplier.findMany({ where: { isActive: true }, orderBy: { name: "asc" } });
+    return rows.map((row: any) => this.accessorySupplierForUser(row, user));
   }
 
   async createAccessorySupplier(body: any) {
@@ -277,9 +313,9 @@ export class ProductionService {
     return this.prisma.productionAccessorySupplier.update({ where: { id }, data: { isActive: false } });
   }
 
-  listAccessories(query?: any) {
+  async listAccessories(query?: any, user?: any) {
     const q = String(query?.q || "").trim();
-    return this.prisma.productionAccessoryItem.findMany({
+    const rows = await this.prisma.productionAccessoryItem.findMany({
       where: {
         isActive: true,
         ...(query?.type ? { typeName: query.type } : {}),
@@ -295,13 +331,14 @@ export class ProductionService {
       },
       orderBy: [{ typeName: "asc" }, { name: "asc" }],
     });
+    return rows.map((row: any) => this.accessoryForUser(row, user));
   }
 
-  async createAccessory(body: any) {
+  async createAccessory(body: any, user?: any) {
     const name = String(body?.name || "").trim();
     const typeName = String(body?.typeName || "").trim();
     if (!name || !typeName) throw new BadRequestException("Thiếu tên hoặc loại NPL.");
-    return this.prisma.productionAccessoryItem.create({
+    const created = await this.prisma.productionAccessoryItem.create({
       data: {
         code: String(body?.code || "").trim().toUpperCase() || (await this.nextSimpleCode("item", name)),
         name,
@@ -315,10 +352,11 @@ export class ProductionService {
         note: body?.note || null,
       },
     });
+    return this.accessoryForUser(created, user);
   }
 
-  async updateAccessory(id: string, body: any) {
-    return this.prisma.productionAccessoryItem.update({
+  async updateAccessory(id: string, body: any, user?: any) {
+    const updated = await this.prisma.productionAccessoryItem.update({
       where: { id },
       data: {
         ...(body?.code !== undefined ? { code: String(body.code || "").trim().toUpperCase() } : {}),
@@ -333,9 +371,10 @@ export class ProductionService {
         ...(body?.note !== undefined ? { note: body.note || null } : {}),
       },
     });
+    return this.accessoryForUser(updated, user);
   }
 
-  async adjustAccessoryStock(id: string, body: any) {
+  async adjustAccessoryStock(id: string, body: any, user?: any) {
     const item = await this.prisma.productionAccessoryItem.findUnique({ where: { id } });
     if (!item) throw new NotFoundException("Không tìm thấy NPL.");
     const qty = Number(this.n(body?.qty) || 0);
@@ -343,7 +382,8 @@ export class ProductionService {
     const mode = String(body?.mode || "ADD").toUpperCase();
     const next = mode === "SET" ? qty : mode === "SUBTRACT" ? current - qty : current + qty;
     if (next < 0) throw new BadRequestException("Tồn NPL không thể âm.");
-    return this.prisma.productionAccessoryItem.update({ where: { id }, data: { stockQty: next } });
+    const updated = await this.prisma.productionAccessoryItem.update({ where: { id }, data: { stockQty: next } });
+    return this.accessoryForUser(updated, user);
   }
 
   async getSampleSpec(designSampleId: string) {

@@ -105,6 +105,35 @@ export const PERMISSIONS = {
   FINANCE_GHN_IMPORT: "finance.ghn.import",
   FINANCE_PAYMENT_SOURCE_MANAGE: "finance.payment_source.manage",
 
+  // Mobile production hub / per-screen visibility
+  MOBILE_HOME_PRODUCTION: "mobile.home.production",
+  MOBILE_PRODUCTION_HUB_VIEW: "mobile.production_hub.view",
+  MOBILE_PAGE_FABRIC_LIBRARY: "mobile.page.fabric_library",
+  MOBILE_PAGE_DESIGN_SAMPLES: "mobile.page.design_samples",
+  MOBILE_PAGE_MEASUREMENT_LIBRARY: "mobile.page.measurement_library",
+  MOBILE_PAGE_FABRIC_RECEIPTS: "mobile.page.fabric_receipts",
+  MOBILE_PAGE_PRODUCTION: "mobile.page.production",
+  MOBILE_PAGE_ACCESSORIES: "mobile.page.accessories",
+
+  // Production / accessories
+  MENU_PRODUCTION: "menu.production",
+  PRODUCTION_VIEW: "production.view",
+  PRODUCTION_CREATE: "production.create",
+  PRODUCTION_EDIT: "production.edit",
+  PRODUCTION_CALCULATE: "production.calculate",
+  PRODUCTION_MANAGE: "production.manage",
+  MENU_ACCESSORIES: "menu.accessories",
+  ACCESSORIES_VIEW: "accessories.view",
+  ACCESSORIES_COST_VIEW: "accessories.cost.view",
+  ACCESSORIES_SUPPLIER_IDENTITY_VIEW: "accessories.supplier_identity.view",
+  ACCESSORIES_MANAGE: "accessories.manage",
+  ACCESSORIES_STOCK: "accessories.stock",
+
+  // Fabric receipt sensitive fields
+  FABRIC_RECEIPT_SUPPLIER_IDENTITY_VIEW: "fabric_receipt.supplier_identity.view",
+  FABRIC_RECEIPT_COST_VIEW: "fabric_receipt.cost.view",
+  FABRIC_RECEIPT_COST_EDIT: "fabric_receipt.cost.edit",
+
   MENU_STAFF_TRANSFER: "menu.staff_transfer",
   STAFF_TRANSFER_BRANCH_VIEW: "staff.transfer_branch.view",
   STAFF_TRANSFER_BRANCH: "staff.transfer_branch",

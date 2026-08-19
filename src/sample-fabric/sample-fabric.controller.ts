@@ -47,8 +47,8 @@ export class SampleFabricController {
 
   @Get("fabric-suppliers")
   @RequirePermissions("fabric_library.view")
-  listFabricSuppliers() {
-    return this.service.listFabricSuppliers();
+  listFabricSuppliers(@Req() req: any) {
+    return this.service.listFabricSuppliers(req.user);
   }
 
   @Post("fabric-suppliers")

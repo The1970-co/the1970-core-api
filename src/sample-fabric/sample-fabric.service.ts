@@ -34,7 +34,15 @@ export class SampleFabricService {
     if (role === "OWNER" || role === "ADMIN") return true;
     const keys = new Set<string>();
     for (const value of [...(user?.permissions || []), ...(user?.permissionKeys || [])]) if (value) keys.add(String(value));
-    for (const row of user?.branchPermissions || []) {
+
+    const rows = Array.isArray(user?.branchPermissions) ? user.branchPermissions : [];
+    const activeBranchId = String(user?.activeBranchId || user?.branchId || "").trim();
+    const scopedRows = activeBranchId
+      ? rows.filter((row: any) => String(row?.branchId || row?.branch?.id || "").trim() === activeBranchId)
+      : [];
+    const rowsToUse = scopedRows.length ? scopedRows : rows;
+
+    for (const row of rowsToUse) {
       for (const value of [...(row?.permissionKeys || []), ...(row?.extraPermissionKeys || [])]) if (value) keys.add(String(value));
       for (const value of row?.deniedPermissionKeys || []) keys.delete(String(value));
     }

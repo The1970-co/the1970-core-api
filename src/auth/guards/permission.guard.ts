@@ -178,10 +178,10 @@ export class PermissionGuard implements CanActivate {
 
     if (roles.includes("owner") || roles.includes("admin")) return ["*"];
 
-    return this.collectPermissionsFromUserShape(staff);
+    return this.collectPermissionsFromUserShape(staff, user?.activeBranchId || user?.branchId);
   }
 
-  private collectPermissionsFromUserShape(user: any) {
+  private collectPermissionsFromUserShape(user: any, activeBranchId?: string | null) {
     const keys: string[] = [];
     const denied: string[] = [];
 
@@ -207,8 +207,13 @@ export class PermissionGuard implements CanActivate {
     const branchPermissions = Array.isArray(user?.branchPermissions)
       ? user.branchPermissions
       : [];
+    const scopedBranchId = normalizeKey(activeBranchId || user?.activeBranchId || user?.branchId);
+    const scopedRows = scopedBranchId
+      ? branchPermissions.filter((row: any) => normalizeKey(row?.branchId || row?.branch?.id) === scopedBranchId)
+      : [];
+    const rowsToUse = scopedRows.length ? scopedRows : branchPermissions;
 
-    for (const row of branchPermissions) {
+    for (const row of rowsToUse) {
       addArray(row?.permissionKeys);
       addArray(row?.extraPermissionKeys);
 

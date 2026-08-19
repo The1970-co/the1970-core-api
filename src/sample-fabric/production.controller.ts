@@ -41,8 +41,8 @@ export class ProductionController {
 
   @Get("meta")
   @RequirePermissions("production.view")
-  meta() {
-    return this.service.meta();
+  meta(@Req() req: any) {
+    return this.service.meta(req.user);
   }
 
   @Get("fabric-rolls")
@@ -77,8 +77,8 @@ export class ProductionController {
 
   @Get("accessory-suppliers")
   @RequirePermissions("accessories.view")
-  suppliers() {
-    return this.service.listAccessorySuppliers();
+  suppliers(@Req() req: any) {
+    return this.service.listAccessorySuppliers(req.user);
   }
 
   @Post("accessory-suppliers")
@@ -101,26 +101,26 @@ export class ProductionController {
 
   @Get("accessories")
   @RequirePermissions("accessories.view")
-  accessories(@Query() query: any) {
-    return this.service.listAccessories(query);
+  accessories(@Query() query: any, @Req() req: any) {
+    return this.service.listAccessories(query, req.user);
   }
 
   @Post("accessories")
   @RequirePermissions("accessories.manage")
-  createAccessory(@Body() body: any) {
-    return this.service.createAccessory(body);
+  createAccessory(@Body() body: any, @Req() req: any) {
+    return this.service.createAccessory(body, req.user);
   }
 
   @Patch("accessories/:id")
   @RequirePermissions("accessories.manage")
-  updateAccessory(@Param("id") id: string, @Body() body: any) {
-    return this.service.updateAccessory(id, body);
+  updateAccessory(@Param("id") id: string, @Body() body: any, @Req() req: any) {
+    return this.service.updateAccessory(id, body, req.user);
   }
 
   @Post("accessories/:id/stock")
   @RequirePermissions("accessories.stock")
-  adjustStock(@Param("id") id: string, @Body() body: any) {
-    return this.service.adjustAccessoryStock(id, body);
+  adjustStock(@Param("id") id: string, @Body() body: any, @Req() req: any) {
+    return this.service.adjustAccessoryStock(id, body, req.user);
   }
 
   @Post("accessories/upload")

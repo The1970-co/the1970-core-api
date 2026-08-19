@@ -132,13 +132,18 @@ export class AuthService {
     return user;
   }
 
-  private buildPermissionKeys(user: any) {
+  private buildPermissionKeys(user: any, activeBranchId?: string | null) {
     if (this.isOwnerOrAdmin(user)) return ["*"];
 
     const keys = new Set<string>();
-    const rows = Array.isArray(user?.branchPermissions)
+    const allRows = Array.isArray(user?.branchPermissions)
       ? user.branchPermissions
       : [];
+    const scopedBranchId = String(activeBranchId || user?.activeBranchId || user?.branchId || "").trim();
+    const scopedRows = scopedBranchId
+      ? allRows.filter((row: any) => String(row?.branchId || row?.branch?.id || "").trim() === scopedBranchId)
+      : [];
+    const rows = scopedRows.length ? scopedRows : allRows;
 
     const addKeys = (values: any[]) => {
       if (!Array.isArray(values)) return;
@@ -259,7 +264,7 @@ export class AuthService {
       branchOptions: this.buildBranchOptions(authUser),
       branchRoles: authUser.branchRoles || [],
       branchPermissions: authUser.branchPermissions || [],
-      permissions: this.buildPermissionKeys(authUser),
+      permissions: this.buildPermissionKeys(authUser, activeBranchId),
       sessionVersion: authUser.sessionVersion || 1,
       type: "staff",
       status: authUser.isActive ? "active" : "inactive",
