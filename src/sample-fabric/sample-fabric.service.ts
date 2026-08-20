@@ -523,10 +523,10 @@ export class SampleFabricService {
         include: { supplier: { select: { id: true, code: true, name: true } }, colors: { orderBy: { createdAt: "asc" } } },
         orderBy: { updatedAt: "desc" },
       }),
-      this.prisma.productionPartner.findMany({
+      this.prisma.supplier.findMany({
         where: { isActive: true },
-        select: { id: true, code: true, name: true, contactName: true, phone: true },
-        orderBy: { name: "asc" },
+        select: { id: true, code: true, name: true, phone: true },
+        orderBy: [{ name: "asc" }, { code: "asc" }],
       }),
       this.productGroupsAndCompositions(),
     ]);
@@ -539,6 +539,24 @@ export class SampleFabricService {
       where: { id: fabricBoardId },
       include: { supplier: { select: { id: true } } },
     });
+  }
+
+  private async sampleFactorySnapshot(sampleFactoryId?: string | null) {
+    const id = String(sampleFactoryId || "").trim();
+    if (!id) return null;
+    const supplier = await this.prisma.supplier.findFirst({
+      where: { id, isActive: true },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        phone: true,
+        email: true,
+        address: true,
+      },
+    });
+    if (!supplier) throw new BadRequestException("Nhà may làm mẫu không còn tồn tại hoặc đã ngưng dùng.");
+    return supplier;
   }
 
   async listSamples(query?: { q?: string; year?: string; status?: string; fabricBoardId?: string }) {
@@ -601,6 +619,7 @@ export class SampleFabricService {
     if (season && !SAMPLE_SEASONS.includes(season as any)) throw new BadRequestException("Mùa / BST không hợp lệ.");
     const status = (body?.status || "IDEA") as DesignSampleStatus;
     const board = await this.sampleBoardSnapshot(body?.fabricBoardId);
+    const sampleFactory = await this.sampleFactorySnapshot(body?.sampleFactoryId);
     const images = Array.isArray(body?.images) ? body.images : [];
     return this.prisma.designSample.create({
       data: {
@@ -612,8 +631,8 @@ export class SampleFabricService {
         fabricColorId: body?.fabricColorId || null,
         fabricColorName: this.titleCase(body?.fabricColorName) || null,
         fabricColorCode: this.normalizeColorCode(body?.fabricColorCode),
-        sampleFactoryId: body?.sampleFactoryId || null,
-        sampleFactoryName: body?.sampleFactoryName || null,
+        sampleFactoryId: sampleFactory?.id || null,
+        sampleFactoryName: sampleFactory?.name || null,
         supplierId: body?.supplierId || board?.supplierId || null,
         fabricBoardCode: this.normalizeSampleCode(body?.fabricBoardCode) || board?.boardCode || null,
         fabricCode: this.normalizeSampleCode(body?.fabricCode) || board?.fabricCode || null,
@@ -671,6 +690,9 @@ export class SampleFabricService {
       if (season && !SAMPLE_SEASONS.includes(season as any)) throw new BadRequestException("Mùa / BST không hợp lệ.");
     }
     const board = body?.fabricBoardId !== undefined ? await this.sampleBoardSnapshot(body.fabricBoardId) : null;
+    const sampleFactory = body?.sampleFactoryId !== undefined
+      ? await this.sampleFactorySnapshot(body.sampleFactoryId)
+      : undefined;
     return this.prisma.$transaction(async (tx) => {
       if (Array.isArray(body?.images)) {
         await tx.designSampleImage.deleteMany({ where: { designSampleId: id } });
@@ -695,8 +717,10 @@ export class SampleFabricService {
           ...(body?.fabricColorId !== undefined ? { fabricColorId: body.fabricColorId || null } : {}),
           ...(body?.fabricColorName !== undefined ? { fabricColorName: this.titleCase(body.fabricColorName) || null } : {}),
           ...(body?.fabricColorCode !== undefined ? { fabricColorCode: this.normalizeColorCode(body.fabricColorCode) } : {}),
-          ...(body?.sampleFactoryId !== undefined ? { sampleFactoryId: body.sampleFactoryId || null } : {}),
-          ...(body?.sampleFactoryName !== undefined ? { sampleFactoryName: body.sampleFactoryName || null } : {}),
+          ...(body?.sampleFactoryId !== undefined ? {
+            sampleFactoryId: sampleFactory?.id || null,
+            sampleFactoryName: sampleFactory?.name || null,
+          } : {}),
           ...(body?.supplierId !== undefined || body?.fabricBoardId !== undefined ? { supplierId: body?.supplierId || board?.supplierId || null } : {}),
           ...(body?.fabricBoardCode !== undefined || body?.fabricBoardId !== undefined ? { fabricBoardCode: this.normalizeSampleCode(body?.fabricBoardCode) || board?.boardCode || null } : {}),
           ...(body?.fabricCode !== undefined || body?.fabricBoardId !== undefined ? { fabricCode: this.normalizeSampleCode(body?.fabricCode) || board?.fabricCode || null } : {}),
@@ -779,9 +803,11 @@ export class SampleFabricService {
   async createSampleDispatch(body: any, user?: Actor) {
     const actor = this.actor(user);
     const fabricBoardId = String(body?.fabricBoardId || "").trim();
-    const recipientName = this.titleCase(body?.recipientName);
+    const sampleFactory = await this.sampleFactorySnapshot(body?.sampleFactoryId);
+    const recipientName = this.titleCase(sampleFactory?.name || body?.recipientName);
+    const recipientContact = sampleFactory?.phone || body?.recipientContact || null;
     if (!fabricBoardId) throw new BadRequestException("Chưa chọn bảng vải.");
-    if (!recipientName) throw new BadRequestException("Thiếu công ty/xưởng nhận mẫu.");
+    if (!recipientName) throw new BadRequestException("Chưa chọn nhà may / nhà cung cấp làm mẫu.");
     let designSampleId = String(body?.designSampleId || "").trim() || null;
 
     if (!designSampleId) {
@@ -802,7 +828,7 @@ export class SampleFabricService {
           fabricColorId: body?.fabricColorId || null,
           fabricColorName: this.titleCase(body?.colorName) || null,
           fabricColorCode: this.normalizeColorCode(body?.colorCode),
-          sampleFactoryId: body?.sampleFactoryId || null,
+          sampleFactoryId: sampleFactory?.id || null,
           sampleFactoryName: recipientName,
           supplierId: board?.supplierId || null,
           fabricBoardCode: board?.boardCode || null,
@@ -833,7 +859,7 @@ export class SampleFabricService {
         colorCode: this.normalizeColorCode(body?.colorCode || designSample.fabricColorCode),
         recipientName,
         recipientType: this.titleCase(body?.recipientType) || null,
-        recipientContact: body?.recipientContact || null,
+        recipientContact,
         sentAt: body?.sentAt ? new Date(body.sentAt) : new Date(),
         sentById: body?.sentById || actor.id,
         sentByName: body?.sentByName || actor.name,
@@ -848,7 +874,7 @@ export class SampleFabricService {
       where: { id: designSampleId },
       data: {
         status: "SAMPLING",
-        sampleFactoryId: body?.sampleFactoryId || designSample.sampleFactoryId || null,
+        sampleFactoryId: sampleFactory?.id || designSample.sampleFactoryId || null,
         sampleFactoryName: recipientName,
         fabricColorName: this.titleCase(body?.colorName || designSample.fabricColorName) || null,
         fabricColorCode: this.normalizeColorCode(body?.colorCode || designSample.fabricColorCode),

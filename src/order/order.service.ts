@@ -1456,7 +1456,7 @@ export class OrderService implements OnModuleInit {
       customerPhone?: string | null;
     },
   ) {
-    const payments = input.payments
+    const candidatePayments = input.payments
       .map((payment) => {
         const source = input.paymentSourceMap.get(String(payment.paymentSourceId || ""));
         return {
@@ -1470,6 +1470,20 @@ export class OrderService implements OnModuleInit {
         const sourceType = String(payment.source?.type || "").toUpperCase();
         return sourceType !== "COD";
       });
+
+    // Lớp bảo vệ thứ hai: phiếu thu của một đơn không bao giờ được vượt số tiền
+    // khách thực sự phải trả, kể cả nếu Payment đầu vào bị sai do client/cache cũ.
+    let remainingVoucherAmount = Math.max(0, this.toNumber(input.order?.finalAmount));
+    const payments = candidatePayments
+      .map((payment) => {
+        const amount = Math.min(
+          Math.max(0, this.toNumber(payment.amount)),
+          remainingVoucherAmount,
+        );
+        remainingVoucherAmount = Math.max(0, remainingVoucherAmount - amount);
+        return { ...payment, amount };
+      })
+      .filter((payment) => payment.amount > 0);
 
     if (!payments.length) return;
 
@@ -1880,13 +1894,50 @@ export class OrderService implements OnModuleInit {
           }
         }
 
+        // Backend là nguồn sự thật cuối cùng cho số tiền phải thu.
+        // Frontend có thể đang giữ promotion cũ/chưa kịp tải promotion mới, nên
+        // tuyệt đối không lưu Payment/CashVoucher vượt quá finalAmount của đơn.
+        // Ưu tiên các khoản đã thu thực tế (cash/bank/...) trước, COD chỉ nhận phần còn lại.
+        let remainingPaymentAmount = Math.max(0, finalAmountNumber);
+        const normalizedPaymentAmounts = new Map<number, number>();
+
+        const allocatePayment = (index: number) => {
+          const payment = cleanedPayments[index];
+          const requestedAmount = Math.max(0, this.toNumber(payment?.amount));
+          const amount = Math.min(requestedAmount, remainingPaymentAmount);
+
+          normalizedPaymentAmounts.set(index, amount);
+          remainingPaymentAmount = Math.max(0, remainingPaymentAmount - amount);
+        };
+
+        cleanedPayments.forEach((payment: any, index: number) => {
+          const source = paymentSourceMap.get(String(payment.paymentSourceId!))!;
+          if (String(source?.type || "").toUpperCase() !== "COD") {
+            allocatePayment(index);
+          }
+        });
+
+        cleanedPayments.forEach((payment: any, index: number) => {
+          const source = paymentSourceMap.get(String(payment.paymentSourceId!))!;
+          if (String(source?.type || "").toUpperCase() === "COD") {
+            allocatePayment(index);
+          }
+        });
+
+        const normalizedPayments = cleanedPayments
+          .map((payment: any, index: number) => ({
+            ...payment,
+            amount: normalizedPaymentAmounts.get(index) || 0,
+          }))
+          .filter((payment: any) => payment.amount > 0);
+
         let totalPaid = 0;
         let hasCodPayment = false;
 
-        for (const payment of cleanedPayments) {
+        for (const payment of normalizedPayments) {
           const source = paymentSourceMap.get(String(payment.paymentSourceId!))!;
 
-          if (source.type === "COD") {
+          if (String(source?.type || "").toUpperCase() === "COD") {
             hasCodPayment = true;
           } else {
             totalPaid += Number(payment.amount || 0);
@@ -2005,9 +2056,9 @@ export class OrderService implements OnModuleInit {
           })),
         });
 
-        if (cleanedPayments.length) {
+        if (normalizedPayments.length) {
           await tx.payment.createMany({
-            data: cleanedPayments.map((payment: any) => {
+            data: normalizedPayments.map((payment: any) => {
               const source = paymentSourceMap.get(String(payment.paymentSourceId!))!;
 
               return {
@@ -2119,7 +2170,7 @@ export class OrderService implements OnModuleInit {
               lineTotal: item.lineTotal,
             })),
             shipment: null,
-            payments: cleanedPayments.map((payment: any) => {
+            payments: normalizedPayments.map((payment: any) => {
               const source = paymentSourceMap.get(String(payment.paymentSourceId!))!;
 
               return {
