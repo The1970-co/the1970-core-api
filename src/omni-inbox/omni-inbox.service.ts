@@ -58,6 +58,13 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(OmniInboxService.name);
   private readonly facebookPostSourceCache = new Map<string, { expiresAt: number; data: any }>();
 
+  // Lazy backfill Messenger: chỉ sync lịch sử của khách thực sự quay lại nhắn,
+  // không quét toàn bộ Page. Map này chống gọi Meta lặp lại liên tục trong cùng
+  // một process; DB vẫn chống duplicate bằng providerMessageId nên restart/deploy
+  // có chạy lại cũng an toàn.
+  private readonly messengerHistoryBackfillDone = new Set<string>();
+  private readonly messengerHistoryBackfillRunning = new Map<string, Promise<any>>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly realtime: OmniInboxRealtimeService,
@@ -168,6 +175,205 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     }
 
     return json as T;
+  }
+
+  /**
+   * Lấy lịch sử gần nhất của đúng 1 khách Messenger khi khách đó quay lại nhắn.
+   * Không bao giờ quét /{PAGE_ID}/conversations toàn bộ Page.
+   *
+   * Meta Conversations API hỗ trợ lọc theo user_id (PSID). Sau khi resolve được
+   * conversation id thật của Meta, chỉ lấy tối đa 200 message gần nhất của thread.
+   * providerMessageId là unique key nên webhook hiện tại + backfill không nhân đôi.
+   */
+  private async backfillMessengerHistoryForCustomer(params: {
+    pageId: string;
+    customerPsid: string;
+    conversationId: string;
+    customerName?: string | null;
+    force?: boolean;
+  }) {
+    const pageId = safeText(params.pageId);
+    const customerPsid = safeText(params.customerPsid);
+    const conversationId = safeText(params.conversationId);
+    if (!pageId || !customerPsid || !conversationId) {
+      return { skipped: true, reason: "missing_backfill_identity" };
+    }
+
+    const key = `${pageId}:${customerPsid}`;
+    if (!params.force && this.messengerHistoryBackfillDone.has(key)) {
+      return { skipped: true, reason: "already_backfilled_in_process" };
+    }
+
+    const running = this.messengerHistoryBackfillRunning.get(key);
+    if (running) return running;
+
+    const job = (async () => {
+      try {
+        this.logger.log(
+          `[META_HISTORY_BACKFILL_START] page=${pageId} psid=${last6(customerPsid)} conversation=${conversationId}`,
+        );
+
+        // Quan trọng: user_id lọc thẳng đúng khách, KHÔNG list toàn bộ inbox Page.
+        const found: any = await this.metaFetch(`${pageId}/conversations`, {
+          platform: "messenger",
+          user_id: customerPsid,
+          fields: "id,updated_time",
+          limit: "1",
+        });
+        const metaConversationId = safeText(found?.data?.[0]?.id);
+        if (!metaConversationId) {
+          this.logger.warn(
+            `[META_HISTORY_BACKFILL_NO_THREAD] page=${pageId} psid=${last6(customerPsid)}`,
+          );
+          this.messengerHistoryBackfillDone.add(key);
+          return { skipped: true, reason: "meta_conversation_not_found" };
+        }
+
+        let detail: any;
+        try {
+          detail = await this.metaFetch(metaConversationId, {
+            fields:
+              "messages.limit(200){id,created_time,from,to,message,attachments}",
+          });
+        } catch (error: any) {
+          // Một số Page/API version không expose attachments trong nested expansion.
+          // Vẫn backfill text/timestamp thay vì làm hỏng toàn bộ sync.
+          this.logger.warn(
+            `[META_HISTORY_BACKFILL_ATTACHMENT_FALLBACK] thread=${metaConversationId} | ${error?.message || error}`,
+          );
+          detail = await this.metaFetch(metaConversationId, {
+            fields: "messages.limit(200){id,created_time,from,to,message}",
+          });
+        }
+
+        const rows = Array.isArray(detail?.messages?.data)
+          ? detail.messages.data
+          : [];
+        if (!rows.length) {
+          this.messengerHistoryBackfillDone.add(key);
+          return { ok: true, imported: 0, threadId: metaConversationId };
+        }
+
+        // Meta thường trả newest -> oldest. Lưu oldest -> newest cho timestamp ổn định.
+        const ordered = [...rows].reverse();
+        let imported = 0;
+        let skipped = 0;
+
+        for (const raw of ordered) {
+          const providerMessageId = safeText(raw?.id);
+          if (!providerMessageId) {
+            skipped += 1;
+            continue;
+          }
+
+          const existed = await this.prisma.omniMessage.findUnique({
+            where: { providerMessageId },
+            select: { id: true },
+          });
+          if (existed) {
+            skipped += 1;
+            continue;
+          }
+
+          const fromId = safeText(raw?.from?.id);
+          const fromName = safeText(raw?.from?.name);
+          const direction = fromId === pageId ? "OUT" : "IN";
+          const sentAtRaw = raw?.created_time ? new Date(raw.created_time) : new Date();
+          const sentAt = Number.isNaN(sentAtRaw.getTime()) ? new Date() : sentAtRaw;
+          const messageText = safeText(raw?.message);
+          const attachmentRows = Array.isArray(raw?.attachments?.data)
+            ? raw.attachments.data
+            : [];
+
+          if (messageText || !attachmentRows.length) {
+            await this.prisma.omniMessage.create({
+              data: {
+                conversationId,
+                providerMessageId,
+                direction: direction as any,
+                type: "TEXT",
+                text: messageText || "[Tin nhắn]",
+                attachmentUrl: null,
+                senderId: fromId || (direction === "OUT" ? pageId : customerPsid),
+                senderName:
+                  fromName ||
+                  (direction === "OUT"
+                    ? "The 1970"
+                    : safeText(params.customerName) || `Khách ${last6(customerPsid)}`),
+                sentAt,
+              },
+            });
+            imported += 1;
+          }
+
+          // Nếu Meta trả attachment cùng message text, lưu attachment bằng synthetic
+          // provider id giống convention webhook hiện tại để không vi phạm unique key.
+          for (let index = 0; index < attachmentRows.length; index += 1) {
+            const item = attachmentRows[index];
+            const attachmentUrl = safeText(
+              item?.image_data?.url ||
+                item?.video_data?.url ||
+                item?.file_url ||
+                item?.url ||
+                item?.payload?.url,
+            );
+            if (!attachmentUrl) continue;
+
+            const attachmentProviderId = messageText || index > 0
+              ? `${providerMessageId}:attachment:${index}`
+              : providerMessageId;
+            const attachmentExisted = await this.prisma.omniMessage.findUnique({
+              where: { providerMessageId: attachmentProviderId },
+              select: { id: true },
+            });
+            if (attachmentExisted) continue;
+
+            await this.prisma.omniMessage.create({
+              data: {
+                conversationId,
+                providerMessageId: attachmentProviderId,
+                direction: direction as any,
+                type: "IMAGE",
+                text: null,
+                attachmentUrl,
+                senderId: fromId || (direction === "OUT" ? pageId : customerPsid),
+                senderName:
+                  fromName ||
+                  (direction === "OUT"
+                    ? "The 1970"
+                    : safeText(params.customerName) || `Khách ${last6(customerPsid)}`),
+                sentAt: new Date(sentAt.getTime() + index + (messageText ? 1 : 0)),
+              },
+            });
+            imported += 1;
+          }
+        }
+
+        this.messengerHistoryBackfillDone.add(key);
+        this.logger.log(
+          `[META_HISTORY_BACKFILL_OK] page=${pageId} psid=${last6(customerPsid)} thread=${metaConversationId} fetched=${rows.length} imported=${imported} skipped=${skipped}`,
+        );
+        return {
+          ok: true,
+          threadId: metaConversationId,
+          fetched: rows.length,
+          imported,
+          skipped,
+        };
+      } catch (error: any) {
+        // Backfill chỉ là bổ sung lịch sử. Không được làm webhook tin mới fail vì
+        // thiếu quyền Conversations API / lỗi Meta tạm thời.
+        this.logger.warn(
+          `[META_HISTORY_BACKFILL_SKIP] page=${pageId} psid=${last6(customerPsid)} conversation=${conversationId} | ${error?.message || error}`,
+        );
+        return { skipped: true, reason: safeText(error?.message) || "backfill_failed" };
+      } finally {
+        this.messengerHistoryBackfillRunning.delete(key);
+      }
+    })();
+
+    this.messengerHistoryBackfillRunning.set(key, job);
+    return job;
   }
 
   private async metaPost<T = any>(
@@ -2138,6 +2344,33 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
+    // Nếu nhân viên mở thread ngay khi webhook vừa tới, chờ đúng job lazy backfill
+    // của khách này hoàn tất để lịch sử cũ xuất hiện ngay trong response đầu tiên.
+    if (
+      (item as any).channel === "FACEBOOK" &&
+      !safeText((item as any).providerThreadId).startsWith("FACEBOOK_COMMENT:")
+    ) {
+      const parts = safeText((item as any).providerThreadId).split(":");
+      const pageProviderId = safeText(parts[1] || (item as any).page?.providerPageId);
+      const customerPsid = safeText(
+        (item as any).customer?.providerUserId || parts.slice(2).join(":"),
+      );
+      if (pageProviderId && customerPsid) {
+        await this.backfillMessengerHistoryForCustomer({
+          pageId: pageProviderId,
+          customerPsid,
+          conversationId: id,
+          customerName: (item as any).customer?.name,
+        });
+        // Backfill có thể vừa thêm message cũ nên lấy lại list trước khi trả frontend.
+        (item as any).messages = await this.prisma.omniMessage.findMany({
+          where: { conversationId: id },
+          orderBy: { sentAt: "desc" },
+          take: 200,
+        });
+      }
+    }
+
     if (safeText((item as any).providerThreadId).startsWith("FACEBOOK_COMMENT:")) {
       try {
         const synced = await this.syncFacebookCommentReplies(item as any);
@@ -3673,6 +3906,18 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
           }),
         );
       }
+    }
+
+    // Khách vừa gửi tin mới: chỉ backfill lịch sử của CHÍNH khách này.
+    // Chạy nền để webhook trả 200 nhanh; getConversation() sẽ await cùng job nếu
+    // nhân viên mở thread ngay lập tức. Không có vòng lặp toàn bộ conversations Page.
+    if (hasMessage) {
+      void this.backfillMessengerHistoryForCustomer({
+        pageId: recipientId,
+        customerPsid: senderId,
+        conversationId: conversation.id,
+        customerName: customer.name,
+      });
     }
 
     if (adReferral) {
