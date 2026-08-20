@@ -3213,6 +3213,8 @@ model FabricReceipt {
   status              FabricReceiptStatus @default(DRAFT)
   receivedAt          DateTime?
   completedAt         DateTime?
+  receivedByStaffId   String?
+  receivedByName      String?
   note                String?
   createdById         String?
   createdByName       String?
@@ -3225,6 +3227,7 @@ model FabricReceipt {
   supplier            FabricSupplier?     @relation(fields: [supplierId], references: [id], onDelete: SetNull)
   branch              Branch?             @relation(fields: [branchId], references: [id], onDelete: SetNull)
   rolls               FabricReceiptRoll[]
+  fabricCosts         FabricReceiptFabricCost[]
   measurements        FabricMeasurement[]
   images              FabricReceiptImage[]
 
@@ -3235,19 +3238,24 @@ model FabricReceipt {
   @@index([branchId])
   @@index([status])
   @@index([receivedAt])
+  @@index([receivedByStaffId])
   @@index([updatedAt])
 }
 
 model FabricReceiptRoll {
-  id                  String        @id @default(cuid())
+  id                  String          @id @default(cuid())
   fabricReceiptId     String
+  sortOrder           Int             @default(0)
+  fabricCode          String?
   rollCode            String?
   colorName           String?
   colorCode           String?
-  supplierDeclaredM   Decimal?      @db.Decimal(12, 3)
-  supplierDeclaredKg  Decimal?      @db.Decimal(12, 3)
-  actualM             Decimal?      @db.Decimal(12, 3)
-  actualKg            Decimal?      @db.Decimal(12, 3)
+  supplierDeclaredM   Decimal?        @db.Decimal(12, 3)
+  supplierDeclaredKg  Decimal?        @db.Decimal(12, 3)
+  actualM             Decimal?        @db.Decimal(12, 3)
+  actualKg            Decimal?        @db.Decimal(12, 3)
+  unitPriceCny        Decimal?        @db.Decimal(14, 4)
+  priceUnit           FabricPriceUnit @default(METER)
   defectNote          String?
   passed              Boolean       @default(true)
   createdAt           DateTime      @default(now())
@@ -3258,6 +3266,25 @@ model FabricReceiptRoll {
   images              FabricReceiptImage[]
 
   @@index([fabricReceiptId])
+  @@index([fabricReceiptId, sortOrder])
+  @@index([fabricCode])
+}
+
+model FabricReceiptFabricCost {
+  id                 String        @id @default(cuid())
+  fabricReceiptId    String
+  fabricCode         String
+  chinaShippingCny   Decimal?      @db.Decimal(14, 2)
+  vietnamShippingVnd Decimal?      @db.Decimal(14, 2)
+  note               String?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  fabricReceipt      FabricReceipt @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
+
+  @@unique([fabricReceiptId, fabricCode])
+  @@index([fabricReceiptId])
+  @@index([fabricCode])
 }
 
 model FabricMeasurement {

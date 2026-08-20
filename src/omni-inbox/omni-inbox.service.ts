@@ -177,6 +177,61 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     return json as T;
   }
 
+  private isGenericMetaPageSenderName(value?: string | null) {
+    const name = safeText(value).toLocaleLowerCase("vi-VN");
+    if (!name) return true;
+    const configuredNames = new Set([
+      "the 1970",
+      "facebook page",
+      safeText(this.configuredPageId).toLocaleLowerCase("vi-VN"),
+    ]);
+    return configuredNames.has(name) || name.startsWith("page ");
+  }
+
+  /**
+   * Meta Conversations API chỉ trả `from` là Page cho tin OUT nên không có tên
+   * nhân viên Business Suite. Nếu tin đó từng được gửi qua Omni Inbox, DB local
+   * đã có senderName thật. Ghép theo nội dung + thời điểm để giữ lại đúng nhân viên.
+   */
+  private async findKnownLocalOutboundSender(params: {
+    conversationId: string;
+    sentAt: Date;
+    text?: string | null;
+    type?: "TEXT" | "IMAGE";
+    excludeId?: string | null;
+  }) {
+    const windowMs = params.type === "IMAGE" ? 15_000 : 120_000;
+    const from = new Date(params.sentAt.getTime() - windowMs);
+    const to = new Date(params.sentAt.getTime() + windowMs);
+    const where: any = {
+      conversationId: params.conversationId,
+      direction: "OUT",
+      sentAt: { gte: from, lte: to },
+    };
+    if (params.excludeId) where.id = { not: params.excludeId };
+    if (params.type) where.type = params.type;
+    if (safeText(params.text)) where.text = safeText(params.text);
+
+    const candidates = await this.prisma.omniMessage.findMany({
+      where,
+      orderBy: { sentAt: "desc" },
+      take: 10,
+      select: {
+        id: true,
+        senderId: true,
+        senderName: true,
+        providerMessageId: true,
+        sentAt: true,
+      },
+    });
+
+    return (candidates || []).find(
+      (item: any) =>
+        safeText(item?.senderName) &&
+        !this.isGenericMetaPageSenderName(item?.senderName),
+    ) || null;
+  }
+
   /**
    * Lấy lịch sử gần nhất của đúng 1 khách Messenger khi khách đó quay lại nhắn.
    * Không bao giờ quét /{PAGE_ID}/conversations toàn bộ Page.
@@ -266,26 +321,78 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
             continue;
           }
 
-          const existed = await this.prisma.omniMessage.findUnique({
-            where: { providerMessageId },
-            select: { id: true },
-          });
-          if (existed) {
-            skipped += 1;
-            continue;
-          }
-
           const fromId = safeText(raw?.from?.id);
           const fromName = safeText(raw?.from?.name);
           const direction = fromId === pageId ? "OUT" : "IN";
           const sentAtRaw = raw?.created_time ? new Date(raw.created_time) : new Date();
           const sentAt = Number.isNaN(sentAtRaw.getTime()) ? new Date() : sentAtRaw;
           const messageText = safeText(raw?.message);
+
+          const existed = await this.prisma.omniMessage.findUnique({
+            where: { providerMessageId },
+            select: {
+              id: true,
+              senderId: true,
+              senderName: true,
+              direction: true,
+              text: true,
+              type: true,
+              sentAt: true,
+            },
+          });
+          if (existed) {
+            // Backfill cũ có thể đã ghi OUT = "The 1970". Nếu local còn một
+            // message cùng nội dung/thời điểm có tên nhân viên thật thì phục hồi.
+            if (
+              direction === "OUT" &&
+              this.isGenericMetaPageSenderName((existed as any)?.senderName)
+            ) {
+              const knownSender = await this.findKnownLocalOutboundSender({
+                conversationId,
+                sentAt,
+                text: messageText || (existed as any)?.text,
+                type: (existed as any)?.type === "IMAGE" ? "IMAGE" : "TEXT",
+                excludeId: existed.id,
+              });
+              if (knownSender) {
+                await this.prisma.omniMessage.update({
+                  where: { id: existed.id },
+                  data: {
+                    senderId: knownSender.senderId || null,
+                    senderName: knownSender.senderName,
+                  },
+                });
+                this.logger.log(
+                  `[META_HISTORY_SENDER_REPAIRED] conversation=${conversationId} message=${providerMessageId} sender=${safeText(knownSender.senderName)}`,
+                );
+              }
+            }
+            skipped += 1;
+            continue;
+          }
           const attachmentRows = Array.isArray(raw?.attachments?.data)
             ? raw.attachments.data
             : [];
 
+          const knownSender = direction === "OUT"
+            ? await this.findKnownLocalOutboundSender({
+                conversationId,
+                sentAt,
+                text: messageText || null,
+                type: messageText || !attachmentRows.length ? "TEXT" : "IMAGE",
+              })
+            : null;
+
           if (messageText || !attachmentRows.length) {
+            // Nếu đã có message local cũ (thường providerMessageId=null) do Omni
+            // gửi, gắn Meta id vào chính row đó thay vì tạo thêm row "The 1970".
+            if (knownSender && !safeText(knownSender.providerMessageId)) {
+              await this.prisma.omniMessage.update({
+                where: { id: knownSender.id },
+                data: { providerMessageId, sentAt },
+              });
+              skipped += 1;
+            } else {
             await this.prisma.omniMessage.create({
               data: {
                 conversationId,
@@ -296,6 +403,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
                 attachmentUrl: null,
                 senderId: fromId || (direction === "OUT" ? pageId : customerPsid),
                 senderName:
+                  safeText(knownSender?.senderName) ||
                   fromName ||
                   (direction === "OUT"
                     ? "The 1970"
@@ -304,6 +412,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
               },
             });
             imported += 1;
+            }
           }
 
           // Nếu Meta trả attachment cùng message text, lưu attachment bằng synthetic
@@ -338,6 +447,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
                 attachmentUrl,
                 senderId: fromId || (direction === "OUT" ? pageId : customerPsid),
                 senderName:
+                  safeText(knownSender?.senderName) ||
                   fromName ||
                   (direction === "OUT"
                     ? "The 1970"
@@ -2947,22 +3057,41 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    const message = await this.prisma.omniMessage.create({
-      data: {
-        conversationId: id,
-        providerMessageId:
-          conversation.channel === "FACEBOOK"
-            ? metaProviderMessageId
-            : null,
-        direction: "OUT",
-        type: safeText(dto.attachmentUrl) ? "IMAGE" : "TEXT",
-        text,
-        attachmentUrl: safeText(dto.attachmentUrl) || null,
-        senderId: staff?.id || staff?.sub || null,
-        senderName: staff?.name || staff?.username || "Admin",
-        sentAt: now,
-      },
-    });
+    const actualSenderId = staff?.id || staff?.sub || null;
+    const actualSenderName = staff?.name || staff?.username || "Admin";
+    const messageData: any = {
+      conversationId: id,
+      providerMessageId:
+        conversation.channel === "FACEBOOK"
+          ? metaProviderMessageId
+          : null,
+      direction: "OUT",
+      type: safeText(dto.attachmentUrl) ? "IMAGE" : "TEXT",
+      text,
+      attachmentUrl: safeText(dto.attachmentUrl) || null,
+      senderId: actualSenderId,
+      senderName: actualSenderName,
+      sentAt: now,
+    };
+
+    // Echo của Meta có thể tới trước response POST /messages và tạo row OUT với
+    // senderName=The 1970. Khi API gửi xong, overwrite row đó bằng đúng nhân viên
+    // đang đăng nhập thay vì để tên Page cố định hoặc vướng unique providerMessageId.
+    let message: any;
+    if (conversation.channel === "FACEBOOK" && metaProviderMessageId) {
+      const echoed = await this.prisma.omniMessage.findUnique({
+        where: { providerMessageId: metaProviderMessageId },
+        select: { id: true },
+      });
+      message = echoed
+        ? await this.prisma.omniMessage.update({
+            where: { id: echoed.id },
+            data: messageData,
+          })
+        : await this.prisma.omniMessage.create({ data: messageData });
+    } else {
+      message = await this.prisma.omniMessage.create({ data: messageData });
+    }
 
     const updated = await this.prisma.omniConversation.update({
       where: { id },

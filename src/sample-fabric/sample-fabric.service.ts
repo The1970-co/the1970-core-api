@@ -143,20 +143,38 @@ export class SampleFabricService {
     return { id: supplier.id, code: supplier.code, name: null, phone: null, email: null, address: null, note: null };
   }
 
+  private rollPriceQty(roll:any) {
+    const unit=String(roll?.priceUnit || "METER").toUpperCase();
+    if (unit === "ROLL") return 1;
+    if (unit === "KG") return Number(this.n(roll?.actualKg) || this.n(roll?.supplierDeclaredKg) || 0);
+    return Number(this.n(roll?.actualM) || this.n(roll?.supplierDeclaredM) || 0);
+  }
+
+  private receiptCostSummary(row:any) {
+    const rate=Number(this.n(row?.exchangeRateToVnd) || 0);
+    const rolls=(Array.isArray(row?.rolls)?row.rolls:[]).map((roll:any)=>{
+      const qty=this.rollPriceQty(roll);
+      const unitPriceCny=Number(this.n(roll?.unitPriceCny) || 0);
+      const lineAmountCny=qty*unitPriceCny;
+      return {...roll,priceQty:qty,lineAmountCny,lineAmountVnd:rate>0?lineAmountCny*rate:0};
+    });
+    const fabricCosts=Array.isArray(row?.fabricCosts)?row.fabricCosts:[];
+    const goodsCny=rolls.reduce((sum:number,x:any)=>sum+Number(x.lineAmountCny||0),0);
+    const chinaShippingCny=fabricCosts.reduce((sum:number,x:any)=>sum+Number(this.n(x?.chinaShippingCny)||0),0);
+    const vietnamShippingVnd=fabricCosts.reduce((sum:number,x:any)=>sum+Number(this.n(x?.vietnamShippingVnd)||0),0);
+    const goodsVnd=rate>0?goodsCny*rate:0;
+    const chinaShippingVnd=rate>0?chinaShippingCny*rate:0;
+    const totalShippingVnd=chinaShippingVnd+vietnamShippingVnd;
+    return {rolls,fabricCosts,summary:{exchangeRateToVnd:rate,goodsCny,goodsVnd,chinaShippingCny,chinaShippingVnd,vietnamShippingVnd,totalShippingVnd,grandTotalVnd:goodsVnd+totalShippingVnd}};
+  }
+
   private receiptForUser(row: any, user?: any) {
     if (!row) return row;
     const canViewCost = user === undefined || this.userHas(user, "fabric_receipt.cost.view") || this.userHas(user, "fabric_receipt.cost.edit");
-    return {
-      ...row,
-      supplier: this.supplierForUser(row.supplier, user),
-      ...(canViewCost ? {} : {
-        unitPrice: null,
-        priceUnit: null,
-        priceCurrency: null,
-        exchangeRateToVnd: null,
-        unitPriceVnd: null,
-      }),
-    };
+    const rollTotals = Array.isArray(row.rolls) && row.rolls.length ? this.receiptTotalsFromRolls(row.rolls, row) : null;
+    const priced=this.receiptCostSummary(row);
+    if (canViewCost) return {...row,...(rollTotals||{}),rolls:priced.rolls,fabricCosts:priced.fabricCosts,costSummary:priced.summary,supplier:this.supplierForUser(row.supplier,user)};
+    return {...row,...(rollTotals||{}),rolls:(Array.isArray(row.rolls)?row.rolls:[]).map((x:any)=>({...x,unitPriceCny:null,priceUnit:null,lineAmountCny:null,lineAmountVnd:null,priceQty:null})),fabricCosts:[],costSummary:null,supplier:this.supplierForUser(row.supplier,user),unitPrice:null,priceUnit:null,priceCurrency:null,exchangeRateToVnd:null,unitPriceVnd:null};
   }
 
   async listFabricSuppliers(user?: any) {
@@ -930,14 +948,15 @@ export class SampleFabricService {
   // FABRIC RECEIPTS
   // -------------------------
   async fabricMeta(user?: any) {
-    const [suppliers, branches, samples, boards] = await Promise.all([
+    const [suppliers, branches, staff, samples, boards] = await Promise.all([
       this.listFabricSuppliers(user),
       this.prisma.branch.findMany({ where: { isActive: true }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
+      this.prisma.staffUser.findMany({ where: { isActive: true }, select: { id: true, code: true, name: true, branchId: true }, orderBy: { name: "asc" } }),
       this.prisma.designSample.findMany({ select: { id: true, code: true, name: true, year: true, fabricBoardId: true, fabricColorId: true, fabricColorName: true, fabricColorCode: true }, orderBy: [{ year: "desc" }, { updatedAt: "desc" }] }),
       this.prisma.fabricBoard.findMany({ where: { isActive: true }, include: { supplier: true, colors: true }, orderBy: { updatedAt: "desc" } }),
     ]);
     const safeBoards = boards.map((board: any) => ({ ...board, supplier: this.supplierForUser(board.supplier, user) }));
-    return { suppliers, branches, samples, boards: safeBoards };
+    return { suppliers, branches, staff, samples, boards: safeBoards };
   }
 
   async listFabricReceipts(query: { q?: string; status?: string; branchId?: string; supplierId?: string } | undefined, user?: any) {
@@ -964,7 +983,8 @@ export class SampleFabricService {
         designSample: { select: { id: true, code: true, name: true, year: true } },
         fabricBoard: { select: { id: true, boardCode: true, fabricCode: true, name: true } },
         fabricColor: { select: { id: true, name: true, code: true } },
-        rolls: { include: { images: { orderBy: { createdAt: "desc" } } }, orderBy: { createdAt: "asc" } },
+        rolls: { include: { images: { orderBy: { createdAt: "desc" } } }, orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] },
+        fabricCosts: { orderBy: { fabricCode: "asc" } },
         measurements: { orderBy: { createdAt: "desc" } },
         images: { orderBy: { createdAt: "desc" } },
       },
@@ -973,19 +993,38 @@ export class SampleFabricService {
     return rows.map((row: any) => this.receiptForUser(row, user));
   }
 
+  private receiptTotalsFromRolls(rolls:any[],body:any){
+    const sum=(key:string)=>{
+      const entered=rolls.filter(x=>x?.[key]!==null&&x?.[key]!==undefined&&String(x[key]).trim()!=="");
+      return entered.length?entered.reduce((total,x)=>total+Number(this.n(x[key])||0),0):this.n(body?.[key]);
+    };
+    return {supplierDeclaredM:sum("supplierDeclaredM"),supplierDeclaredKg:sum("supplierDeclaredKg"),actualM:sum("actualM"),actualKg:sum("actualKg")};
+  }
+
+  private async receiptReceiverSnapshot(staffId?:string|null){
+    const id=String(staffId||"").trim();if(!id)return null;
+    const row=await this.prisma.staffUser.findFirst({where:{id,isActive:true},select:{id:true,name:true}});
+    if(!row)throw new BadRequestException("Nhân viên nhận vải không tồn tại hoặc đã ngừng hoạt động.");
+    return row;
+  }
+
   async createFabricReceipt(body: any, user?: Actor) {
     const actor = this.actor(user);
     const receiptCode = String(body?.receiptCode || "").trim() || await this.nextFabricReceiptCode(body?.receivedAt);
     const rolls = Array.isArray(body?.rolls) ? body.rolls : [];
     const status = (body?.status || "DRAFT") as FabricReceiptStatus;
-    const board = body?.fabricBoardId ? await this.prisma.fabricBoard.findUnique({ where: { id: body.fabricBoardId } }) : null;
-    const color = body?.fabricColorId ? await this.prisma.fabricBoardColor.findUnique({ where: { id: body.fabricColorId } }) : null;
+    const canLinkBoard = this.userHas(user, "fabric_receipt.fabric_board_link");
+    const board = canLinkBoard && body?.fabricBoardId ? await this.prisma.fabricBoard.findUnique({ where: { id: body.fabricBoardId } }) : null;
+    const totals=this.receiptTotalsFromRolls(rolls,body);
+    const receiver=await this.receiptReceiverSnapshot(body?.receivedByStaffId);
+    const canEditCost=this.userHas(user, "fabric_receipt.cost.edit");
+    const color = canLinkBoard && body?.fabricColorId ? await this.prisma.fabricBoardColor.findUnique({ where: { id: body.fabricColorId } }) : null;
     const created = await this.prisma.fabricReceipt.create({
       data: {
         receiptCode,
         designSampleId: body?.designSampleId || null,
-        fabricBoardId: body?.fabricBoardId || null,
-        fabricColorId: body?.fabricColorId || null,
+        fabricBoardId: canLinkBoard ? (body?.fabricBoardId || null) : null,
+        fabricColorId: canLinkBoard ? (body?.fabricColorId || null) : null,
         supplierId: body?.supplierId || board?.supplierId || null,
         branchId: body?.branchId || null,
         fabricBoardCode: body?.fabricBoardCode || board?.boardCode || null,
@@ -994,18 +1033,22 @@ export class SampleFabricService {
         colorName: body?.colorName || color?.name || null,
         colorCode: this.normalizeColorCodes(body?.colorCode || color?.code),
         lotCode: body?.lotCode || null,
-        supplierDeclaredM: this.n(body?.supplierDeclaredM),
-        supplierDeclaredKg: this.n(body?.supplierDeclaredKg),
-        actualM: this.n(body?.actualM),
-        actualKg: this.n(body?.actualKg),
+        supplierDeclaredM: totals.supplierDeclaredM,
+        supplierDeclaredKg: totals.supplierDeclaredKg,
+        actualM: totals.actualM,
+        actualKg: totals.actualKg,
         rollCount: Number(body?.rollCount || rolls.length || 0),
         expectedGsm: this.n(body?.expectedGsm) ?? board?.expectedGsm ?? null,
         status,
         receivedAt: body?.receivedAt ? new Date(body.receivedAt) : null,
         note: body?.note || null,
+        receivedByStaffId: receiver?.id || null,
+        receivedByName: receiver?.name || null,
         createdById: actor.id,
         createdByName: actor.name,
-        rolls: { create: rolls.map((x: any) => ({
+        rolls: { create: rolls.map((x: any,index:number) => ({
+          sortOrder: Number(x.sortOrder || index + 1),
+          fabricCode: String(x.fabricCode || body?.fabricCode || "").trim().toUpperCase() || null,
           rollCode: x.rollCode || null,
           colorName: String(x.colorName || body?.colorName || color?.name || "").trim() || null,
           colorCode: this.normalizeColorCode(x.colorCode || body?.colorCode || color?.code),
@@ -1013,11 +1056,19 @@ export class SampleFabricService {
           supplierDeclaredKg: this.n(x.supplierDeclaredKg),
           actualM: this.n(x.actualM),
           actualKg: this.n(x.actualKg),
+          unitPriceCny: canEditCost ? this.n(x.unitPriceCny) : null,
+          priceUnit: canEditCost && ["METER","KG","ROLL"].includes(String(x.priceUnit||"METER").toUpperCase()) ? String(x.priceUnit||"METER").toUpperCase() as any : "METER",
           defectNote: x.defectNote || null,
           passed: x.passed !== false,
         })) },
+        fabricCosts: canEditCost && Array.isArray(body?.fabricCosts) ? { create: body.fabricCosts.map((x:any)=>({
+          fabricCode:String(x.fabricCode||"").trim().toUpperCase(),
+          chinaShippingCny:this.n(x.chinaShippingCny),
+          vietnamShippingVnd:this.n(x.vietnamShippingVnd),
+          note:String(x.note||"").trim()||null,
+        })).filter((x:any)=>x.fabricCode) } : undefined,
       },
-      include: { supplier: true, branch: true, designSample: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, measurements: true, images: true },
+      include: { supplier: true, branch: true, designSample: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, fabricCosts: { orderBy: { fabricCode: "asc" } }, measurements: true, images: true },
     });
     return this.receiptForUser(created, user);
   }
@@ -1027,12 +1078,18 @@ export class SampleFabricService {
     if (!found) throw new NotFoundException("Không tìm thấy phiếu vải về.");
     if (found.status === "COMPLETED") throw new BadRequestException("Phiếu đã hoàn tất.");
     const updated = await this.prisma.$transaction(async (tx) => {
-      const board = body?.fabricBoardId ? await tx.fabricBoard.findUnique({ where: { id: body.fabricBoardId } }) : null;
-      const color = body?.fabricColorId ? await tx.fabricBoardColor.findUnique({ where: { id: body.fabricColorId } }) : null;
+      const canLinkBoard = this.userHas(user, "fabric_receipt.fabric_board_link");
+      const board = canLinkBoard && body?.fabricBoardId ? await tx.fabricBoard.findUnique({ where: { id: body.fabricBoardId } }) : null;
+      const color = canLinkBoard && body?.fabricColorId ? await tx.fabricBoardColor.findUnique({ where: { id: body.fabricColorId } }) : null;
+      const receiver = body?.receivedByStaffId !== undefined ? await this.receiptReceiverSnapshot(body.receivedByStaffId) : undefined;
+      const canEditCost=this.userHas(user, "fabric_receipt.cost.edit");
+      const totals = Array.isArray(body?.rolls) ? this.receiptTotalsFromRolls(body.rolls,body) : null;
       if (Array.isArray(body?.rolls)) {
         const keepIds: string[] = [];
         for (const x of body.rolls) {
           const data = {
+            sortOrder: Number(x.sortOrder || keepIds.length + 1),
+            fabricCode: String(x.fabricCode || body?.fabricCode || "").trim().toUpperCase() || null,
             rollCode: x.rollCode || null,
             colorName: String(x.colorName || body?.colorName || color?.name || "").trim() || null,
             colorCode: this.normalizeColorCode(x.colorCode || body?.colorCode || color?.code),
@@ -1040,6 +1097,7 @@ export class SampleFabricService {
             supplierDeclaredKg: this.n(x.supplierDeclaredKg),
             actualM: this.n(x.actualM),
             actualKg: this.n(x.actualKg),
+            ...(canEditCost ? {unitPriceCny:this.n(x.unitPriceCny),priceUnit:(["METER","KG","ROLL"].includes(String(x.priceUnit||"METER").toUpperCase())?String(x.priceUnit||"METER").toUpperCase():"METER") as any}:{}),
             defectNote: x.defectNote || null,
             passed: x.passed !== false,
           };
@@ -1056,12 +1114,26 @@ export class SampleFabricService {
         }
         await tx.fabricReceiptRoll.deleteMany({ where: { fabricReceiptId: id, ...(keepIds.length ? { id: { notIn: keepIds } } : {}) } });
       }
+      if (canEditCost && Array.isArray(body?.fabricCosts)) {
+        const keepCostIds:string[]=[];
+        for (const x of body.fabricCosts) {
+          const fabricCode=String(x?.fabricCode||"").trim().toUpperCase();
+          if(!fabricCode) continue;
+          const data={fabricCode,chinaShippingCny:this.n(x.chinaShippingCny),vietnamShippingVnd:this.n(x.vietnamShippingVnd),note:String(x.note||"").trim()||null};
+          if(x.id){
+            const exists=await tx.fabricReceiptFabricCost.findFirst({where:{id:x.id,fabricReceiptId:id},select:{id:true}});
+            if(exists){await tx.fabricReceiptFabricCost.update({where:{id:x.id},data});keepCostIds.push(x.id);continue;}
+          }
+          const made=await tx.fabricReceiptFabricCost.create({data:{fabricReceiptId:id,...data}});keepCostIds.push(made.id);
+        }
+        await tx.fabricReceiptFabricCost.deleteMany({where:{fabricReceiptId:id,...(keepCostIds.length?{id:{notIn:keepCostIds}}:{})}});
+      }
       return tx.fabricReceipt.update({
         where: { id },
         data: {
           ...(body?.designSampleId !== undefined ? { designSampleId: body.designSampleId || null } : {}),
-          ...(body?.fabricBoardId !== undefined ? { fabricBoardId: body.fabricBoardId || null } : {}),
-          ...(body?.fabricColorId !== undefined ? { fabricColorId: body.fabricColorId || null } : {}),
+          ...(canLinkBoard && body?.fabricBoardId !== undefined ? { fabricBoardId: body.fabricBoardId || null } : {}),
+          ...(canLinkBoard && body?.fabricColorId !== undefined ? { fabricColorId: body.fabricColorId || null } : {}),
           ...(body?.supplierId !== undefined || board ? { supplierId: body.supplierId || board?.supplierId || null } : {}),
           ...(body?.branchId !== undefined ? { branchId: body.branchId || null } : {}),
           ...(body?.fabricBoardCode !== undefined || board ? { fabricBoardCode: body.fabricBoardCode || board?.boardCode || null } : {}),
@@ -1070,17 +1142,20 @@ export class SampleFabricService {
           ...(body?.colorName !== undefined || color ? { colorName: body.colorName || color?.name || null } : {}),
           ...(body?.colorCode !== undefined || color ? { colorCode: this.normalizeColorCodes(body.colorCode || color?.code) } : {}),
           ...(body?.lotCode !== undefined ? { lotCode: body.lotCode || null } : {}),
-          ...(body?.supplierDeclaredM !== undefined ? { supplierDeclaredM: this.n(body.supplierDeclaredM) } : {}),
-          ...(body?.supplierDeclaredKg !== undefined ? { supplierDeclaredKg: this.n(body.supplierDeclaredKg) } : {}),
-          ...(body?.actualM !== undefined ? { actualM: this.n(body.actualM) } : {}),
-          ...(body?.actualKg !== undefined ? { actualKg: this.n(body.actualKg) } : {}),
+          ...(totals ? { supplierDeclaredM: totals.supplierDeclaredM, supplierDeclaredKg: totals.supplierDeclaredKg, actualM: totals.actualM, actualKg: totals.actualKg } : {
+            ...(body?.supplierDeclaredM !== undefined ? { supplierDeclaredM: this.n(body.supplierDeclaredM) } : {}),
+            ...(body?.supplierDeclaredKg !== undefined ? { supplierDeclaredKg: this.n(body.supplierDeclaredKg) } : {}),
+            ...(body?.actualM !== undefined ? { actualM: this.n(body.actualM) } : {}),
+            ...(body?.actualKg !== undefined ? { actualKg: this.n(body.actualKg) } : {}),
+          }),
           ...(body?.rollCount !== undefined || Array.isArray(body?.rolls) ? { rollCount: Number(body?.rollCount || body?.rolls?.length || 0) } : {}),
           ...(body?.expectedGsm !== undefined ? { expectedGsm: this.n(body.expectedGsm) } : {}),
           ...(body?.status !== undefined ? { status: body.status as FabricReceiptStatus } : {}),
           ...(body?.receivedAt !== undefined ? { receivedAt: body.receivedAt ? new Date(body.receivedAt) : null } : {}),
+          ...(body?.receivedByStaffId !== undefined ? { receivedByStaffId: receiver?.id || null, receivedByName: receiver?.name || null } : {}),
           ...(body?.note !== undefined ? { note: body.note || null } : {}),
         },
-        include: { supplier: true, branch: true, designSample: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, measurements: true, images: true },
+        include: { supplier: true, branch: true, designSample: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, fabricCosts: { orderBy: { fabricCode: "asc" } }, measurements: true, images: true },
       });
     });
     return this.receiptForUser(updated, user);
@@ -1122,6 +1197,8 @@ export class SampleFabricService {
     return this.prisma.fabricReceiptRoll.update({
       where: { id: rollId },
       data: {
+        ...(body?.sortOrder !== undefined ? { sortOrder: Number(body.sortOrder || 0) } : {}),
+        ...(body?.fabricCode !== undefined ? { fabricCode: String(body.fabricCode || "").trim().toUpperCase() || null } : {}),
         ...(body?.rollCode !== undefined ? { rollCode: String(body.rollCode || "").trim() || null } : {}),
         ...(body?.colorName !== undefined ? { colorName: String(body.colorName || "").trim() || null } : {}),
         ...(body?.colorCode !== undefined ? { colorCode: this.normalizeColorCode(body.colorCode) } : {}),
