@@ -219,8 +219,34 @@ export const PERMISSIONS = {
   MOBILE_PAGE_PRODUCTION: "mobile.page.production",
   MOBILE_PAGE_ACCESSORIES: "mobile.page.accessories",
 
-  // Production / accessories
+  // Web production / materials menus
+  MENU_SAMPLE_FABRIC: "menu.sample_fabric",
+  MENU_FABRIC_LIBRARY: "menu.fabric_library",
+  MENU_DESIGN_SAMPLES: "menu.design_samples",
   MENU_MEASUREMENT_LIBRARY: "menu.measurement_library",
+  MENU_FABRIC_RECEIPTS: "menu.fabric_receipts",
+
+  // Fabric library
+  FABRIC_LIBRARY_VIEW: "fabric_library.view",
+  FABRIC_LIBRARY_CREATE: "fabric_library.create",
+  FABRIC_LIBRARY_EDIT: "fabric_library.edit",
+  FABRIC_LIBRARY_UPLOAD_IMAGES: "fabric_library.upload_images",
+  FABRIC_LIBRARY_DELETE: "fabric_library.delete",
+
+  // Design samples
+  DESIGN_SAMPLE_VIEW: "design_sample.view",
+  DESIGN_SAMPLE_CREATE: "design_sample.create",
+  DESIGN_SAMPLE_EDIT: "design_sample.edit",
+  DESIGN_SAMPLE_UPLOAD_IMAGES: "design_sample.upload_images",
+  DESIGN_SAMPLE_DELETE: "design_sample.delete",
+
+  // Sample dispatch
+  SAMPLE_DISPATCH_VIEW: "sample_dispatch.view",
+  SAMPLE_DISPATCH_CREATE: "sample_dispatch.create",
+  SAMPLE_DISPATCH_EDIT: "sample_dispatch.edit",
+  SAMPLE_DISPATCH_DELETE: "sample_dispatch.delete",
+
+  // Measurement library
   MEASUREMENT_LIBRARY_VIEW: "measurement_library.view",
   MEASUREMENT_LIBRARY_CREATE: "measurement_library.create",
   MEASUREMENT_LIBRARY_EDIT: "measurement_library.edit",
@@ -238,6 +264,16 @@ export const PERMISSIONS = {
   ACCESSORIES_SUPPLIER_IDENTITY_VIEW: "accessories.supplier_identity.view",
   ACCESSORIES_MANAGE: "accessories.manage",
   ACCESSORIES_STOCK: "accessories.stock",
+
+  // Fabric receipt
+  FABRIC_RECEIPT_VIEW: "fabric_receipt.view",
+  FABRIC_RECEIPT_CREATE: "fabric_receipt.create",
+  FABRIC_RECEIPT_EDIT: "fabric_receipt.edit",
+  FABRIC_RECEIPT_MEASURE: "fabric_receipt.measure",
+  FABRIC_RECEIPT_UPLOAD_IMAGES: "fabric_receipt.upload_images",
+  FABRIC_RECEIPT_APPROVE_VARIANCE: "fabric_receipt.approve_variance",
+  FABRIC_RECEIPT_COMPLETE: "fabric_receipt.complete",
+  FABRIC_RECEIPT_DELETE: "fabric_receipt.delete",
 
   // Fabric receipt sensitive fields
   FABRIC_RECEIPT_SUPPLIER_IDENTITY_VIEW: "fabric_receipt.supplier_identity.view",
