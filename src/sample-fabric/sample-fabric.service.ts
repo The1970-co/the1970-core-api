@@ -151,20 +151,15 @@ export class SampleFabricService {
   }
 
   private receiptCostSummary(row:any) {
-    const rate=Number(this.n(row?.exchangeRateToVnd) || 0);
-    const rolls=(Array.isArray(row?.rolls)?row.rolls:[]).map((roll:any)=>{
-      const qty=this.rollPriceQty(roll);
-      const unitPriceCny=Number(this.n(roll?.unitPriceCny) || 0);
-      const lineAmountCny=qty*unitPriceCny;
-      return {...roll,priceQty:qty,lineAmountCny,lineAmountVnd:rate>0?lineAmountCny*rate:0};
-    });
-    const fabricCosts=Array.isArray(row?.fabricCosts)?row.fabricCosts:[];
-    const goodsCny=rolls.reduce((sum:number,x:any)=>sum+Number(x.lineAmountCny||0),0);
-    const chinaShippingCny=fabricCosts.reduce((sum:number,x:any)=>sum+Number(this.n(x?.chinaShippingCny)||0),0);
-    const vietnamShippingVnd=fabricCosts.reduce((sum:number,x:any)=>sum+Number(this.n(x?.vietnamShippingVnd)||0),0);
-    const goodsVnd=rate>0?goodsCny*rate:0;
-    const chinaShippingVnd=rate>0?chinaShippingCny*rate:0;
-    const totalShippingVnd=chinaShippingVnd+vietnamShippingVnd;
+    const rate=Number(this.n(row?.exchangeRateToVnd)||0);
+    const sourceRolls=Array.isArray(row?.rolls)?row.rolls:[];
+    const sourceCosts=Array.isArray(row?.fabricCosts)?row.fabricCosts:[];
+    const codeStats=new Map<string,any>();
+    for(const roll of sourceRolls){const code=String(roll?.fabricCode||row?.fabricCode||"").trim().toUpperCase();if(!code)continue;const current=codeStats.get(code)||{rollCount:0,totalKg:0,goodsCny:0};const qty=this.rollPriceQty(roll),unitPriceCny=Number(this.n(roll?.unitPriceCny)||0);current.rollCount+=1;current.totalKg+=Number(this.n(roll?.actualKg)||this.n(roll?.supplierDeclaredKg)||0);current.goodsCny+=qty*unitPriceCny;codeStats.set(code,current)}
+    const fabricCosts=sourceCosts.map((cost:any)=>{const code=String(cost?.fabricCode||"").trim().toUpperCase(),stats=codeStats.get(code)||{rollCount:0,totalKg:0,goodsCny:0},chinaShippingCny=Number(this.n(cost?.chinaShippingCny)||0),chinaShippingVnd=chinaShippingCny*rate,vnRate=Number(this.n(cost?.vietnamShippingRateVndPerKg)||0),legacyVn=Number(this.n(cost?.vietnamShippingVnd)||0),vietnamShippingVnd=vnRate>0?stats.totalKg*vnRate:legacyVn,totalShippingVnd=chinaShippingVnd+vietnamShippingVnd,goodsVnd=stats.goodsCny*rate;return{...cost,vietnamShippingRateVndPerKg:vnRate,vietnamShippingVnd,rollCount:stats.rollCount,totalKg:stats.totalKg,goodsCny:stats.goodsCny,goodsVnd,chinaShippingVnd,totalShippingVnd,shippingPerRollVnd:stats.rollCount?totalShippingVnd/stats.rollCount:0,fabricPerRollVnd:stats.rollCount?goodsVnd/stats.rollCount:0,landedPerRollVnd:stats.rollCount?(goodsVnd+totalShippingVnd)/stats.rollCount:0}});
+    const byCode=new Map(fabricCosts.map((x:any)=>[String(x.fabricCode||"").toUpperCase(),x]));
+    const rolls=sourceRolls.map((roll:any)=>{const qty=this.rollPriceQty(roll),unitPriceCny=Number(this.n(roll?.unitPriceCny)||0),lineAmountCny=qty*unitPriceCny,lineAmountVnd=lineAmountCny*rate,code=String(roll?.fabricCode||row?.fabricCode||"").trim().toUpperCase(),cc:any=byCode.get(code),allocatedShippingVnd=Number(cc?.shippingPerRollVnd||0);return{...roll,priceQty:qty,lineAmountCny,lineAmountVnd,allocatedShippingVnd,landedCostVnd:lineAmountVnd+allocatedShippingVnd}});
+    const goodsCny=rolls.reduce((sum:number,x:any)=>sum+Number(x.lineAmountCny||0),0),goodsVnd=goodsCny*rate,chinaShippingCny=fabricCosts.reduce((sum:number,x:any)=>sum+Number(this.n(x?.chinaShippingCny)||0),0),chinaShippingVnd=chinaShippingCny*rate,vietnamShippingVnd=fabricCosts.reduce((sum:number,x:any)=>sum+Number(x?.vietnamShippingVnd||0),0),totalShippingVnd=chinaShippingVnd+vietnamShippingVnd;
     return {rolls,fabricCosts,summary:{exchangeRateToVnd:rate,goodsCny,goodsVnd,chinaShippingCny,chinaShippingVnd,vietnamShippingVnd,totalShippingVnd,grandTotalVnd:goodsVnd+totalShippingVnd}};
   }
 
@@ -1064,6 +1059,7 @@ export class SampleFabricService {
         fabricCosts: canEditCost && Array.isArray(body?.fabricCosts) ? { create: body.fabricCosts.map((x:any)=>({
           fabricCode:String(x.fabricCode||"").trim().toUpperCase(),
           chinaShippingCny:this.n(x.chinaShippingCny),
+          vietnamShippingRateVndPerKg:this.n(x.vietnamShippingRateVndPerKg),
           vietnamShippingVnd:this.n(x.vietnamShippingVnd),
           note:String(x.note||"").trim()||null,
         })).filter((x:any)=>x.fabricCode) } : undefined,
@@ -1119,7 +1115,7 @@ export class SampleFabricService {
         for (const x of body.fabricCosts) {
           const fabricCode=String(x?.fabricCode||"").trim().toUpperCase();
           if(!fabricCode) continue;
-          const data={fabricCode,chinaShippingCny:this.n(x.chinaShippingCny),vietnamShippingVnd:this.n(x.vietnamShippingVnd),note:String(x.note||"").trim()||null};
+          const data={fabricCode,chinaShippingCny:this.n(x.chinaShippingCny),vietnamShippingRateVndPerKg:this.n(x.vietnamShippingRateVndPerKg),vietnamShippingVnd:this.n(x.vietnamShippingVnd),note:String(x.note||"").trim()||null};
           if(x.id){
             const exists=await tx.fabricReceiptFabricCost.findFirst({where:{id:x.id,fabricReceiptId:id},select:{id:true}});
             if(exists){await tx.fabricReceiptFabricCost.update({where:{id:x.id},data});keepCostIds.push(x.id);continue;}

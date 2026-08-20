@@ -3274,8 +3274,9 @@ model FabricReceiptFabricCost {
   id                 String        @id @default(cuid())
   fabricReceiptId    String
   fabricCode         String
-  chinaShippingCny   Decimal?      @db.Decimal(14, 2)
-  vietnamShippingVnd Decimal?      @db.Decimal(14, 2)
+  chinaShippingCny             Decimal?      @db.Decimal(14, 2)
+  vietnamShippingRateVndPerKg  Decimal?      @db.Decimal(14, 2)
+  vietnamShippingVnd           Decimal?      @db.Decimal(14, 2)
   note               String?
   createdAt          DateTime      @default(now())
   updatedAt          DateTime      @updatedAt
