@@ -200,6 +200,41 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     return json as T;
   }
 
+  private isMetaOutsideStandardMessagingWindow(error: any) {
+    const raw = [
+      error?.message,
+      error?.response?.message,
+      error?.response?.data?.error?.message,
+      error?.cause?.message,
+    ]
+      .map((value) => safeText(value).toLowerCase())
+      .filter(Boolean)
+      .join(" | ");
+
+    return (
+      raw.includes("(#10)") &&
+      (raw.includes("outside") ||
+        raw.includes("allowed window") ||
+        raw.includes("messaging window") ||
+        raw.includes("24 hour") ||
+        raw.includes("24-hour") ||
+        raw.includes("khoảng thời gian") ||
+        raw.includes("ngoài khoảng"))
+    );
+  }
+
+  private async sendMetaHumanAgentMessage(
+    recipientPsid: string,
+    message: Record<string, any>,
+  ) {
+    return this.metaPost("me/messages", {
+      recipient: { id: recipientPsid },
+      messaging_type: "MESSAGE_TAG",
+      tag: "HUMAN_AGENT",
+      message,
+    });
+  }
+
   private async metaFormPost<T = any>(
     path: string,
     body: Record<string, any> = {},
@@ -2591,23 +2626,90 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
           `[META_SEND] conversation=${id} psid=${last6(recipientPsid)} type=${attachmentUrl ? "IMAGE" : "TEXT"} ${attachmentUrl ? `url="${attachmentUrl.slice(0, 160)}"` : `text="${text.slice(0, 120)}"`}`,
         );
 
+        const latestInbound = await this.prisma.omniMessage.findFirst({
+          where: { conversationId: id, direction: "IN" },
+          orderBy: { sentAt: "desc" },
+          select: { sentAt: true },
+        });
+        const latestInboundAt = latestInbound?.sentAt
+          ? new Date(latestInbound.sentAt).getTime()
+          : 0;
+        const inboundAgeMs = latestInboundAt > 0
+          ? Math.max(0, now.getTime() - latestInboundAt)
+          : 0;
+        const standardWindowMs = 24 * 60 * 60 * 1000;
+        const humanAgentWindowMs = 7 * 24 * 60 * 60 * 1000;
+        const shouldUseHumanAgent =
+          latestInboundAt > 0 &&
+          inboundAgeMs > standardWindowMs &&
+          inboundAgeMs <= humanAgentWindowMs;
+
         try {
-          const metaResult: any = await this.metaPost("me/messages", {
-            recipient: { id: recipientPsid },
-            messaging_type: "RESPONSE",
-            message: metaMessage,
-          });
+          const metaResult: any = shouldUseHumanAgent
+            ? await this.sendMetaHumanAgentMessage(recipientPsid, metaMessage)
+            : await this.metaPost("me/messages", {
+                recipient: { id: recipientPsid },
+                messaging_type: "RESPONSE",
+                message: metaMessage,
+              });
           metaProviderMessageId =
             safeText(metaResult?.message_id || metaResult?.messageId) || null;
 
           this.logger.log(
-            `[META_SEND_OK] conversation=${id} psid=${last6(recipientPsid)} result=${JSON.stringify(metaResult)}`,
+            `[META_SEND_OK] conversation=${id} psid=${last6(recipientPsid)} mode=${shouldUseHumanAgent ? "HUMAN_AGENT" : "RESPONSE"} result=${JSON.stringify(metaResult)}`,
           );
         } catch (error: any) {
           this.logger.error(
             `[META_SEND_FAILED] conversation=${id} psid=${last6(recipientPsid)} error=${error?.message || error}`,
           );
-          throw error;
+
+          // Meta chỉ cho RESPONSE trong standard messaging window. Vì thao tác này
+          // được thực hiện trực tiếp bởi nhân viên trong Omni Inbox, nếu Meta báo
+          // đã ra ngoài window thì thử lại bằng HUMAN_AGENT (tối đa 7 ngày kể từ
+          // tin nhắn gần nhất của khách, và app phải được Meta cấp Human Agent).
+          if (
+            !shouldUseHumanAgent &&
+            this.isMetaOutsideStandardMessagingWindow(error)
+          ) {
+            const insideHumanAgentWindow =
+              latestInboundAt > 0 && inboundAgeMs <= humanAgentWindowMs;
+
+            if (!insideHumanAgentWindow) {
+              throw new BadRequestException(
+                "Meta đã đóng cửa sổ trả lời. HUMAN_AGENT chỉ dùng được trong 7 ngày kể từ tin nhắn gần nhất của khách.",
+              );
+            }
+
+            this.logger.warn(
+              `[META_SEND_HUMAN_AGENT_RETRY] conversation=${id} psid=${last6(recipientPsid)} latestInbound=${latestInbound?.sentAt?.toISOString?.() || "-"}`,
+            );
+
+            try {
+              const humanResult: any = await this.sendMetaHumanAgentMessage(
+                recipientPsid,
+                metaMessage,
+              );
+              metaProviderMessageId =
+                safeText(humanResult?.message_id || humanResult?.messageId) || null;
+
+              this.logger.log(
+                `[META_SEND_HUMAN_AGENT_OK] conversation=${id} psid=${last6(recipientPsid)} result=${JSON.stringify(humanResult)}`,
+              );
+            } catch (humanError: any) {
+              this.logger.error(
+                `[META_SEND_HUMAN_AGENT_FAILED] conversation=${id} psid=${last6(recipientPsid)} error=${humanError?.message || humanError}`,
+              );
+              throw new BadRequestException(
+                `Meta không gửi được bằng HUMAN_AGENT. Kiểm tra Human Agent feature/Advanced Access của app. ${safeText(humanError?.message)}`.trim(),
+              );
+            }
+          } else if (shouldUseHumanAgent) {
+            throw new BadRequestException(
+              `Meta không gửi được bằng HUMAN_AGENT. Kiểm tra Human Agent feature/Advanced Access của app. ${safeText(error?.message)}`.trim(),
+            );
+          } else {
+            throw error;
+          }
         }
       }
     }
