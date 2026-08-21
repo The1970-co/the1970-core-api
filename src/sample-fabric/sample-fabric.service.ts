@@ -978,6 +978,13 @@ export class SampleFabricService {
           { branch: { is: { name: { contains: q, mode: "insensitive" } } } },
           { designSample: { is: { code: { contains: q, mode: "insensitive" } } } },
           { designSample: { is: { name: { contains: q, mode: "insensitive" } } } },
+          { fabricConfigs: { some: { OR: [
+            { fabricCode: { contains: q, mode: "insensitive" } },
+            { materialName: { contains: q, mode: "insensitive" } },
+            { product: { is: { name: { contains: q, mode: "insensitive" } } } },
+            { designSample: { is: { code: { contains: q, mode: "insensitive" } } } },
+            { designSample: { is: { name: { contains: q, mode: "insensitive" } } } },
+          ] } } },
           { rolls: { some: { OR: [
             { rollCode: { contains: q, mode: "insensitive" } },
             { fabricCode: { contains: q, mode: "insensitive" } },
@@ -996,6 +1003,7 @@ export class SampleFabricService {
         fabricColor: { select: { id: true, name: true, code: true } },
         rolls: { include: { images: { orderBy: { createdAt: "desc" } } }, orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] },
         fabricCosts: { orderBy: { fabricCode: "asc" } },
+        fabricConfigs: { include: { product: { select: { id:true,name:true,slug:true,imageUrl:true } }, designSample: { select: { id:true,code:true,name:true,year:true } } }, orderBy: { fabricCode: "asc" } },
         colorMaps: { orderBy: [{ fabricCode: "asc" }, { colorName: "asc" }] },
         measurements: { orderBy: { createdAt: "desc" } },
         images: { orderBy: { createdAt: "desc" } },
@@ -1082,13 +1090,19 @@ export class SampleFabricService {
           vietnamShippingVnd:this.n(x.vietnamShippingVnd),
           note:String(x.note||"").trim()||null,
         })).filter((x:any)=>x.fabricCode) } : undefined,
+        fabricConfigs: Array.isArray(body?.fabricConfigs) ? { create: body.fabricConfigs.map((x:any)=>({
+          fabricCode:String(x.fabricCode||"").trim().toUpperCase(),
+          materialName:String(x.materialName||"").trim()||null,
+          productId:x.productId||null,
+          designSampleId:x.designSampleId||null,
+        })).filter((x:any)=>x.fabricCode) } : undefined,
         colorMaps: Array.isArray(body?.colorMaps) ? { create: body.colorMaps.map((x:any)=>({
           fabricCode:String(x.fabricCode||"").trim().toUpperCase(),
           colorName:String(x.colorName||"").trim(),
           colorCode:this.normalizeColorCode(x.colorCode),
         })).filter((x:any)=>x.fabricCode&&x.colorName) } : undefined,
       },
-      include: { supplier: true, branch: true, designSample: true, product: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, fabricCosts: { orderBy: { fabricCode: "asc" } }, colorMaps: { orderBy: [{ fabricCode: "asc" }, { colorName: "asc" }] }, measurements: true, images: true },
+      include: { supplier: true, branch: true, designSample: true, product: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, fabricCosts: { orderBy: { fabricCode: "asc" } }, fabricConfigs: { include: { product: true, designSample: true }, orderBy: { fabricCode: "asc" } }, colorMaps: { orderBy: [{ fabricCode: "asc" }, { colorName: "asc" }] }, measurements: true, images: true },
     });
     return this.receiptForUser(created, user);
   }
@@ -1149,6 +1163,26 @@ export class SampleFabricService {
         }
         await tx.fabricReceiptFabricCost.deleteMany({where:{fabricReceiptId:id,...(keepCostIds.length?{id:{notIn:keepCostIds}}:{})}});
       }
+      if (Array.isArray(body?.fabricConfigs)) {
+        const keepConfigIds:string[]=[];
+        for (const x of body.fabricConfigs) {
+          const fabricCode=String(x?.fabricCode||"").trim().toUpperCase();
+          if(!fabricCode) continue;
+          const data={
+            fabricCode,
+            materialName:String(x?.materialName||"").trim()||null,
+            productId:x?.productId||null,
+            designSampleId:x?.designSampleId||null,
+          };
+          if(x.id){
+            const exists=await tx.fabricReceiptFabricConfig.findFirst({where:{id:x.id,fabricReceiptId:id},select:{id:true}});
+            if(exists){await tx.fabricReceiptFabricConfig.update({where:{id:x.id},data});keepConfigIds.push(x.id);continue;}
+          }
+          const made=await tx.fabricReceiptFabricConfig.create({data:{fabricReceiptId:id,...data}});
+          keepConfigIds.push(made.id);
+        }
+        await tx.fabricReceiptFabricConfig.deleteMany({where:{fabricReceiptId:id,...(keepConfigIds.length?{id:{notIn:keepConfigIds}}:{})}});
+      }
       if (Array.isArray(body?.colorMaps)) {
         const keepColorIds:string[]=[];
         for (const x of body.colorMaps) {
@@ -1193,7 +1227,7 @@ export class SampleFabricService {
           ...(body?.receivedByStaffId !== undefined ? { receivedByStaffId: receiver?.id || null, receivedByName: receiver?.name || null } : {}),
           ...(body?.note !== undefined ? { note: body.note || null } : {}),
         },
-        include: { supplier: true, branch: true, designSample: true, product: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, fabricCosts: { orderBy: { fabricCode: "asc" } }, colorMaps: { orderBy: [{ fabricCode: "asc" }, { colorName: "asc" }] }, measurements: true, images: true },
+        include: { supplier: true, branch: true, designSample: true, product: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, fabricCosts: { orderBy: { fabricCode: "asc" } }, fabricConfigs: { include: { product: true, designSample: true }, orderBy: { fabricCode: "asc" } }, colorMaps: { orderBy: [{ fabricCode: "asc" }, { colorName: "asc" }] }, measurements: true, images: true },
       });
     });
     return this.receiptForUser(updated, user);

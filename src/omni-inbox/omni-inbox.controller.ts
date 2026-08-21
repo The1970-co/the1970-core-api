@@ -10,8 +10,11 @@ import {
   Query,
   Request,
   Sse,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
 import { JwtGuard } from "../auth/jwt.guard";
 import { PermissionGuard } from "../auth/guards/permission.guard";
 import {
@@ -90,6 +93,17 @@ export class OmniInboxController {
     @Request() req: any,
   ) {
     return this.service.sendMessage(id, dto, req.user);
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
+  @Post("attachments/upload")
+  @RequirePermissions("omni_inbox.reply")
+  @UseInterceptors(FileInterceptor("file"))
+  uploadAttachment(
+    @UploadedFile() file: Express.Multer.File,
+    @Request() req: any,
+  ) {
+    return this.service.uploadAttachment(file, req.user);
   }
 
   @UseGuards(JwtGuard, PermissionGuard)

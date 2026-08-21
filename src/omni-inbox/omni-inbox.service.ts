@@ -10,6 +10,8 @@ import { PrismaService } from "../prisma/prisma.service";
 import { OmniInboxRealtimeService } from "./omni-inbox.realtime";
 import { ListConversationsDto } from "./dto/list-conversations.dto";
 import { OrderService } from "../order/order.service";
+import { Readable } from "stream";
+import cloudinary from "../utils/cloudinary";
 
 function safeText(value: any) {
   return String(value || "").trim();
@@ -1394,7 +1396,11 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     if (conversation.assigneeId) {
       const currentMember = candidates.find((item: any) => item.staffId === conversation.assigneeId);
       if (currentMember && (!setting.requireOnline || isOnline(currentMember))) return conversation;
-      if (!setting.reassignIfAssigneeOffline) return conversation;
+
+      // requireOnline=true là luật cứng: assignee cũ đã offline không được giữ lại
+      // chỉ vì reassignIfAssigneeOffline=false. Tiếp tục xuống dưới để chọn một
+      // nhân viên đang online; nếu không có ai online thì để nguyên chưa gán/reassign.
+      if (!setting.requireOnline && !setting.reassignIfAssigneeOffline) return conversation;
     }
 
     const draftOrder: any = await this.prisma.order.findFirst({
@@ -1404,6 +1410,28 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     });
     const draftOwnerId = safeText(draftOrder?.assignedStaffId || draftOrder?.createdByStaffId);
     const targetBranchId = safeText(conversation.branchId || draftOrder?.branchId || setting.fallbackBranchId);
+
+    // requireOnline là điều kiện CỨNG, không phụ thuộc priorityOrder.
+    // Nếu bật requireOnline thì loại nhân viên offline ngay từ đầu để mọi nhánh
+    // capacity/branch/weighted queue phía sau không thể vô tình chọn lại họ.
+    if (setting.requireOnline) {
+      candidates = candidates.filter(isOnline);
+      if (!candidates.length) {
+        await (this.prisma as any).omniAssignmentHistory.create({
+          data: {
+            conversationId,
+            customerName: conversation.customer?.name || null,
+            channel: conversation.channel,
+            branchId: conversation.branchId || null,
+            action: "NO_CANDIDATE",
+            reason: "Không có nhân viên online đủ điều kiện.",
+            decisionDetail: { triggerType, hardRequirement: "ONLINE" },
+            triggerType,
+          },
+        });
+        return null;
+      }
+    }
 
     const staffIds = candidates.map((item: any) => item.staffId);
     const candidatesBeforeCapacity = [...candidates];
@@ -1487,32 +1515,6 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     for (const priority of priorities) {
       if (priority === "ONLINE" && setting.requireOnline) {
         const online = candidates.filter(isOnline);
-        if (!online.length) {
-          // ONLINE là điều kiện cứng khi requireOnline=true. Không bao giờ chia
-          // INCOMING_MESSAGE cho nhân viên offline chỉ để tránh trạng thái Chưa gán.
-          // Khi không có ai online, hội thoại phải giữ nguyên để hàng chờ/sweep sau
-          // xử lý lúc có nhân viên heartbeat trở lại.
-          if (setting.noCandidateMode === "ASSIGN_ANYWAY" && !setting.requireOnline) {
-            decision.considered.push({
-              reason: "ASSIGN_ANYWAY_WITHOUT_ONLINE_REQUIREMENT",
-              remaining: candidates.map((item: any) => item.staffId),
-            });
-            continue;
-          }
-          await (this.prisma as any).omniAssignmentHistory.create({
-            data: {
-              conversationId,
-              customerName: conversation.customer?.name || null,
-              channel: conversation.channel,
-              branchId: targetBranchId || null,
-              action: "NO_CANDIDATE",
-              reason: "Không có nhân viên online đủ điều kiện.",
-              decisionDetail: decision,
-              triggerType,
-            },
-          });
-          return null;
-        }
         candidates = online;
         decision.considered.push({ reason: "ONLINE", remaining: online.map((item: any) => item.staffId) });
       }
@@ -1684,15 +1686,20 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     if (!referral || typeof referral !== "object") return null;
 
     const ads =
-      referral?.ads_context_data &&
-      typeof referral.ads_context_data === "object"
+      referral?.ads_context_data && typeof referral.ads_context_data === "object"
         ? referral.ads_context_data
-        : {};
+        : referral?.ad_context_data && typeof referral.ad_context_data === "object"
+          ? referral.ad_context_data
+          : referral?.ads_context && typeof referral.ads_context === "object"
+            ? referral.ads_context
+            : {};
 
     const adId = safeText(
       referral?.ad_id ||
         ads?.ad_id ||
-        ads?.advertisement_id,
+        ads?.advertisement_id ||
+        referral?.advertisement_id ||
+        referral?.adId,
     );
     const postId = safeText(
       ads?.post_id ||
@@ -3023,9 +3030,51 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     return { total: customers.length, refreshed, skipped };
   }
 
+  async uploadAttachment(file: Express.Multer.File, staff?: any) {
+    if (!file?.buffer?.length) {
+      throw new BadRequestException("Thiếu file đính kèm.");
+    }
+
+    const maxBytes = 25 * 1024 * 1024;
+    if (file.size > maxBytes) {
+      throw new BadRequestException("File đính kèm tối đa 25MB.");
+    }
+
+    const mimeType = safeText(file.mimetype).toLowerCase();
+    const isImage = mimeType.startsWith("image/");
+    const resourceType = isImage ? "image" : "raw";
+
+    const result: any = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          folder: "the1970/omni-inbox",
+          resource_type: resourceType as any,
+          use_filename: true,
+          unique_filename: true,
+          filename_override: safeText(file.originalname) || undefined,
+        },
+        (error, uploaded) => {
+          if (uploaded) resolve(uploaded);
+          else reject(error || new Error("Upload file thất bại."));
+        },
+      );
+      Readable.from(file.buffer).pipe(stream);
+    });
+
+    return {
+      success: true,
+      url: safeText(result?.secure_url || result?.url),
+      publicId: safeText(result?.public_id) || null,
+      fileName: safeText(file.originalname) || null,
+      mimeType: mimeType || null,
+      type: isImage ? "image" : "file",
+      size: Number(file.size || 0),
+    };
+  }
+
   async sendMessage(
     id: string,
-    dto: { text: string; attachmentUrl?: string },
+    dto: { text: string; attachmentUrl?: string; attachmentType?: "image" | "file"; fileName?: string },
     staff?: any,
   ) {
     await this.assertCanAccessConversation(id, staff, true);
@@ -3081,10 +3130,12 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
           throw new BadRequestException("Hội thoại chưa có PSID khách Facebook.");
 
         const attachmentUrl = safeText(dto.attachmentUrl);
+        const attachmentType = dto.attachmentType === "file" ? "file" : "image";
+        const fileName = safeText(dto.fileName);
         const metaMessage = attachmentUrl
           ? {
               attachment: {
-                type: "image",
+                type: attachmentType,
                 payload: {
                   url: attachmentUrl,
                   is_reusable: true,
@@ -3094,7 +3145,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
           : { text };
 
         this.logger.log(
-          `[META_SEND] conversation=${id} psid=${last6(recipientPsid)} type=${attachmentUrl ? "IMAGE" : "TEXT"} ${attachmentUrl ? `url="${attachmentUrl.slice(0, 160)}"` : `text="${text.slice(0, 120)}"`}`,
+          `[META_SEND] conversation=${id} psid=${last6(recipientPsid)} type=${attachmentUrl ? attachmentType.toUpperCase() : "TEXT"} ${attachmentUrl ? `url="${attachmentUrl.slice(0, 160)}"` : `text="${text.slice(0, 120)}"`}`,
         );
 
         const latestInbound = await this.prisma.omniMessage.findFirst({
@@ -3194,8 +3245,14 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
           ? metaProviderMessageId
           : null,
       direction: "OUT",
-      type: safeText(dto.attachmentUrl) ? "IMAGE" : "TEXT",
-      text,
+      type: safeText(dto.attachmentUrl)
+        ? dto.attachmentType === "file"
+          ? "FILE"
+          : "IMAGE"
+        : "TEXT",
+      text: safeText(dto.attachmentUrl) && dto.attachmentType === "file"
+        ? safeText(dto.fileName) || text || "Tệp đính kèm"
+        : text,
       attachmentUrl: safeText(dto.attachmentUrl) || null,
       senderId: actualSenderId,
       senderName: actualSenderName,
@@ -3226,7 +3283,11 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       data: {
         lastMessageText: isFacebookComment
           ? `[Trả lời bình luận] ${text}`
-          : text || "[Ảnh]",
+          : safeText(dto.attachmentUrl)
+            ? dto.attachmentType === "file"
+              ? `[Tệp] ${safeText(dto.fileName) || "Đính kèm"}`
+              : "[Ảnh]"
+            : text,
         lastMessageAt: now,
         status:
           conversation.status === "OPEN" ? "PROCESSING" : conversation.status,
@@ -3767,22 +3828,15 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       where: { providerUserId: senderId },
     });
 
-    const nextCustomerName = profile.isFallback
-      ? existingCustomer?.name || profile.name
-      : profile.name;
-    const nextAvatarUrl =
-      profile.avatarUrl || existingCustomer?.avatarUrl || null;
-
+    const fallbackCustomerName =
+      safeText(existingCustomer?.name) || `Khách ${last6(senderId)}`;
     const customer = await this.prisma.omniCustomer.upsert({
       where: { providerUserId: senderId },
-      update: {
-        name: nextCustomerName,
-        avatarUrl: nextAvatarUrl,
-      },
+      update: {},
       create: {
         providerUserId: senderId,
-        name: nextCustomerName,
-        avatarUrl: nextAvatarUrl,
+        name: fallbackCustomerName,
+        avatarUrl: existingCustomer?.avatarUrl || null,
       },
     });
 
@@ -3850,6 +3904,9 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     const attachment = attachments[0];
     const adReferral = this.extractMetaAdReferral(event);
     const adReferralData = this.buildAdReferralUpdate(adReferral, timestamp);
+    if (!adReferral && (event?.referral || event?.messaging_referral || event?.message?.referral)) {
+      this.logger.warn(`[META_AD_REFERRAL_UNPARSED] ${JSON.stringify({ referral: event?.referral, messaging_referral: event?.messaging_referral, message_referral: event?.message?.referral })}`);
+    }
 
     if (!senderId || !recipientId)
       return { skipped: true, reason: "missing_sender_or_recipient" };
@@ -4031,8 +4088,8 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       if (existed) return { duplicated: true };
     }
 
-    const profile = await this.getMessengerProfile(senderId);
-
+    // Webhook phải ghi tin vào DB/SSE trước, không chờ Graph profile.
+    // Profile sẽ refresh nền sau để tin mới xuất hiện gần như ngay lập tức.
     const page = await this.prisma.omniInboxPage.upsert({
       where: { providerPageId: recipientId },
       update: {
@@ -4057,11 +4114,11 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       where: { providerUserId: senderId },
     });
 
-    const nextCustomerName = profile.isFallback
-      ? existingCustomer?.name || profile.name
-      : profile.name;
-    const nextAvatarUrl =
-      profile.avatarUrl || existingCustomer?.avatarUrl || null;
+    // Messenger inbound: không chờ Graph profile ở webhook. Dùng dữ liệu DB hiện có
+    // hoặc tên tạm; sau khi emit realtime sẽ refresh tên/avatar ở background.
+    const nextCustomerName =
+      safeText(existingCustomer?.name) || `Khách ${last6(senderId)}`;
+    const nextAvatarUrl = existingCustomer?.avatarUrl || null;
 
     const customer = await this.prisma.omniCustomer.upsert({
       where: { providerUserId: senderId },
@@ -4194,6 +4251,22 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       type: "conversation.updated",
       payload: conversation,
     });
+
+    // Refresh tên/avatar nền; không làm chậm việc hiện tin mới.
+    void this.refreshCustomerProfileIfNeeded(customer)
+      .then(async (refreshed: any) => {
+        if (!refreshed) return;
+        const refreshedConversation = await this.prisma.omniConversation.findUnique({
+          where: { id: conversation.id },
+          include: { customer: true, page: true, tags: true },
+        });
+        if (refreshedConversation) {
+          this.realtime.emit({ type: "conversation.updated", payload: refreshedConversation });
+        }
+      })
+      .catch((error: any) =>
+        this.logMetaDebug(`[META_PROFILE_ASYNC_SKIP] psid=${last6(senderId)} | ${error?.message || error}`),
+      );
 
     if (hasMessage) {
       const assignedConversation = await this.autoAssignConversation(

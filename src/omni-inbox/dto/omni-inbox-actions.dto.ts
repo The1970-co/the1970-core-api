@@ -1,8 +1,8 @@
 import {
   IsArray,
   IsBoolean,
-  IsIn,
   IsInt,
+  IsIn,
   IsOptional,
   IsString,
   MaxLength,
@@ -49,9 +49,6 @@ export class CreateNoteTemplateDto {
   @IsInt()
   sortOrder?: number;
 
-  @IsOptional()
-  @IsIn(["OPEN", "PENDING", "PROCESSING", "CLOSED", "SPAM"])
-  targetStatus?: "OPEN" | "PENDING" | "PROCESSING" | "CLOSED" | "SPAM";
 }
 
 export class UpdateNoteTemplateDto extends CreateNoteTemplateDto {
@@ -74,6 +71,15 @@ export class SendMessageDto {
   @IsOptional()
   @IsString()
   attachmentUrl?: string;
+
+  @IsOptional()
+  @IsIn(["image", "file"])
+  attachmentType?: "image" | "file";
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  fileName?: string;
 }
 
 export class CreateQuickOrderItemDto {
@@ -86,7 +92,6 @@ export class CreateQuickOrderItemDto {
   qty!: number;
 }
 
-// QUICK_ORDER_STRUCTURED_ADDRESS_DTO_V2_20260723
 export class CreateQuickOrderDto {
   @IsOptional()
   @IsString()
@@ -100,47 +105,6 @@ export class CreateQuickOrderDto {
   @IsString()
   @MaxLength(1000)
   address!: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(500)
-  addressLine1?: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(500)
-  addressLine2?: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(120)
-  province?: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(120)
-  district?: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(120)
-  ward?: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(30)
-  postalCode?: string;
-
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  ghnDistrictId?: number;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(50)
-  ghnWardCode?: string;
 
   @IsString()
   branchId!: string;
@@ -161,3 +125,110 @@ export class CreateQuickOrderDto {
 }
 
 export class UpdateQuickOrderDto extends CreateQuickOrderDto {}
+
+
+export class OmniHeartbeatDto {
+  @IsOptional()
+  @IsString()
+  activeBranchId?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  manualAway?: boolean;
+}
+
+export class UpdateAssignmentMemberDto {
+  @IsString()
+  staffId!: string;
+
+  @IsString()
+  staffName!: string;
+
+  @IsOptional()
+  @IsString()
+  branchId?: string;
+
+  @IsOptional()
+  @IsString()
+  branchName?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  receiveMessages?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  receiveComments?: boolean;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  sortOrder?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  weight?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  maxActiveConversations?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  maxUnreadConversations?: number;
+}
+
+export class UpdateAssignmentSettingsDto {
+  @IsOptional() @IsBoolean() isActive?: boolean;
+  @IsOptional() @IsIn(["OFF", "SELF_ASSIGN", "AUTO", "GROUP"]) mode?: string;
+  @IsOptional() @IsArray() @IsString({ each: true }) priorityOrder?: string[];
+  @IsOptional() @IsBoolean() requireOnline?: boolean;
+  @IsOptional() @IsBoolean() branchPriorityEnabled?: boolean;
+  @IsOptional() @IsBoolean() lowestLoadEnabled?: boolean;
+  @IsOptional() @IsBoolean() draftOwnerPriorityEnabled?: boolean;
+  @IsOptional() @IsBoolean() keepPreviousAssignee?: boolean;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(0) keepPreviousDays?: number;
+  @IsOptional() @IsBoolean() reassignIfAssigneeOffline?: boolean;
+  @IsOptional() @IsBoolean() workingHoursOnly?: boolean;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(0) workStartMinute?: number;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(0) workEndMinute?: number;
+  @IsOptional() @IsArray() workDays?: number[];
+  @IsOptional() @IsIn(["QUEUE", "ONLINE_ONLY", "ASSIGN_ANYWAY"]) outsideHoursMode?: string;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(30) onlineWindowSeconds?: number;
+  @IsOptional() @IsBoolean() maxActiveEnabled?: boolean;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) maxActiveConversations?: number;
+  @IsOptional() @IsBoolean() maxUnreadEnabled?: boolean;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) maxUnreadConversations?: number;
+  @IsOptional() @IsBoolean() branchRoutingEnabled?: boolean;
+  @IsOptional() @IsString() fallbackBranchId?: string;
+  @IsOptional() @IsIn(["UNASSIGNED", "ASSIGN_ANYWAY"]) noCandidateMode?: string;
+  @IsOptional() @IsBoolean() onlyAssignedCanView?: boolean;
+  @IsOptional() @IsBoolean() managerCanViewBranch?: boolean;
+  @IsOptional() @IsBoolean() onlyAssignedCanReply?: boolean;
+  @IsOptional() @IsBoolean() shuffleEachRound?: boolean;
+  @IsOptional() @IsBoolean() reassignUnreadEnabled?: boolean;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) reassignAfterMinutes?: number;
+  @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => UpdateAssignmentMemberDto) members?: UpdateAssignmentMemberDto[];
+}
+
+export class CreateQuickReplyTemplateDto {
+  @IsOptional() @IsString() @MaxLength(120) title?: string;
+  @IsString() @MaxLength(3000) content!: string;
+  @IsOptional() @IsString() @MaxLength(80) category?: string;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(0) sortOrder?: number;
+}
+
+export class UpdateQuickReplyTemplateDto extends CreateQuickReplyTemplateDto {
+  @IsOptional() @IsBoolean() isActive?: boolean;
+}
