@@ -268,20 +268,32 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
           `[META_HISTORY_BACKFILL_START] page=${pageId} psid=${last6(customerPsid)} conversation=${conversationId}`,
         );
 
-        // Quan trọng: user_id lọc thẳng đúng khách, KHÔNG list toàn bộ inbox Page.
+        // Chỉ nhận thread khi Meta xác nhận participant đúng PSID khách.
+        // Không bao giờ lấy data[0] một cách mù quáng: nếu user_id bị Meta bỏ qua
+        // hoặc trả sai, làm vậy sẽ nhét lịch sử của khách A vào conversation khách B.
         const found: any = await this.metaFetch(`${pageId}/conversations`, {
           platform: "messenger",
           user_id: customerPsid,
-          fields: "id,updated_time",
-          limit: "1",
+          fields: "id,updated_time,participants.limit(20){id,name}",
+          limit: "10",
         });
-        const metaConversationId = safeText(found?.data?.[0]?.id);
+        const candidates = Array.isArray(found?.data) ? found.data : [];
+        const matchedThread = candidates.find((item: any) => {
+          const participants = Array.isArray(item?.participants?.data)
+            ? item.participants.data
+            : [];
+          return participants.some(
+            (participant: any) => safeText(participant?.id) === customerPsid,
+          );
+        });
+        const metaConversationId = safeText(matchedThread?.id);
         if (!metaConversationId) {
           this.logger.warn(
-            `[META_HISTORY_BACKFILL_NO_THREAD] page=${pageId} psid=${last6(customerPsid)}`,
+            `[META_HISTORY_BACKFILL_THREAD_MISMATCH] page=${pageId} psid=${last6(customerPsid)} candidates=${candidates.length}`,
           );
-          this.messengerHistoryBackfillDone.add(key);
-          return { skipped: true, reason: "meta_conversation_not_found" };
+          // Không đánh dấu done để lần sau có thể thử lại; quan trọng nhất là KHÔNG
+          // import nhầm bất kỳ thread nào khi chưa verify participant.
+          return { skipped: true, reason: "meta_conversation_not_verified" };
         }
 
         let detail: any;
@@ -314,6 +326,27 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
         let imported = 0;
         let skipped = 0;
 
+        // Tự dọn lỗi của bản lazy-history cũ: trong Messenger 1:1, mọi tin IN của
+        // conversation này phải có senderId đúng bằng PSID khách. Chỉ xóa trường hợp
+        // chắc chắn sai; không đụng OUT vì senderId OUT có thể là Page hoặc staff local.
+        const wrongInbound = await this.prisma.omniMessage.findMany({
+          where: {
+            conversationId,
+            direction: "IN" as any,
+            senderId: { not: customerPsid },
+          },
+          select: { id: true, providerMessageId: true, senderId: true },
+          take: 500,
+        });
+        if (wrongInbound.length) {
+          await this.prisma.omniMessage.deleteMany({
+            where: { id: { in: wrongInbound.map((item: any) => item.id) } },
+          });
+          this.logger.warn(
+            `[META_HISTORY_CORRUPT_INBOUND_CLEANED] conversation=${conversationId} psid=${last6(customerPsid)} deleted=${wrongInbound.length}`,
+          );
+        }
+
         for (const raw of ordered) {
           const providerMessageId = safeText(raw?.id);
           if (!providerMessageId) {
@@ -323,7 +356,34 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
 
           const fromId = safeText(raw?.from?.id);
           const fromName = safeText(raw?.from?.name);
-          const direction = fromId === pageId ? "OUT" : "IN";
+          const toRows = Array.isArray(raw?.to?.data) ? raw.to.data : [];
+          const toIds = toRows.map((item: any) => safeText(item?.id)).filter(Boolean);
+          const isPageSender =
+            fromId === pageId ||
+            (Boolean(this.configuredPageId) && fromId === this.configuredPageId);
+          const isTargetCustomerSender = fromId === customerPsid;
+
+          // Messenger 1:1 của khách này chỉ được chứa IN từ đúng PSID khách, hoặc
+          // OUT từ Page. Bất kỳ sender nào khác nghĩa là Meta trả nhầm thread/data;
+          // bỏ qua tuyệt đối để không làm lẫn hội thoại giữa hai khách.
+          if (!isPageSender && !isTargetCustomerSender) {
+            this.logger.warn(
+              `[META_HISTORY_MESSAGE_OWNER_MISMATCH] conversation=${conversationId} expected=${last6(customerPsid)} from=${last6(fromId)} message=${providerMessageId}`,
+            );
+            skipped += 1;
+            continue;
+          }
+
+          // Với tin OUT, nếu Meta có trường to thì phải hướng tới đúng khách.
+          if (isPageSender && toIds.length && !toIds.includes(customerPsid)) {
+            this.logger.warn(
+              `[META_HISTORY_MESSAGE_RECIPIENT_MISMATCH] conversation=${conversationId} expected=${last6(customerPsid)} message=${providerMessageId}`,
+            );
+            skipped += 1;
+            continue;
+          }
+
+          const direction = isPageSender ? "OUT" : "IN";
           const sentAtRaw = raw?.created_time ? new Date(raw.created_time) : new Date();
           const sentAt = Number.isNaN(sentAtRaw.getTime()) ? new Date() : sentAtRaw;
           const messageText = safeText(raw?.message);
@@ -1165,8 +1225,10 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     const queued: any[] = await this.prisma.omniConversation.findMany({
       where: {
         assigneeId: null,
-        unreadCount: { gt: 0 },
-        status: { in: ["OPEN", "PROCESSING", "PENDING"] as any },
+        // Hàng chờ đầu ca phải dựa vào việc KHÁCH ĐANG CHỜ TRẢ LỜI,
+        // không dựa vào unreadCount. Tin đã được ai đó đọc trên Facebook/Omni
+        // nhưng chưa trả lời vẫn phải được chia cho nhân viên.
+        status: "OPEN" as any,
         lastMessageAt: { lt: shiftStart },
       },
       orderBy: [{ lastMessageAt: "asc" }, { createdAt: "asc" }],
@@ -1246,10 +1308,9 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       const rows = await this.prisma.omniConversation.findMany({
         where: {
           assigneeId: null,
-          unreadCount: { gt: 0 },
-          status: {
-            in: ["OPEN", "PROCESSING", "PENDING"] as any,
-          },
+          // OPEN = khách đã nhắn và chưa có phản hồi của shop. Không dùng
+          // unreadCount ở đây vì "đã đọc" và "đã trả lời" là hai việc khác nhau.
+          status: "OPEN" as any,
         },
         orderBy: [
           { lastMessageAt: "asc" },
@@ -1345,6 +1406,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     const targetBranchId = safeText(conversation.branchId || draftOrder?.branchId || setting.fallbackBranchId);
 
     const staffIds = candidates.map((item: any) => item.staffId);
+    const candidatesBeforeCapacity = [...candidates];
 
     // Giới hạn tải được tính theo ngày làm việc tại Việt Nam, không cộng dồn
     // toàn bộ hội thoại OPEN/PROCESSING/PENDING từ các ngày trước.
@@ -1399,6 +1461,16 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       if (setting.maxUnreadEnabled && unread >= maxUnread) return false;
       return true;
     });
+
+    // Tin mới không được nằm "Chưa gán" chỉ vì toàn bộ nhân viên đang chạm
+    // ngưỡng tải. Với INCOMING_MESSAGE, quay lại tập ứng viên hợp lệ ban đầu rồi
+    // tiếp tục xét ONLINE/BRANCH/LOWEST_LOAD. Các lượt sweep cũ vẫn tôn trọng cap.
+    if (!candidates.length && triggerType === "INCOMING_MESSAGE") {
+      candidates = [...candidatesBeforeCapacity];
+      this.logger.warn(
+        `[OMNI_ASSIGN_CAPACITY_FALLBACK] conversation=${conversationId} candidates=${candidates.length}`,
+      );
+    }
     if (!candidates.length) return null;
 
     const priorities = Array.isArray(setting.priorityOrder)
@@ -1511,7 +1583,12 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     const updated = await this.prisma.$transaction(async (tx: any) => {
       const row = await tx.omniConversation.update({
         where: { id: conversationId },
-        data: { assigneeId: selected.staffId, assigneeName: selected.staffName, status: "PROCESSING" },
+        data: {
+          assigneeId: selected.staffId,
+          assigneeName: selected.staffName,
+          // Phân công KHÔNG đồng nghĩa đã trả lời. Giữ OPEN cho tới khi
+          // nhân viên thực sự gửi tin; sendMessage() mới chuyển OPEN -> PROCESSING.
+        },
         include: { customer: true, page: true, tags: true },
       });
       await tx.omniAssignmentSetting.update({ where: { id: "default" }, data: { lastAssignedStaffId: selected.staffId } });
@@ -1543,15 +1620,56 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       return row;
     });
     this.realtime.emit({ type: "conversation.assigned", payload: updated });
+    // Một số client chỉ lắng nghe conversation.updated. Emit cả hai để tên người
+    // phụ trách xuất hiện ngay sau webhook, không cần F5/load list lại.
+    this.realtime.emit({ type: "conversation.updated", payload: updated });
     return updated;
   }
 
+  private findMetaReferralCandidate(event: any) {
+    const direct = [
+      event?.message?.referral,
+      event?.referral,
+      event?.postback?.referral,
+      event?.messaging_referral,
+      event?.message?.messaging_referral,
+      event?.message?.quick_reply?.referral,
+    ].find((item) => item && typeof item === "object");
+    if (direct) return direct;
+
+    // Meta thỉnh thoảng thay đổi vị trí referral/ads_context_data giữa các loại
+    // Click-to-Messenger. Quét nông payload để không bỏ mất nguồn quảng cáo.
+    const queue: Array<{ value: any; depth: number }> = [{ value: event, depth: 0 }];
+    const seen = new Set<any>();
+    while (queue.length) {
+      const current = queue.shift()!;
+      const value = current.value;
+      if (!value || typeof value !== "object" || seen.has(value)) continue;
+      seen.add(value);
+
+      const ads = value?.ads_context_data;
+      const source = safeText(value?.source).toLowerCase();
+      const looksLikeAdReferral = Boolean(
+        value?.ad_id ||
+          value?.advertisement_id ||
+          (ads && typeof ads === "object") ||
+          source.includes("ad") ||
+          source.includes("ads"),
+      );
+      if (looksLikeAdReferral) return value;
+
+      if (current.depth >= 4) continue;
+      for (const child of Object.values(value)) {
+        if (child && typeof child === "object") {
+          queue.push({ value: child, depth: current.depth + 1 });
+        }
+      }
+    }
+    return null;
+  }
+
   private extractMetaAdReferral(event: any) {
-    const referral =
-      event?.message?.referral ||
-      event?.referral ||
-      event?.postback?.referral ||
-      null;
+    const referral = this.findMetaReferralCandidate(event);
 
     if (!referral || typeof referral !== "object") return null;
 
@@ -4068,10 +4186,15 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     });
 
     if (hasMessage) {
-      await this.autoAssignConversation(
+      const assignedConversation = await this.autoAssignConversation(
         conversation.id,
         "INCOMING_MESSAGE",
       );
+      if (!assignedConversation?.assigneeId) {
+        this.logger.warn(
+          `[OMNI_INCOMING_UNASSIGNED] conversation=${conversation.id} customer=${last6(senderId)}`,
+        );
+      }
     }
 
     return {

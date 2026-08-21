@@ -970,6 +970,20 @@ export class SampleFabricService {
           { colorName: { contains: q, mode: "insensitive" } },
           { colorCode: { contains: q, mode: "insensitive" } },
           { lotCode: { contains: q, mode: "insensitive" } },
+          { receivedByName: { contains: q, mode: "insensitive" } },
+          { note: { contains: q, mode: "insensitive" } },
+          { supplier: { is: { code: { contains: q, mode: "insensitive" } } } },
+          { supplier: { is: { name: { contains: q, mode: "insensitive" } } } },
+          { branch: { is: { name: { contains: q, mode: "insensitive" } } } },
+          { designSample: { is: { code: { contains: q, mode: "insensitive" } } } },
+          { designSample: { is: { name: { contains: q, mode: "insensitive" } } } },
+          { rolls: { some: { OR: [
+            { rollCode: { contains: q, mode: "insensitive" } },
+            { fabricCode: { contains: q, mode: "insensitive" } },
+            { colorName: { contains: q, mode: "insensitive" } },
+            { colorCode: { contains: q, mode: "insensitive" } },
+            { defectNote: { contains: q, mode: "insensitive" } },
+          ] } } },
         ] } : {}),
       },
       include: {
@@ -980,6 +994,7 @@ export class SampleFabricService {
         fabricColor: { select: { id: true, name: true, code: true } },
         rolls: { include: { images: { orderBy: { createdAt: "desc" } } }, orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] },
         fabricCosts: { orderBy: { fabricCode: "asc" } },
+        colorMaps: { orderBy: [{ fabricCode: "asc" }, { colorName: "asc" }] },
         measurements: { orderBy: { createdAt: "desc" } },
         images: { orderBy: { createdAt: "desc" } },
       },
@@ -1063,8 +1078,13 @@ export class SampleFabricService {
           vietnamShippingVnd:this.n(x.vietnamShippingVnd),
           note:String(x.note||"").trim()||null,
         })).filter((x:any)=>x.fabricCode) } : undefined,
+        colorMaps: Array.isArray(body?.colorMaps) ? { create: body.colorMaps.map((x:any)=>({
+          fabricCode:String(x.fabricCode||"").trim().toUpperCase(),
+          colorName:String(x.colorName||"").trim(),
+          colorCode:this.normalizeColorCode(x.colorCode),
+        })).filter((x:any)=>x.fabricCode&&x.colorName) } : undefined,
       },
-      include: { supplier: true, branch: true, designSample: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, fabricCosts: { orderBy: { fabricCode: "asc" } }, measurements: true, images: true },
+      include: { supplier: true, branch: true, designSample: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, fabricCosts: { orderBy: { fabricCode: "asc" } }, colorMaps: { orderBy: [{ fabricCode: "asc" }, { colorName: "asc" }] }, measurements: true, images: true },
     });
     return this.receiptForUser(created, user);
   }
@@ -1124,6 +1144,22 @@ export class SampleFabricService {
         }
         await tx.fabricReceiptFabricCost.deleteMany({where:{fabricReceiptId:id,...(keepCostIds.length?{id:{notIn:keepCostIds}}:{})}});
       }
+      if (Array.isArray(body?.colorMaps)) {
+        const keepColorIds:string[]=[];
+        for (const x of body.colorMaps) {
+          const fabricCode=String(x?.fabricCode||"").trim().toUpperCase();
+          const colorName=String(x?.colorName||"").trim();
+          if(!fabricCode||!colorName) continue;
+          const data={fabricCode,colorName,colorCode:this.normalizeColorCode(x.colorCode)};
+          if(x.id){
+            const exists=await tx.fabricReceiptColorMap.findFirst({where:{id:x.id,fabricReceiptId:id},select:{id:true}});
+            if(exists){await tx.fabricReceiptColorMap.update({where:{id:x.id},data});keepColorIds.push(x.id);continue;}
+          }
+          const made=await tx.fabricReceiptColorMap.create({data:{fabricReceiptId:id,...data}});
+          keepColorIds.push(made.id);
+        }
+        await tx.fabricReceiptColorMap.deleteMany({where:{fabricReceiptId:id,...(keepColorIds.length?{id:{notIn:keepColorIds}}:{})}});
+      }
       return tx.fabricReceipt.update({
         where: { id },
         data: {
@@ -1151,7 +1187,7 @@ export class SampleFabricService {
           ...(body?.receivedByStaffId !== undefined ? { receivedByStaffId: receiver?.id || null, receivedByName: receiver?.name || null } : {}),
           ...(body?.note !== undefined ? { note: body.note || null } : {}),
         },
-        include: { supplier: true, branch: true, designSample: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, fabricCosts: { orderBy: { fabricCode: "asc" } }, measurements: true, images: true },
+        include: { supplier: true, branch: true, designSample: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, fabricCosts: { orderBy: { fabricCode: "asc" } }, colorMaps: { orderBy: [{ fabricCode: "asc" }, { colorName: "asc" }] }, measurements: true, images: true },
       });
     });
     return this.receiptForUser(updated, user);
@@ -1249,6 +1285,21 @@ export class SampleFabricService {
     return this.prisma.fabricReceipt.update({
       where: { id },
       data: { varianceApproved: true, varianceApprovedBy: actor.name || actor.id, varianceApprovedAt: new Date() },
+    });
+  }
+
+  async cancelFabricReceipt(id: string, user?: Actor) {
+    const found = await this.prisma.fabricReceipt.findUnique({ where: { id } });
+    if (!found) throw new NotFoundException("Không tìm thấy phiếu vải về.");
+    if (found.status === "COMPLETED") throw new BadRequestException("Phiếu đã hoàn tất, không thể huỷ trực tiếp.");
+    if (found.status === "CANCELLED") return found;
+    const actor = this.actor(user);
+    return this.prisma.fabricReceipt.update({
+      where: { id },
+      data: {
+        status: "CANCELLED",
+        note: [found.note, `Huỷ phiếu bởi ${actor.name || actor.id} lúc ${new Date().toISOString()}`].filter(Boolean).join("\n"),
+      },
     });
   }
 

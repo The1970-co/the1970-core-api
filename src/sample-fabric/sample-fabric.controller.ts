@@ -306,6 +306,12 @@ export class SampleFabricController {
     return this.service.approveVariance(id, req.user);
   }
 
+  @Post("fabric-receipts/:id/cancel")
+  @RequirePermissions("fabric_receipt.cancel")
+  cancelFabricReceipt(@Param("id") id: string, @Req() req: any) {
+    return this.service.cancelFabricReceipt(id, req.user);
+  }
+
   @Delete("fabric-receipts/:id")
   @RequirePermissions("fabric_receipt.delete")
   deleteFabricReceipt(@Param("id") id: string) {

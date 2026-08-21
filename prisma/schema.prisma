@@ -3228,6 +3228,7 @@ model FabricReceipt {
   branch              Branch?             @relation(fields: [branchId], references: [id], onDelete: SetNull)
   rolls               FabricReceiptRoll[]
   fabricCosts         FabricReceiptFabricCost[]
+  colorMaps           FabricReceiptColorMap[]
   measurements        FabricMeasurement[]
   images              FabricReceiptImage[]
 
@@ -3286,6 +3287,23 @@ model FabricReceiptFabricCost {
   @@unique([fabricReceiptId, fabricCode])
   @@index([fabricReceiptId])
   @@index([fabricCode])
+}
+
+model FabricReceiptColorMap {
+  id              String        @id @default(cuid())
+  fabricReceiptId String
+  fabricCode      String
+  colorName       String
+  colorCode       String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  fabricReceipt   FabricReceipt @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
+
+  @@unique([fabricReceiptId, fabricCode, colorName, colorCode])
+  @@index([fabricReceiptId])
+  @@index([fabricCode])
+  @@index([colorCode])
 }
 
 model FabricMeasurement {

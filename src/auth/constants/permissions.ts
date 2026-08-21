@@ -267,12 +267,14 @@ export const PERMISSIONS = {
 
   // Fabric receipt
   FABRIC_RECEIPT_VIEW: "fabric_receipt.view",
+  FABRIC_RECEIPT_FABRIC_BOARD_LINK: "fabric_receipt.fabric_board_link",
   FABRIC_RECEIPT_CREATE: "fabric_receipt.create",
   FABRIC_RECEIPT_EDIT: "fabric_receipt.edit",
   FABRIC_RECEIPT_MEASURE: "fabric_receipt.measure",
   FABRIC_RECEIPT_UPLOAD_IMAGES: "fabric_receipt.upload_images",
   FABRIC_RECEIPT_APPROVE_VARIANCE: "fabric_receipt.approve_variance",
   FABRIC_RECEIPT_COMPLETE: "fabric_receipt.complete",
+  FABRIC_RECEIPT_CANCEL: "fabric_receipt.cancel",
   FABRIC_RECEIPT_DELETE: "fabric_receipt.delete",
 
   // Fabric receipt sensitive fields
