@@ -268,20 +268,32 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
           `[META_HISTORY_BACKFILL_START] page=${pageId} psid=${last6(customerPsid)} conversation=${conversationId}`,
         );
 
-        // Quan trọng: user_id lọc thẳng đúng khách, KHÔNG list toàn bộ inbox Page.
+        // Chỉ nhận thread khi Meta xác nhận participant đúng PSID khách.
+        // Không bao giờ lấy data[0] một cách mù quáng: nếu user_id bị Meta bỏ qua
+        // hoặc trả sai, làm vậy sẽ nhét lịch sử của khách A vào conversation khách B.
         const found: any = await this.metaFetch(`${pageId}/conversations`, {
           platform: "messenger",
           user_id: customerPsid,
-          fields: "id,updated_time",
-          limit: "1",
+          fields: "id,updated_time,participants.limit(20){id,name}",
+          limit: "10",
         });
-        const metaConversationId = safeText(found?.data?.[0]?.id);
+        const candidates = Array.isArray(found?.data) ? found.data : [];
+        const matchedThread = candidates.find((item: any) => {
+          const participants = Array.isArray(item?.participants?.data)
+            ? item.participants.data
+            : [];
+          return participants.some(
+            (participant: any) => safeText(participant?.id) === customerPsid,
+          );
+        });
+        const metaConversationId = safeText(matchedThread?.id);
         if (!metaConversationId) {
           this.logger.warn(
-            `[META_HISTORY_BACKFILL_NO_THREAD] page=${pageId} psid=${last6(customerPsid)}`,
+            `[META_HISTORY_BACKFILL_THREAD_MISMATCH] page=${pageId} psid=${last6(customerPsid)} candidates=${candidates.length}`,
           );
-          this.messengerHistoryBackfillDone.add(key);
-          return { skipped: true, reason: "meta_conversation_not_found" };
+          // Không đánh dấu done để lần sau có thể thử lại; quan trọng nhất là KHÔNG
+          // import nhầm bất kỳ thread nào khi chưa verify participant.
+          return { skipped: true, reason: "meta_conversation_not_verified" };
         }
 
         let detail: any;
@@ -314,6 +326,27 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
         let imported = 0;
         let skipped = 0;
 
+        // Tự dọn lỗi của bản lazy-history cũ: trong Messenger 1:1, mọi tin IN của
+        // conversation này phải có senderId đúng bằng PSID khách. Chỉ xóa trường hợp
+        // chắc chắn sai; không đụng OUT vì senderId OUT có thể là Page hoặc staff local.
+        const wrongInbound = await this.prisma.omniMessage.findMany({
+          where: {
+            conversationId,
+            direction: "IN" as any,
+            senderId: { not: customerPsid },
+          },
+          select: { id: true, providerMessageId: true, senderId: true },
+          take: 500,
+        });
+        if (wrongInbound.length) {
+          await this.prisma.omniMessage.deleteMany({
+            where: { id: { in: wrongInbound.map((item: any) => item.id) } },
+          });
+          this.logger.warn(
+            `[META_HISTORY_CORRUPT_INBOUND_CLEANED] conversation=${conversationId} psid=${last6(customerPsid)} deleted=${wrongInbound.length}`,
+          );
+        }
+
         for (const raw of ordered) {
           const providerMessageId = safeText(raw?.id);
           if (!providerMessageId) {
@@ -323,7 +356,34 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
 
           const fromId = safeText(raw?.from?.id);
           const fromName = safeText(raw?.from?.name);
-          const direction = fromId === pageId ? "OUT" : "IN";
+          const toRows = Array.isArray(raw?.to?.data) ? raw.to.data : [];
+          const toIds = toRows.map((item: any) => safeText(item?.id)).filter(Boolean);
+          const isPageSender =
+            fromId === pageId ||
+            (Boolean(this.configuredPageId) && fromId === this.configuredPageId);
+          const isTargetCustomerSender = fromId === customerPsid;
+
+          // Messenger 1:1 của khách này chỉ được chứa IN từ đúng PSID khách, hoặc
+          // OUT từ Page. Bất kỳ sender nào khác nghĩa là Meta trả nhầm thread/data;
+          // bỏ qua tuyệt đối để không làm lẫn hội thoại giữa hai khách.
+          if (!isPageSender && !isTargetCustomerSender) {
+            this.logger.warn(
+              `[META_HISTORY_MESSAGE_OWNER_MISMATCH] conversation=${conversationId} expected=${last6(customerPsid)} from=${last6(fromId)} message=${providerMessageId}`,
+            );
+            skipped += 1;
+            continue;
+          }
+
+          // Với tin OUT, nếu Meta có trường to thì phải hướng tới đúng khách.
+          if (isPageSender && toIds.length && !toIds.includes(customerPsid)) {
+            this.logger.warn(
+              `[META_HISTORY_MESSAGE_RECIPIENT_MISMATCH] conversation=${conversationId} expected=${last6(customerPsid)} message=${providerMessageId}`,
+            );
+            skipped += 1;
+            continue;
+          }
+
+          const direction = isPageSender ? "OUT" : "IN";
           const sentAtRaw = raw?.created_time ? new Date(raw.created_time) : new Date();
           const sentAt = Number.isNaN(sentAtRaw.getTime()) ? new Date() : sentAtRaw;
           const messageText = safeText(raw?.message);
