@@ -1773,6 +1773,13 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
   private buildAdReferralUpdate(referral: any, timestamp: number) {
     if (!referral) return {};
 
+    // Meta referral OPEN_THREAD đôi khi gửi timestamp theo giây (10 chữ số),
+    // còn message webhook dùng milliseconds (13 chữ số). Chuẩn hoá về ms trước khi lưu.
+    const rawTimestamp = Number(timestamp || Date.now());
+    const timestampMs = rawTimestamp > 0 && rawTimestamp < 1_000_000_000_000
+      ? rawTimestamp * 1000
+      : rawTimestamp;
+
     return {
       referralSource: referral.source,
       referralType: referral.type,
@@ -1787,7 +1794,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       adVideoUrl: referral.videoUrl,
       adUrl: referral.url,
       adReferral: referral.raw,
-      adFirstSeenAt: new Date(timestamp || Date.now()),
+      adFirstSeenAt: new Date(timestampMs),
     };
   }
 
