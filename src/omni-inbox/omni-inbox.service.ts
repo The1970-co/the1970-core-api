@@ -1488,7 +1488,23 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       if (priority === "ONLINE" && setting.requireOnline) {
         const online = candidates.filter(isOnline);
         if (!online.length) {
-          if (setting.noCandidateMode === "ASSIGN_ANYWAY") continue;
+          // Tin MỚI của khách không được để Chưa gán chỉ vì heartbeat của nhân viên
+          // chưa kịp cập nhật hoặc tất cả vừa rơi khỏi online window. Vẫn chia cho
+          // tập nhân viên hợp lệ đang bật nhận tin; các sweep khác tiếp tục tôn trọng
+          // cấu hình noCandidateMode để không phá chính sách hàng chờ.
+          if (
+            triggerType === "INCOMING_MESSAGE" ||
+            setting.noCandidateMode === "ASSIGN_ANYWAY"
+          ) {
+            decision.considered.push({
+              reason: "ONLINE_FALLBACK_ASSIGN_ANYWAY",
+              remaining: candidates.map((item: any) => item.staffId),
+            });
+            this.logger.warn(
+              `[OMNI_ASSIGN_ONLINE_FALLBACK] conversation=${conversationId} trigger=${triggerType} candidates=${candidates.length}`,
+            );
+            continue;
+          }
           await (this.prisma as any).omniAssignmentHistory.create({
             data: {
               conversationId,
