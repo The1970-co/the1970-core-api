@@ -41,6 +41,7 @@ model Product {
   purchaseReceiptItems PurchaseReceiptItem[]
   promotionProducts    PromotionProduct[]
   designSamples         DesignSample[]
+  fabricReceipts        FabricReceipt[]
 
   @@index([categoryId])
 }
@@ -3185,6 +3186,7 @@ model FabricReceipt {
   id                  String              @id @default(cuid())
   receiptCode         String              @unique
   designSampleId      String?
+  productId           String?
   fabricBoardId       String?
   fabricColorId       String?
   supplierId          String?
@@ -3222,6 +3224,7 @@ model FabricReceipt {
   updatedAt           DateTime            @updatedAt
 
   designSample        DesignSample?       @relation(fields: [designSampleId], references: [id], onDelete: SetNull)
+  product             Product?            @relation(fields: [productId], references: [id], onDelete: SetNull)
   fabricBoard         FabricBoard?         @relation(fields: [fabricBoardId], references: [id], onDelete: SetNull)
   fabricColor         FabricBoardColor?    @relation(fields: [fabricColorId], references: [id], onDelete: SetNull)
   supplier            FabricSupplier?     @relation(fields: [supplierId], references: [id], onDelete: SetNull)
@@ -3233,6 +3236,7 @@ model FabricReceipt {
   images              FabricReceiptImage[]
 
   @@index([designSampleId])
+  @@index([productId])
   @@index([fabricBoardId])
   @@index([fabricColorId])
   @@index([supplierId])
@@ -3255,6 +3259,7 @@ model FabricReceiptRoll {
   supplierDeclaredKg  Decimal?        @db.Decimal(12, 3)
   actualM             Decimal?        @db.Decimal(12, 3)
   actualKg            Decimal?        @db.Decimal(12, 3)
+  measuredGsm         Decimal?        @db.Decimal(10, 2)
   unitPriceCny        Decimal?        @db.Decimal(14, 4)
   priceUnit           FabricPriceUnit @default(METER)
   defectNote          String?

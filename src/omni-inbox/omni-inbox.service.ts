@@ -1488,21 +1488,15 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       if (priority === "ONLINE" && setting.requireOnline) {
         const online = candidates.filter(isOnline);
         if (!online.length) {
-          // Tin MỚI của khách không được để Chưa gán chỉ vì heartbeat của nhân viên
-          // chưa kịp cập nhật hoặc tất cả vừa rơi khỏi online window. Vẫn chia cho
-          // tập nhân viên hợp lệ đang bật nhận tin; các sweep khác tiếp tục tôn trọng
-          // cấu hình noCandidateMode để không phá chính sách hàng chờ.
-          if (
-            triggerType === "INCOMING_MESSAGE" ||
-            setting.noCandidateMode === "ASSIGN_ANYWAY"
-          ) {
+          // ONLINE là điều kiện cứng khi requireOnline=true. Không bao giờ chia
+          // INCOMING_MESSAGE cho nhân viên offline chỉ để tránh trạng thái Chưa gán.
+          // Khi không có ai online, hội thoại phải giữ nguyên để hàng chờ/sweep sau
+          // xử lý lúc có nhân viên heartbeat trở lại.
+          if (setting.noCandidateMode === "ASSIGN_ANYWAY" && !setting.requireOnline) {
             decision.considered.push({
-              reason: "ONLINE_FALLBACK_ASSIGN_ANYWAY",
+              reason: "ASSIGN_ANYWAY_WITHOUT_ONLINE_REQUIREMENT",
               remaining: candidates.map((item: any) => item.staffId),
             });
-            this.logger.warn(
-              `[OMNI_ASSIGN_ONLINE_FALLBACK] conversation=${conversationId} trigger=${triggerType} candidates=${candidates.length}`,
-            );
             continue;
           }
           await (this.prisma as any).omniAssignmentHistory.create({
