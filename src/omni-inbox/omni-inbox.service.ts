@@ -4085,7 +4085,28 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       const existed = await this.prisma.omniMessage.findUnique({
         where: { providerMessageId: messageId },
       });
-      if (existed) return { duplicated: true };
+      if (existed) {
+        // Khách cũ có thể đã được lazy-history/backfill ghi message vào DB trước khi
+        // webhook mang referral quảng cáo tới. Trước đây ta return ngay vì duplicate,
+        // nên nguồn ads bị mất chỉ ở hội thoại cũ. Nếu duplicate event có referral,
+        // vẫn phải cập nhật metadata ads vào đúng conversation rồi mới bỏ qua message.
+        if (adReferral && existed.conversationId) {
+          const recoveredConversation = await this.prisma.omniConversation.update({
+            where: { id: existed.conversationId },
+            data: adReferralData,
+            include: { customer: true, page: true, tags: true },
+          });
+          this.logger.log(
+            `[META_AD_REFERRAL_RECOVERED_FROM_DUPLICATE] conversation=${existed.conversationId} ad=${adReferral.adId || "-"} post=${adReferral.postId || "-"} source=${adReferral.source || "-"}`,
+          );
+          this.realtime.emit({
+            type: "conversation.updated",
+            payload: recoveredConversation,
+          });
+          return { duplicated: true, referral: true, referralRecovered: true };
+        }
+        return { duplicated: true };
+      }
     }
 
     // Webhook phải ghi tin vào DB/SSE trước, không chờ Graph profile.
