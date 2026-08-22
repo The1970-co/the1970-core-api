@@ -2577,7 +2577,9 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
           where: { source: "OMNI_INBOX_QUICK_ORDER" },
           orderBy: { createdAt: "desc" },
           take: 10,
-          include: { items: true },
+          // Quan trọng: detail hội thoại phải mang luôn Shipment như /orders cũ.
+          // Nếu không, card đơn có thể hiện nhưng mất trackingCode/GHN.
+          include: { items: true, shipment: true },
         },
         messages: { orderBy: { sentAt: "desc" }, take: 200 },
       },
