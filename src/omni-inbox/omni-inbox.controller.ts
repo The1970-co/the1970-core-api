@@ -274,6 +274,16 @@ export class OmniInboxController {
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
+  @Get("conversations/:id/quick-orders")
+  @RequireAnyPermissions(
+    "omni_inbox.view",
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
+  listConversationQuickOrders(@Param("id") id: string) {
+    return this.service.listConversationQuickOrders(id);
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
   @Post("conversations/:id/quick-orders")
   @RequireAnyPermissions("omni_inbox.create_order", PERMISSIONS.ORDERS_CREATE)
   createQuickOrder(@Param("id") id: string, @Body() dto: CreateQuickOrderDto, @Request() req: any) {

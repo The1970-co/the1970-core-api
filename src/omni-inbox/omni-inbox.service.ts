@@ -3308,6 +3308,26 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     return message;
   }
 
+  async listConversationQuickOrders(conversationId: string) {
+    const conversation = await this.prisma.omniConversation.findUnique({
+      where: { id: conversationId },
+      select: { id: true },
+    });
+    if (!conversation) throw new NotFoundException("Không tìm thấy hội thoại.");
+
+    // Lấy theo liên kết nội bộ, không phụ thuộc số điện thoại của OmniCustomer.
+    // Dùng any để tương thích Prisma client hiện tại dù relation Shipment thay đổi typing.
+    return (this.prisma.order as any).findMany({
+      where: { omniConversationId: conversationId },
+      include: {
+        items: true,
+        shipment: true,
+      },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    });
+  }
+
   async createQuickOrder(conversationId: string, dto: any, staff?: any) {
     const conversation = await this.prisma.omniConversation.findUnique({
       where: { id: conversationId },
