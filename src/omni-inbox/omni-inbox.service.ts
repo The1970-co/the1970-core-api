@@ -2598,33 +2598,6 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    // Nếu nhân viên mở thread ngay khi webhook vừa tới, chờ đúng job lazy backfill
-    // của khách này hoàn tất để lịch sử cũ xuất hiện ngay trong response đầu tiên.
-    if (
-      (item as any).channel === "FACEBOOK" &&
-      !safeText((item as any).providerThreadId).startsWith("FACEBOOK_COMMENT:")
-    ) {
-      const parts = safeText((item as any).providerThreadId).split(":");
-      const pageProviderId = safeText(parts[1] || (item as any).page?.providerPageId);
-      const customerPsid = safeText(
-        (item as any).customer?.providerUserId || parts.slice(2).join(":"),
-      );
-      if (pageProviderId && customerPsid) {
-        await this.backfillMessengerHistoryForCustomer({
-          pageId: pageProviderId,
-          customerPsid,
-          conversationId: id,
-          customerName: (item as any).customer?.name,
-        });
-        // Backfill có thể vừa thêm message cũ nên lấy lại list trước khi trả frontend.
-        (item as any).messages = await this.prisma.omniMessage.findMany({
-          where: { conversationId: id },
-          orderBy: { sentAt: "desc" },
-          take: 200,
-        });
-      }
-    }
-
     if (safeText((item as any).providerThreadId).startsWith("FACEBOOK_COMMENT:")) {
       try {
         const synced = await this.syncFacebookCommentReplies(item as any);
@@ -4273,8 +4246,8 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     }
 
     // Khách vừa gửi tin mới: chỉ backfill lịch sử của CHÍNH khách này.
-    // Chạy nền để webhook trả 200 nhanh; getConversation() sẽ await cùng job nếu
-    // nhân viên mở thread ngay lập tức. Không có vòng lặp toàn bộ conversations Page.
+    // Chạy hoàn toàn nền để webhook và thao tác mở hội thoại không bị chặn bởi Meta.
+    // Không có vòng lặp toàn bộ conversations Page.
     if (hasMessage) {
       void this.backfillMessengerHistoryForCustomer({
         pageId: recipientId,
