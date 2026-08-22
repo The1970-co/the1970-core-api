@@ -146,6 +146,25 @@ export class OmniInboxController {
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
+  @Patch("conversations/:id/notes/:noteId")
+  @RequirePermissions("omni_inbox.notes.manage")
+  updateNote(
+    @Param("id") id: string,
+    @Param("noteId") noteId: string,
+    @Body() dto: { note: string },
+    @Request() req: any,
+  ) {
+    return this.service.updateNote(id, noteId, dto, req.user);
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
+  @Delete("conversations/:id/notes/:noteId")
+  @RequirePermissions("omni_inbox.notes.manage")
+  deleteNote(@Param("id") id: string, @Param("noteId") noteId: string) {
+    return this.service.deleteNote(id, noteId);
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
   @Patch("conversations/:id/read")
   @RequireAnyPermissions(
     "omni_inbox.view",

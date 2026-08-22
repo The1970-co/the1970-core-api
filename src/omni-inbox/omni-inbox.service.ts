@@ -2946,6 +2946,41 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     return item;
   }
 
+  async updateNote(conversationId: string, noteId: string, dto: { note: string }, staff?: any) {
+    const note = safeText(dto.note);
+    if (!note) throw new BadRequestException("Ghi chú trống.");
+
+    const current = await this.prisma.omniConversationNote.findFirst({
+      where: { id: noteId, conversationId },
+    });
+    if (!current) throw new NotFoundException("Không tìm thấy ghi chú.");
+
+    const item = await this.prisma.omniConversationNote.update({
+      where: { id: noteId },
+      data: {
+        note,
+        staffId: staff?.id || staff?.sub || current.staffId || null,
+        staffName: staff?.name || staff?.username || current.staffName || null,
+      },
+    });
+
+    this.realtime.emit({ type: "conversation.note_updated", payload: item });
+    return item;
+  }
+
+  async deleteNote(conversationId: string, noteId: string) {
+    const current = await this.prisma.omniConversationNote.findFirst({
+      where: { id: noteId, conversationId },
+      select: { id: true },
+    });
+    if (!current) throw new NotFoundException("Không tìm thấy ghi chú.");
+
+    await this.prisma.omniConversationNote.delete({ where: { id: noteId } });
+    const payload = { id: noteId, conversationId };
+    this.realtime.emit({ type: "conversation.note_deleted", payload });
+    return { success: true, ...payload };
+  }
+
   async markRead(id: string) {
     const item = await this.prisma.omniConversation.update({
       where: { id },
