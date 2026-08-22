@@ -168,8 +168,9 @@ export class SampleFabricService {
     const canViewCost = user === undefined || this.userHas(user, "fabric_receipt.cost.view") || this.userHas(user, "fabric_receipt.cost.edit");
     const rollTotals = Array.isArray(row.rolls) && row.rolls.length ? this.receiptTotalsFromRolls(row.rolls, row) : null;
     const priced=this.receiptCostSummary(row);
-    if (canViewCost) return {...row,...(rollTotals||{}),rolls:priced.rolls,fabricCosts:priced.fabricCosts,costSummary:priced.summary,supplier:this.supplierForUser(row.supplier,user)};
-    return {...row,...(rollTotals||{}),rolls:(Array.isArray(row.rolls)?row.rolls:[]).map((x:any)=>({...x,unitPriceCny:null,priceUnit:null,lineAmountCny:null,lineAmountVnd:null,priceQty:null})),fabricCosts:[],costSummary:null,supplier:this.supplierForUser(row.supplier,user),unitPrice:null,priceUnit:null,priceCurrency:null,exchangeRateToVnd:null,unitPriceVnd:null};
+    const fabricConfigs=(Array.isArray(row.fabricConfigs)?row.fabricConfigs:[]).map((x:any)=>({...x,supplier:this.supplierForUser(x.supplier,user)}));
+    if (canViewCost) return {...row,...(rollTotals||{}),rolls:priced.rolls,fabricCosts:priced.fabricCosts,fabricConfigs,costSummary:priced.summary,supplier:this.supplierForUser(row.supplier,user)};
+    return {...row,...(rollTotals||{}),rolls:(Array.isArray(row.rolls)?row.rolls:[]).map((x:any)=>({...x,unitPriceCny:null,priceUnit:null,lineAmountCny:null,lineAmountVnd:null,priceQty:null})),fabricCosts:[],fabricConfigs,costSummary:null,supplier:this.supplierForUser(row.supplier,user),unitPrice:null,priceUnit:null,priceCurrency:null,exchangeRateToVnd:null,unitPriceVnd:null};
   }
 
   async listFabricSuppliers(user?: any) {
@@ -1003,7 +1004,7 @@ export class SampleFabricService {
         fabricColor: { select: { id: true, name: true, code: true } },
         rolls: { include: { images: { orderBy: { createdAt: "desc" } } }, orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] },
         fabricCosts: { orderBy: { fabricCode: "asc" } },
-        fabricConfigs: { include: { product: { select: { id:true,name:true,slug:true,imageUrl:true } }, designSample: { select: { id:true,code:true,name:true,year:true } } }, orderBy: { fabricCode: "asc" } },
+        fabricConfigs: { include: { supplier:true, product: { select: { id:true,name:true,slug:true,imageUrl:true } }, designSample: { select: { id:true,code:true,name:true,year:true } } }, orderBy: { fabricCode: "asc" } },
         colorMaps: { orderBy: [{ fabricCode: "asc" }, { colorName: "asc" }] },
         measurements: { orderBy: { createdAt: "desc" } },
         images: { orderBy: { createdAt: "desc" } },
@@ -1093,6 +1094,9 @@ export class SampleFabricService {
         fabricConfigs: Array.isArray(body?.fabricConfigs) ? { create: body.fabricConfigs.map((x:any)=>({
           fabricCode:String(x.fabricCode||"").trim().toUpperCase(),
           materialName:String(x.materialName||"").trim()||null,
+          supplierId:x.supplierId||null,
+          fabricBoardCode:String(x.fabricBoardCode||"").replace(/[^A-Za-z0-9]/g,"").toUpperCase()||null,
+          fabricWidthCm:this.n(x.fabricWidthCm),
           productId:x.productId||null,
           designSampleId:x.designSampleId||null,
         })).filter((x:any)=>x.fabricCode) } : undefined,
@@ -1102,7 +1106,7 @@ export class SampleFabricService {
           colorCode:this.normalizeColorCode(x.colorCode),
         })).filter((x:any)=>x.fabricCode&&x.colorName) } : undefined,
       },
-      include: { supplier: true, branch: true, designSample: true, product: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, fabricCosts: { orderBy: { fabricCode: "asc" } }, fabricConfigs: { include: { product: true, designSample: true }, orderBy: { fabricCode: "asc" } }, colorMaps: { orderBy: [{ fabricCode: "asc" }, { colorName: "asc" }] }, measurements: true, images: true },
+      include: { supplier: true, branch: true, designSample: true, product: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, fabricCosts: { orderBy: { fabricCode: "asc" } }, fabricConfigs: { include: { supplier:true, product: true, designSample: true }, orderBy: { fabricCode: "asc" } }, colorMaps: { orderBy: [{ fabricCode: "asc" }, { colorName: "asc" }] }, measurements: true, images: true },
     });
     return this.receiptForUser(created, user);
   }
@@ -1171,6 +1175,9 @@ export class SampleFabricService {
           const data={
             fabricCode,
             materialName:String(x?.materialName||"").trim()||null,
+            supplierId:x?.supplierId||null,
+            fabricBoardCode:String(x?.fabricBoardCode||"").replace(/[^A-Za-z0-9]/g,"").toUpperCase()||null,
+            fabricWidthCm:this.n(x?.fabricWidthCm),
             productId:x?.productId||null,
             designSampleId:x?.designSampleId||null,
           };
@@ -1227,7 +1234,7 @@ export class SampleFabricService {
           ...(body?.receivedByStaffId !== undefined ? { receivedByStaffId: receiver?.id || null, receivedByName: receiver?.name || null } : {}),
           ...(body?.note !== undefined ? { note: body.note || null } : {}),
         },
-        include: { supplier: true, branch: true, designSample: true, product: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, fabricCosts: { orderBy: { fabricCode: "asc" } }, fabricConfigs: { include: { product: true, designSample: true }, orderBy: { fabricCode: "asc" } }, colorMaps: { orderBy: [{ fabricCode: "asc" }, { colorName: "asc" }] }, measurements: true, images: true },
+        include: { supplier: true, branch: true, designSample: true, product: true, fabricBoard: true, fabricColor: true, rolls: { include: { images: true } }, fabricCosts: { orderBy: { fabricCode: "asc" } }, fabricConfigs: { include: { supplier:true, product: true, designSample: true }, orderBy: { fabricCode: "asc" } }, colorMaps: { orderBy: [{ fabricCode: "asc" }, { colorName: "asc" }] }, measurements: true, images: true },
       });
     });
     return this.receiptForUser(updated, user);

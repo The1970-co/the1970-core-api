@@ -684,9 +684,10 @@ model FabricSupplier {
   isActive       Boolean         @default(true)
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
-  designSamples  DesignSample[]
-  fabricReceipts FabricReceipt[]
-  fabricBoards   FabricBoard[]
+  designSamples        DesignSample[]
+  fabricReceipts       FabricReceipt[]
+  fabricBoards         FabricBoard[]
+  fabricReceiptConfigs FabricReceiptFabricConfig[] @relation("FabricReceiptConfigSupplier")
 
   @@index([name])
   @@index([isActive])
@@ -3284,13 +3285,17 @@ model FabricReceiptFabricConfig {
   fabricReceiptId String
   fabricCode      String
   materialName    String?
+  supplierId      String?
+  fabricBoardCode String?
+  fabricWidthCm   Decimal?      @db.Decimal(10, 2)
   productId       String?
   designSampleId  String?
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
-  fabricReceipt   FabricReceipt @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
-  product         Product?      @relation("FabricReceiptConfigProduct", fields: [productId], references: [id], onDelete: SetNull)
+  fabricReceipt   FabricReceipt  @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
+  supplier        FabricSupplier? @relation("FabricReceiptConfigSupplier", fields: [supplierId], references: [id], onDelete: SetNull)
+  product         Product?       @relation("FabricReceiptConfigProduct", fields: [productId], references: [id], onDelete: SetNull)
   designSample    DesignSample? @relation("FabricReceiptConfigDesignSample", fields: [designSampleId], references: [id], onDelete: SetNull)
 
   @@unique([fabricReceiptId, fabricCode])
