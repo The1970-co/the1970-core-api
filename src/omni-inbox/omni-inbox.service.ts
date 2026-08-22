@@ -2577,9 +2577,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
           where: { source: "OMNI_INBOX_QUICK_ORDER" },
           orderBy: { createdAt: "desc" },
           take: 10,
-          // Quan trọng: detail hội thoại phải mang luôn Shipment như /orders cũ.
-          // Nếu không, card đơn có thể hiện nhưng mất trackingCode/GHN.
-          include: { items: true, shipment: true },
+          include: { items: true },
         },
         messages: { orderBy: { sentAt: "desc" }, take: 200 },
       },
@@ -2596,6 +2594,33 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(
         `[META_PROFILE_REFRESH_SKIP] conversation=${id} | ${error?.message || error}`,
       );
+    }
+
+    // Nếu nhân viên mở thread ngay khi webhook vừa tới, chờ đúng job lazy backfill
+    // của khách này hoàn tất để lịch sử cũ xuất hiện ngay trong response đầu tiên.
+    if (
+      (item as any).channel === "FACEBOOK" &&
+      !safeText((item as any).providerThreadId).startsWith("FACEBOOK_COMMENT:")
+    ) {
+      const parts = safeText((item as any).providerThreadId).split(":");
+      const pageProviderId = safeText(parts[1] || (item as any).page?.providerPageId);
+      const customerPsid = safeText(
+        (item as any).customer?.providerUserId || parts.slice(2).join(":"),
+      );
+      if (pageProviderId && customerPsid) {
+        await this.backfillMessengerHistoryForCustomer({
+          pageId: pageProviderId,
+          customerPsid,
+          conversationId: id,
+          customerName: (item as any).customer?.name,
+        });
+        // Backfill có thể vừa thêm message cũ nên lấy lại list trước khi trả frontend.
+        (item as any).messages = await this.prisma.omniMessage.findMany({
+          where: { conversationId: id },
+          orderBy: { sentAt: "desc" },
+          take: 200,
+        });
+      }
     }
 
     if (safeText((item as any).providerThreadId).startsWith("FACEBOOK_COMMENT:")) {
@@ -3284,15 +3309,48 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
   }
 
   async listConversationQuickOrders(conversationId: string) {
-    const conversation = await this.prisma.omniConversation.findUnique({
+    const conversation: any = await this.prisma.omniConversation.findUnique({
       where: { id: conversationId },
-      select: { id: true },
+      include: {
+        customer: true,
+        messages: {
+          orderBy: { sentAt: "desc" },
+          take: 250,
+          select: { text: true },
+        },
+      },
     });
     if (!conversation) throw new NotFoundException("Không tìm thấy hội thoại.");
 
-    // Lấy theo liên kết nội bộ, không phụ thuộc số điện thoại của OmniCustomer.
-    // Dùng any để tương thích Prisma client hiện tại dù relation Shipment thay đổi typing.
-    return (this.prisma.order as any).findMany({
+    const normalizePhone = (value: unknown) => {
+      let digits = safeText(value).replace(/\D/g, "");
+      if (digits.startsWith("84") && digits.length >= 11) {
+        digits = `0${digits.slice(2)}`;
+      }
+      return digits;
+    };
+
+    const phoneCandidates = new Set<string>();
+    const customerPhone = normalizePhone(conversation.customer?.phone);
+    if (customerPhone.length >= 9) phoneCandidates.add(customerPhone);
+
+    // Đơn cũ có thể được tạo trước lúc OmniCustomer.phone được lưu.
+    // Quét lịch sử chat để lấy SĐT nhưng KHÔNG dùng nó làm khóa chính cho đơn mới.
+    const phonePattern = /(?:\+?84|0)(?:[\s.\-]?\d){8,10}/g;
+    for (const message of Array.isArray(conversation.messages)
+      ? conversation.messages
+      : []) {
+      const text = safeText(message?.text);
+      for (const match of text.match(phonePattern) || []) {
+        const normalized = normalizePhone(match);
+        if (normalized.length >= 9 && normalized.length <= 11) {
+          phoneCandidates.add(normalized);
+        }
+      }
+    }
+
+    // Nguồn chính và ổn định: liên kết nội bộ conversation -> order.
+    const linkedOrders: any[] = await (this.prisma.order as any).findMany({
       where: { omniConversationId: conversationId },
       include: {
         items: true,
@@ -3301,6 +3359,72 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       orderBy: { createdAt: "desc" },
       take: 100,
     });
+
+    // Fallback cho dữ liệu lịch sử trước khi có omniConversationId.
+    // Chỉ bổ sung order chưa gắn sang conversation khác để tránh lẫn đơn.
+    let legacyOrders: any[] = [];
+    if (phoneCandidates.size) {
+      const legacyIds = new Set<string>();
+      for (const phone of Array.from(phoneCandidates)) {
+        const suffix = phone.slice(-9);
+        const rows: any[] = await (this.prisma as any).$queryRawUnsafe(
+          `SELECT "id"
+             FROM "Order"
+            WHERE "omniConversationId" IS NULL
+              AND (
+                regexp_replace(coalesce("customerPhone", ''), '\\D', '', 'g') LIKE $1
+                OR regexp_replace(coalesce("shippingPhone", ''), '\\D', '', 'g') LIKE $1
+              )
+            ORDER BY "createdAt" DESC
+            LIMIT 100`,
+          `%${suffix}%`,
+        );
+        for (const row of Array.isArray(rows) ? rows : []) {
+          const id = safeText(row?.id);
+          if (id) legacyIds.add(id);
+        }
+      }
+
+      if (legacyIds.size) {
+        legacyOrders = await (this.prisma.order as any).findMany({
+          where: { id: { in: Array.from(legacyIds) } },
+          include: {
+            items: true,
+            shipment: true,
+          },
+          orderBy: { createdAt: "desc" },
+          take: 100,
+        });
+      }
+    }
+
+    const merged = new Map<string, any>();
+    for (const order of [...linkedOrders, ...legacyOrders]) {
+      if (order?.id) merged.set(order.id, order);
+    }
+
+    return Array.from(merged.values())
+      .sort(
+        (a: any, b: any) =>
+          new Date(b?.createdAt || 0).getTime() -
+          new Date(a?.createdAt || 0).getTime(),
+      )
+      .slice(0, 100)
+      .map((order: any) => ({
+        ...order,
+        // Flatten để frontend không phụ thuộc tên relation Prisma.
+        carrier: order?.shipment?.carrier || order?.carrier || null,
+        trackingCode:
+          order?.shipment?.trackingCode ||
+          order?.trackingCode ||
+          order?.ghnTrackingCode ||
+          null,
+        shippingStatus:
+          order?.shipment?.shippingStatus ||
+          order?.shipment?.partnerStatus ||
+          order?.shippingStatus ||
+          null,
+      }));
   }
 
   async createQuickOrder(conversationId: string, dto: any, staff?: any) {
@@ -4246,8 +4370,8 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     }
 
     // Khách vừa gửi tin mới: chỉ backfill lịch sử của CHÍNH khách này.
-    // Chạy hoàn toàn nền để webhook và thao tác mở hội thoại không bị chặn bởi Meta.
-    // Không có vòng lặp toàn bộ conversations Page.
+    // Chạy nền để webhook trả 200 nhanh; getConversation() sẽ await cùng job nếu
+    // nhân viên mở thread ngay lập tức. Không có vòng lặp toàn bộ conversations Page.
     if (hasMessage) {
       void this.backfillMessengerHistoryForCustomer({
         pageId: recipientId,
