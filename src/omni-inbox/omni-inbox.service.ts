@@ -3316,7 +3316,9 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
         messages: {
           orderBy: { sentAt: "desc" },
           take: 250,
-          select: { text: true },
+          // Chỉ dùng tin NHẬN từ chính khách làm fallback tìm SĐT.
+          // Tin OUT thường chứa hotline/shop phone và từng làm kéo hàng loạt đơn Admin.
+          select: { text: true, direction: true },
         },
       },
     });
@@ -3332,19 +3334,28 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
 
     const phoneCandidates = new Set<string>();
     const customerPhone = normalizePhone(conversation.customer?.phone);
-    if (customerPhone.length >= 9) phoneCandidates.add(customerPhone);
 
-    // Đơn cũ có thể được tạo trước lúc OmniCustomer.phone được lưu.
-    // Quét lịch sử chat để lấy SĐT nhưng KHÔNG dùng nó làm khóa chính cho đơn mới.
-    const phonePattern = /(?:\+?84|0)(?:[\s.\-]?\d){8,10}/g;
-    for (const message of Array.isArray(conversation.messages)
-      ? conversation.messages
-      : []) {
-      const text = safeText(message?.text);
-      for (const match of text.match(phonePattern) || []) {
-        const normalized = normalizePhone(match);
-        if (normalized.length >= 9 && normalized.length <= 11) {
-          phoneCandidates.add(normalized);
+    // Ưu tiên duy nhất SĐT đã xác nhận trên OmniCustomer.
+    // Nếu chưa có, chỉ lấy SĐT đầu tiên từ tin IN gần nhất của chính khách.
+    // Tuyệt đối không quét tin OUT vì mẫu trả lời của shop có hotline/SĐT khác;
+    // dùng các số đó làm fallback từng khiến mọi Order omniConversationId=NULL
+    // do Admin tạo bị kéo nhầm vào lịch sử của khách.
+    if (customerPhone.length >= 9 && customerPhone.length <= 11) {
+      phoneCandidates.add(customerPhone);
+    } else {
+      const phonePattern = /(?:\+?84|0)(?:[\s.\-]?\d){8,10}/g;
+      for (const message of Array.isArray(conversation.messages)
+        ? conversation.messages
+        : []) {
+        if (safeText(message?.direction).toUpperCase() !== "IN") continue;
+        const messageText = safeText(message?.text);
+        const matches = messageText.match(phonePattern) || [];
+        const firstValid = matches
+          .map((match: string) => normalizePhone(match))
+          .find((value: string) => value.length >= 9 && value.length <= 11);
+        if (firstValid) {
+          phoneCandidates.add(firstValid);
+          break;
         }
       }
     }
@@ -3372,12 +3383,12 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
              FROM "Order"
             WHERE "omniConversationId" IS NULL
               AND (
-                regexp_replace(coalesce("customerPhone", ''), '\\D', '', 'g') LIKE $1
-                OR regexp_replace(coalesce("shippingPhone", ''), '\\D', '', 'g') LIKE $1
+                right(regexp_replace(coalesce("customerPhone", ''), '\\D', '', 'g'), 9) = $1
+                OR right(regexp_replace(coalesce("shippingPhone", ''), '\\D', '', 'g'), 9) = $1
               )
             ORDER BY "createdAt" DESC
             LIMIT 100`,
-          `%${suffix}%`,
+          suffix,
         );
         for (const row of Array.isArray(rows) ? rows : []) {
           const id = safeText(row?.id);
