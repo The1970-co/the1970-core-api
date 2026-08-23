@@ -526,7 +526,7 @@ export class SampleFabricService {
   }
 
   async sampleMeta() {
-    const [staff, boards, factories, vocab] = await Promise.all([
+    const [staff, boards, factories, samplePeople, vocab] = await Promise.all([
       this.prisma.staffUser.findMany({
         where: { isActive: true },
         select: { id: true, code: true, name: true, branchId: true },
@@ -542,9 +542,48 @@ export class SampleFabricService {
         select: { id: true, code: true, name: true, phone: true },
         orderBy: [{ name: "asc" }, { code: "asc" }],
       }),
+      this.prisma.sampleTechnicalPerson.findMany({
+        where: { isActive: true },
+        orderBy: [{ role: "asc" }, { name: "asc" }],
+      }),
       this.productGroupsAndCompositions(),
     ]);
-    return { staff, boards, factories, seasons: SAMPLE_SEASONS, ...vocab };
+    return { staff, boards, factories, samplePeople, seasons: SAMPLE_SEASONS, ...vocab };
+  }
+
+  async listSamplePeople() {
+    return this.prisma.sampleTechnicalPerson.findMany({
+      where: { isActive: true },
+      orderBy: [{ role: "asc" }, { name: "asc" }],
+    });
+  }
+
+  async createSamplePerson(body: any) {
+    const name = String(body?.name || "").trim();
+    if (!name) throw new BadRequestException("Thiếu tên người.");
+    const role = String(body?.role || "").trim().toUpperCase();
+    if (!["SAMPLE_MAKER","PATTERN_MAKER","BOTH"].includes(role)) throw new BadRequestException("Vai trò người ra mẫu / thiết kế rập không hợp lệ.");
+    const existing = await this.prisma.sampleTechnicalPerson.findFirst({
+      where: { name: { equals: name, mode: "insensitive" }, role: role as any, isActive: true },
+    });
+    if (existing) return existing;
+    return this.prisma.sampleTechnicalPerson.create({
+      data: {
+        name,
+        role: role as any,
+        phone: String(body?.phone || "").trim() || null,
+        note: String(body?.note || "").trim() || null,
+      },
+    });
+  }
+
+  private async sampleTechnicalPersonSnapshot(id?: string | null, allowedRoles: string[] = []) {
+    const clean = String(id || "").trim();
+    if (!clean) return null;
+    const person = await this.prisma.sampleTechnicalPerson.findFirst({ where: { id: clean, isActive: true } });
+    if (!person) throw new BadRequestException("Người ra mẫu / thiết kế rập không còn tồn tại.");
+    if (allowedRoles.length && person.role !== "BOTH" && !allowedRoles.includes(person.role)) throw new BadRequestException("Người được chọn không đúng vai trò.");
+    return person;
   }
 
   private async sampleBoardSnapshot(fabricBoardId?: string | null) {
@@ -634,6 +673,8 @@ export class SampleFabricService {
     const status = (body?.status || "IDEA") as DesignSampleStatus;
     const board = await this.sampleBoardSnapshot(body?.fabricBoardId);
     const sampleFactory = await this.sampleFactorySnapshot(body?.sampleFactoryId);
+    const sampleMaker = await this.sampleTechnicalPersonSnapshot(body?.sampleMakerId, ["SAMPLE_MAKER"]);
+    const patternMaker = await this.sampleTechnicalPersonSnapshot(body?.patternMakerId, ["PATTERN_MAKER"]);
     const images = Array.isArray(body?.images) ? body.images : [];
     return this.prisma.designSample.create({
       data: {
@@ -647,6 +688,10 @@ export class SampleFabricService {
         fabricColorCode: this.normalizeColorCode(body?.fabricColorCode),
         sampleFactoryId: sampleFactory?.id || null,
         sampleFactoryName: sampleFactory?.name || null,
+        sampleMakerId: sampleMaker?.id || null,
+        sampleMakerName: sampleMaker?.name || null,
+        patternMakerId: patternMaker?.id || null,
+        patternMakerName: patternMaker?.name || null,
         supplierId: body?.supplierId || board?.supplierId || null,
         fabricBoardCode: this.normalizeSampleCode(body?.fabricBoardCode) || board?.boardCode || null,
         fabricCode: this.normalizeSampleCode(body?.fabricCode) || board?.fabricCode || null,
@@ -707,6 +752,12 @@ export class SampleFabricService {
     const sampleFactory = body?.sampleFactoryId !== undefined
       ? await this.sampleFactorySnapshot(body.sampleFactoryId)
       : undefined;
+    const sampleMaker = body?.sampleMakerId !== undefined
+      ? await this.sampleTechnicalPersonSnapshot(body.sampleMakerId, ["SAMPLE_MAKER"])
+      : undefined;
+    const patternMaker = body?.patternMakerId !== undefined
+      ? await this.sampleTechnicalPersonSnapshot(body.patternMakerId, ["PATTERN_MAKER"])
+      : undefined;
     return this.prisma.$transaction(async (tx) => {
       if (Array.isArray(body?.images)) {
         await tx.designSampleImage.deleteMany({ where: { designSampleId: id } });
@@ -734,6 +785,14 @@ export class SampleFabricService {
           ...(body?.sampleFactoryId !== undefined ? {
             sampleFactoryId: sampleFactory?.id || null,
             sampleFactoryName: sampleFactory?.name || null,
+          } : {}),
+          ...(body?.sampleMakerId !== undefined ? {
+            sampleMakerId: sampleMaker?.id || null,
+            sampleMakerName: sampleMaker?.name || null,
+          } : {}),
+          ...(body?.patternMakerId !== undefined ? {
+            patternMakerId: patternMaker?.id || null,
+            patternMakerName: patternMaker?.name || null,
           } : {}),
           ...(body?.supplierId !== undefined || body?.fabricBoardId !== undefined ? { supplierId: body?.supplierId || board?.supplierId || null } : {}),
           ...(body?.fabricBoardCode !== undefined || body?.fabricBoardId !== undefined ? { fabricBoardCode: this.normalizeSampleCode(body?.fabricBoardCode) || board?.boardCode || null } : {}),

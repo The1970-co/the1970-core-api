@@ -2933,6 +2933,30 @@ model FabricSampleDispatch {
   @@index([recipientName])
 }
 
+enum SampleTechnicalPersonRole {
+  SAMPLE_MAKER
+  PATTERN_MAKER
+  BOTH
+}
+
+model SampleTechnicalPerson {
+  id        String                    @id @default(cuid())
+  name      String
+  role      SampleTechnicalPersonRole
+  phone     String?
+  note      String?
+  isActive  Boolean                   @default(true)
+  createdAt DateTime                  @default(now())
+  updatedAt DateTime                  @updatedAt
+
+  sampleMakerSamples  DesignSample[] @relation("DesignSampleSampleMaker")
+  patternMakerSamples DesignSample[] @relation("DesignSamplePatternMaker")
+
+  @@index([role])
+  @@index([isActive])
+  @@index([name])
+}
+
 model DesignSample {
   id                String             @id @default(cuid())
   code              String             @unique
@@ -2948,9 +2972,13 @@ model DesignSample {
   fabricColorId     String?
   fabricColorName   String?
   fabricColorCode   String?
-  sampleFactoryId   String?
-  sampleFactoryName String?
-  producedProductId String?
+  sampleFactoryId     String?
+  sampleFactoryName   String?
+  sampleMakerId        String?
+  sampleMakerName      String?
+  patternMakerId       String?
+  patternMakerName     String?
+  producedProductId   String?
   status            DesignSampleStatus @default(IDEA)
   assigneeStaffId   String?
   assigneeName      String?
@@ -2967,7 +2995,9 @@ model DesignSample {
   supplier          FabricSupplier?    @relation(fields: [supplierId], references: [id], onDelete: SetNull)
   fabricBoard       FabricBoard?        @relation(fields: [fabricBoardId], references: [id], onDelete: SetNull)
   fabricColor       FabricBoardColor?   @relation(fields: [fabricColorId], references: [id], onDelete: SetNull)
-  producedProduct   Product?            @relation(fields: [producedProductId], references: [id], onDelete: SetNull)
+  producedProduct   Product?                  @relation(fields: [producedProductId], references: [id], onDelete: SetNull)
+  sampleMaker       SampleTechnicalPerson?     @relation("DesignSampleSampleMaker", fields: [sampleMakerId], references: [id], onDelete: SetNull)
+  patternMaker      SampleTechnicalPerson?     @relation("DesignSamplePatternMaker", fields: [patternMakerId], references: [id], onDelete: SetNull)
   colors            DesignSampleColor[]
   images            DesignSampleImage[]
   progressLogs      DesignSampleProgressLog[]
@@ -2982,6 +3012,8 @@ model DesignSample {
   @@index([fabricBoardId])
   @@index([fabricColorId])
   @@index([producedProductId])
+  @@index([sampleMakerId])
+  @@index([patternMakerId])
   @@index([assigneeStaffId])
   @@index([updatedAt])
 }

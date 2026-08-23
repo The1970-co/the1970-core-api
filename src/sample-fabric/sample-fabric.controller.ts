@@ -44,7 +44,7 @@ async function uploadSampleFile(file: Express.Multer.File, folder: string) {
   if (!file) throw new BadRequestException("Thiếu file");
   const original = String(file.originalname || "file").trim();
   const ext = original.includes(".") ? `.${original.split(".").pop()?.toLowerCase()}` : "";
-  const allowed = new Set([".pdf",".dxf",".dwg",".ai",".plt",".zip",".rar",".7z",".astm",".aama",".rul",".mdl",".pds",".hpgl",".svg"]);
+  const allowed = new Set([".pdf",".dxf",".dwg",".ai",".plt",".zip",".rar",".7z",".astm",".aama",".rul",".mdl",".pds",".hpgl",".hpg",".mrk",".pat",".cut",".nc",".svg"]);
   if (!allowed.has(ext)) throw new BadRequestException("File rập không đúng định dạng hỗ trợ.");
   const safeName = original.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-+/g, "-");
   const result: any = await new Promise((resolve, reject) => {
@@ -148,6 +148,18 @@ export class SampleFabricController {
   @RequirePermissions("design_sample.view")
   sampleMeta() {
     return this.service.sampleMeta();
+  }
+
+  @Get("samples/people")
+  @RequirePermissions("design_sample.view")
+  listSamplePeople() {
+    return this.service.listSamplePeople();
+  }
+
+  @Post("samples/people")
+  @RequirePermissions("design_sample.edit")
+  createSamplePerson(@Body() body: any) {
+    return this.service.createSamplePerson(body);
   }
 
   @Get("samples/check-code")
@@ -304,12 +316,6 @@ export class SampleFabricController {
   @RequirePermissions("fabric_receipt.approve_variance")
   approveVariance(@Param("id") id: string, @Req() req: any) {
     return this.service.approveVariance(id, req.user);
-  }
-
-  @Post("fabric-receipts/:id/cancel")
-  @RequirePermissions("fabric_receipt.cancel")
-  cancelFabricReceipt(@Param("id") id: string, @Req() req: any) {
-    return this.service.cancelFabricReceipt(id, req.user);
   }
 
   @Delete("fabric-receipts/:id")
