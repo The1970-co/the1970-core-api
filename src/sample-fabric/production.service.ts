@@ -524,7 +524,7 @@ export class ProductionService {
   async createAccessoryReceipt(body:any,user?:any){
     const rows=Array.isArray(body?.items)?body.items.filter((x:any)=>x?.accessoryItemId&&Number(this.n(x?.qty)||0)>0):[];
     if(!rows.length)throw new BadRequestException("Phiếu nhập NPL chưa có mặt hàng.");
-    const ids=[...new Set(rows.map((x:any)=>String(x.accessoryItemId)))];
+    const ids: string[] = Array.from(new Set<string>(rows.map((x: any) => String(x.accessoryItemId))));
     const items:any[]=await this.prisma.productionAccessoryItem.findMany({where:{id:{in:ids},isActive:true}});
     if(items.length!==ids.length)throw new BadRequestException("Có NPL không tồn tại hoặc đã ngừng sử dụng.");
     const actor=this.actor(user);
