@@ -180,8 +180,14 @@ export class ProductionController {
 
   @Post("orders/:id/calculate")
   @RequirePermissions("production.calculate")
-  calculate(@Param("id") id: string) {
-    return this.service.calculateOrder(id);
+  calculate(@Param("id") id: string, @Req() req: any) {
+    return this.service.calculateOrder(id, req.user);
+  }
+
+  @Patch("orders/:id/cut-actual")
+  @RequirePermissions("production.edit")
+  saveActualCutQuantities(@Param("id") id: string, @Body() body: any, @Req() req: any) {
+    return this.service.saveActualCutQuantities(id, body, req.user);
   }
 
   @Post("orders/:id/send")

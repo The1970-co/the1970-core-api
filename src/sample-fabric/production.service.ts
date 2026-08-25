@@ -58,6 +58,52 @@ export class ProductionService {
     return Number.isFinite(n) ? n : null;
   }
 
+  private normalizeProductionSize(value: any) {
+    const raw = String(value || "").trim().toUpperCase().replace(/\s+/g, "");
+    if (raw === "2XL") return "XXL";
+    return raw;
+  }
+
+  private normalizeAccessorySpecifications(typeName: string, value: any) {
+    const specs = value && typeof value === "object" && !Array.isArray(value) ? { ...value } : {};
+    if (String(typeName || "").trim() !== "Mác Size") return specs;
+
+    const sizeKind = String(specs.sizeKind || specs.sizeType || "").trim().toUpperCase();
+    if (sizeKind !== "SHIRT" && sizeKind !== "PANTS") {
+      throw new BadRequestException("Mác Size phải chọn loại size Áo hoặc Quần.");
+    }
+
+    const size = this.normalizeProductionSize(specs.size || specs.sizeLabel);
+    const allowed = sizeKind === "PANTS"
+      ? ["29", "30", "31", "32", "34", "36"]
+      : ["XS", "S", "M", "L", "XL", "XXL"];
+    if (!allowed.includes(size)) {
+      throw new BadRequestException(`Size ${size || "trống"} không hợp lệ cho ${sizeKind === "PANTS" ? "mác size quần" : "mác size áo"}.`);
+    }
+
+    return { ...specs, sizeKind, size };
+  }
+
+  private accessoryTaggedSize(item: any) {
+    if (String(item?.typeName || "").trim() !== "Mác Size") return null;
+    const specs = item?.specifications && typeof item.specifications === "object" ? item.specifications : {};
+    const explicit = this.normalizeProductionSize((specs as any).size || (specs as any).sizeLabel);
+    if (explicit) return explicit;
+
+    // Hỗ trợ dữ liệu Mác Size cũ chưa có specifications.size: chỉ suy ra khi size nằm ở cuối tên NPL.
+    const name = String(item?.name || "").trim().toUpperCase();
+    const matched = name.match(/(?:^|[-–—\s])((?:2?X?XL)|XS|S|M|L|29|30|31|32|34|36)\s*$/i);
+    return matched?.[1] ? this.normalizeProductionSize(matched[1]) : null;
+  }
+
+  private totalForTaggedSize(totalsBySize: Record<string, number>, taggedSize: string) {
+    const target = this.normalizeProductionSize(taggedSize);
+    return Object.entries(totalsBySize).reduce(
+      (sum, [size, qty]) => sum + (this.normalizeProductionSize(size) === target ? Number(qty || 0) : 0),
+      0,
+    );
+  }
+
   private normalizeColorCode(value: any) {
     const raw = String(value || "").trim();
     if (!raw) return null;
@@ -338,6 +384,7 @@ export class ProductionService {
     const name = String(body?.name || "").trim();
     const typeName = String(body?.typeName || "").trim();
     if (!name || !typeName) throw new BadRequestException("Thiếu tên hoặc loại NPL.");
+    const specifications = this.normalizeAccessorySpecifications(typeName, body?.specifications);
     const created = await this.prisma.productionAccessoryItem.create({
       data: {
         code: String(body?.code || "").trim().toUpperCase() || (await this.nextSimpleCode("item", name)),
@@ -348,7 +395,7 @@ export class ProductionService {
         stockQty: this.n(body?.stockQty) || 0,
         unitPrice: this.n(body?.unitPrice),
         supplierId: body?.supplierId || null,
-        specifications: body?.specifications && typeof body.specifications === "object" ? body.specifications : null,
+        specifications,
         note: body?.note || null,
       },
     });
@@ -356,18 +403,28 @@ export class ProductionService {
   }
 
   async updateAccessory(id: string, body: any, user?: any) {
+    const current = await this.prisma.productionAccessoryItem.findUnique({ where: { id } });
+    if (!current) throw new NotFoundException("Không tìm thấy NPL.");
+    const nextTypeName = body?.typeName !== undefined ? String(body.typeName || "").trim() : String(current.typeName || "").trim();
+    const shouldNormalizeSpecs = body?.typeName !== undefined || body?.specifications !== undefined;
+    const normalizedSpecifications = shouldNormalizeSpecs
+      ? this.normalizeAccessorySpecifications(
+          nextTypeName,
+          body?.specifications !== undefined ? body.specifications : current.specifications,
+        )
+      : undefined;
     const updated = await this.prisma.productionAccessoryItem.update({
       where: { id },
       data: {
         ...(body?.code !== undefined ? { code: String(body.code || "").trim().toUpperCase() } : {}),
         ...(body?.name !== undefined ? { name: String(body.name || "").trim() } : {}),
-        ...(body?.typeName !== undefined ? { typeName: String(body.typeName || "").trim() } : {}),
+        ...(body?.typeName !== undefined ? { typeName: nextTypeName } : {}),
         ...(body?.imageUrl !== undefined ? { imageUrl: body.imageUrl || null } : {}),
         ...(body?.unit !== undefined ? { unit: body.unit } : {}),
         ...(body?.stockQty !== undefined ? { stockQty: this.n(body.stockQty) || 0 } : {}),
         ...(body?.unitPrice !== undefined ? { unitPrice: this.n(body.unitPrice) } : {}),
         ...(body?.supplierId !== undefined ? { supplierId: body.supplierId || null } : {}),
-        ...(body?.specifications !== undefined ? { specifications: body.specifications && typeof body.specifications === "object" ? body.specifications : null } : {}),
+        ...(shouldNormalizeSpecs ? { specifications: normalizedSpecifications } : {}),
         ...(body?.note !== undefined ? { note: body.note || null } : {}),
       },
     });
@@ -485,7 +542,7 @@ export class ProductionService {
   async getOrder(id: string) {
     const order = await this.prisma.productionOrder.findUnique({ where: { id } });
     if (!order) throw new NotFoundException("Không tìm thấy lệnh SX.");
-    const [factory, rolls, sizes, materials, accessorySpecs] = await Promise.all([
+    const [factory, rolls, sizes, materials, accessorySpecs, cutHistory] = await Promise.all([
       this.prisma.productionPartner.findUnique({ where: { id: order.productionPartnerId } }),
       this.prisma.productionOrderRoll.findMany({ where: { productionOrderId: id }, orderBy: { createdAt: "asc" } }),
       this.prisma.productionSizePlan.findMany({
@@ -500,6 +557,11 @@ export class ProductionService {
         where: { productionOrderId: id },
         orderBy: { createdAt: "asc" },
       }),
+      this.prisma.productionCutQtyHistory.findMany({
+        where: { productionOrderId: id },
+        orderBy: { createdAt: "desc" },
+        take: 200,
+      }),
     ]);
     const legacySample = order.designSampleId ? await this.prisma.designSample.findUnique({ where: { id: order.designSampleId }, select: { id: true, code: true, name: true, coverImageUrl: true } }) : null;
     const legacyProduct = order.productId ? await this.prisma.product.findUnique({ where: { id: order.productId }, select: { id: true, name: true, slug: true, imageUrl: true, variants: { select: { sku: true }, take: 10 } } }) : null;
@@ -510,7 +572,7 @@ export class ProductionService {
       ...order, sourceCode, sourceName, sourceImageUrl,
       source: { type: order.sourceType, id: order.designSampleId || order.productId, code: sourceCode, name: sourceName, imageUrl: sourceImageUrl },
       sample: legacySample ? { ...legacySample, code: sourceCode, name: sourceName, coverImageUrl: sourceImageUrl } : null,
-      factory, rolls, sizes, materials, accessorySpecs,
+      factory, rolls, sizes, materials, accessorySpecs, cutHistory,
     };
   }
 
@@ -733,7 +795,74 @@ export class ProductionService {
     return result;
   }
 
-  async calculateOrder(id: string) {
+  private async calculateMaterialsFromSizePlans(id: string, sizeRowsInput?: any[]) {
+    const order = await this.prisma.productionOrder.findUnique({ where: { id } });
+    if (!order) throw new NotFoundException("Không tìm thấy lệnh SX.");
+    const sizeRows = sizeRowsInput || await this.prisma.productionSizePlan.findMany({ where: { productionOrderId: id } });
+
+    // Sau khi có bảng cắt, NPL luôn bám số CẮT THỰC TẾ. Nếu một dòng cũ chưa có actualQty thì tạm dùng plannedQty.
+    const totalsBySize: Record<string, number> = {};
+    let totalQty = 0;
+    for (const row of sizeRows as any[]) {
+      const qty = Number(row.actualQty ?? row.plannedQty ?? 0);
+      totalQty += qty;
+      const size = this.normalizeProductionSize(row.size);
+      totalsBySize[size] = (totalsBySize[size] || 0) + qty;
+    }
+
+    let specs = await this.prisma.productionOrderAccessorySpec.findMany({ where: { productionOrderId: id } });
+    if (!specs.length && order.designSampleId) {
+      const sampleSpecs = await this.prisma.sampleAccessorySpec.findMany({ where: { designSampleId: order.designSampleId } });
+      specs = sampleSpecs.map((x: any) => ({ ...x, productionOrderId: id }));
+    }
+
+    const ids = specs.map((x: any) => x.accessoryItemId);
+    const items = ids.length ? await this.prisma.productionAccessoryItem.findMany({ where: { id: { in: ids } } }) : [];
+    const materials: any[] = [];
+
+    for (const spec of specs as any[]) {
+      const item: any = items.find((x: any) => x.id === spec.accessoryItemId);
+      if (!item) continue;
+      const per = Number(spec.qtyPerProduct || 0);
+      const waste = Number(spec.wastePercent || 0);
+      const stock = Number(item.stockQty || 0);
+      const taggedSize = this.accessoryTaggedSize(item);
+      const makeRow = (baseQty: number, sizeLabel: string | null) => {
+        const requiredQty = Math.ceil(baseQty * (1 + waste / 100) * 1000) / 1000;
+        return {
+          accessoryItemId: item.id,
+          accessoryCode: item.code,
+          accessoryName: item.name,
+          unit: item.unit,
+          sizeLabel,
+          qtyPerProduct: per,
+          wastePercent: waste,
+          baseQty,
+          requiredQty,
+          stockQtySnapshot: stock,
+          shortageQty: Math.max(0, requiredQty - stock),
+        };
+      };
+
+      if (String(item.typeName || "").trim() === "Mác Size") {
+        if (!taggedSize) throw new BadRequestException(`NPL ${item.code} · ${item.name} là Mác Size nhưng chưa được gán size trong kho NPL.`);
+        const sizeQty = this.totalForTaggedSize(totalsBySize, taggedSize);
+        if (sizeQty > 0) materials.push(makeRow(sizeQty * per, taggedSize));
+      } else if (spec.sizeScoped && Object.keys(totalsBySize).length) {
+        for (const [size, qty] of Object.entries(totalsBySize)) materials.push(makeRow(Number(qty) * per, size));
+      } else {
+        materials.push(makeRow(totalQty * per, null));
+      }
+    }
+
+    await this.prisma.$transaction(async (tx: any) => {
+      await tx.productionMaterialCalc.deleteMany({ where: { productionOrderId: id } });
+      if (materials.length) await tx.productionMaterialCalc.createMany({ data: materials.map((x) => ({ productionOrderId: id, ...x })) });
+    });
+    return { totalQty, totalsBySize, materials };
+  }
+
+  async calculateOrder(id: string, user?: Actor) {
     const order = await this.prisma.productionOrder.findUnique({ where: { id } });
     if (!order) throw new NotFoundException("Không tìm thấy lệnh SX.");
     const rolls = await this.prisma.productionOrderRoll.findMany({ where: { productionOrderId: id } });
@@ -746,9 +875,9 @@ export class ProductionService {
     for (const r of rolls as any[]) {
       const code = this.normalizeColorCode(r.colorCode) || "";
       const key = `${r.colorName || "Không màu"}|||${code}`;
-      const x = grouped.get(key) || { colorName: r.colorName || "Không màu", colorCode: code || null, meters: 0 };
-      x.meters += Number(r.allocatedM || 0);
-      grouped.set(key, x);
+      const row = grouped.get(key) || { colorName: r.colorName || "Không màu", colorCode: code || null, meters: 0 };
+      row.meters += Number(r.allocatedM || 0);
+      grouped.set(key, row);
     }
 
     const ratio = (order.sizeRatio && typeof order.sizeRatio === "object" ? order.sizeRatio : {}) as Record<string, number>;
@@ -756,94 +885,105 @@ export class ProductionService {
       const plannedQty = Math.floor(x.meters / effective);
       return { ...x, plannedQty, sizes: this.distribute(plannedQty, ratio) };
     });
-    const totalQty = order.plannedQtyOverride || colors.reduce((s: number, x: any) => s + x.plannedQty, 0);
 
-    const totalsBySize: Record<string, number> = {};
-    colors.forEach((c: any) =>
-      Object.entries(c.sizes).forEach(([size, qty]) => {
-        totalsBySize[size] = (totalsBySize[size] || 0) + Number(qty);
-      }),
-    );
-
-    let specs = await this.prisma.productionOrderAccessorySpec.findMany({ where: { productionOrderId: id } });
-    if (!specs.length && order.designSampleId) {
-      const sampleSpecs = await this.prisma.sampleAccessorySpec.findMany({ where: { designSampleId: order.designSampleId } });
-      specs = sampleSpecs.map((x: any) => ({ ...x, productionOrderId: id }));
-    }
-
-    const ids = specs.map((x: any) => x.accessoryItemId);
-    const items = ids.length
-      ? await this.prisma.productionAccessoryItem.findMany({ where: { id: { in: ids } } })
-      : [];
-    const materials: any[] = [];
-
-    for (const s of specs as any[]) {
-      const item: any = items.find((x: any) => x.id === s.accessoryItemId);
-      if (!item) continue;
-      const per = Number(s.qtyPerProduct || 0);
-      const w = Number(s.wastePercent || 0);
-      const stock = Number(item.stockQty || 0);
-      if (s.sizeScoped && Object.keys(totalsBySize).length) {
-        for (const [size, qty] of Object.entries(totalsBySize)) {
-          const base = Number(qty) * per;
-          const required = Math.ceil(base * (1 + w / 100) * 1000) / 1000;
-          materials.push({
-            accessoryItemId: item.id,
-            accessoryCode: item.code,
-            accessoryName: item.name,
-            unit: item.unit,
-            sizeLabel: size,
-            qtyPerProduct: per,
-            wastePercent: w,
-            baseQty: base,
-            requiredQty: required,
-            stockQtySnapshot: stock,
-            shortageQty: Math.max(0, required - stock),
-          });
-        }
-      } else {
-        const base = totalQty * per;
-        const required = Math.ceil(base * (1 + w / 100) * 1000) / 1000;
-        materials.push({
-          accessoryItemId: item.id,
-          accessoryCode: item.code,
-          accessoryName: item.name,
-          unit: item.unit,
-          sizeLabel: null,
-          qtyPerProduct: per,
-          wastePercent: w,
-          baseQty: base,
-          requiredQty: required,
-          stockQtySnapshot: stock,
-          shortageQty: Math.max(0, required - stock),
-        });
-      }
-    }
+    const existing = await this.prisma.productionSizePlan.findMany({ where: { productionOrderId: id } });
+    const existingMap = new Map(existing.map((x: any) => [`${x.colorName}|||${x.colorCode || ""}|||${this.normalizeProductionSize(x.size)}`, x]));
+    const actor = this.actor(user);
+    const nextRows = colors.flatMap((c: any) => Object.entries(c.sizes).map(([rawSize, qty]) => {
+      const size = this.normalizeProductionSize(rawSize);
+      const key = `${c.colorName}|||${c.colorCode || ""}|||${size}`;
+      const old: any = existingMap.get(key);
+      return {
+        productionOrderId: id,
+        colorName: c.colorName,
+        colorCode: c.colorCode || null,
+        size,
+        ratio: Number(ratio[rawSize] || ratio[size] || 0),
+        plannedQty: Number(qty),
+        // Lần đầu: TT = DK để nhân viên chỉ sửa phần lệch. Những lần tính lại DK: giữ nguyên TT đã nhập.
+        actualQty: old?.actualQty ?? Number(qty),
+      };
+    }));
+    const nextKeys = new Set(nextRows.map((x: any) => `${x.colorName}|||${x.colorCode || ""}|||${x.size}`));
 
     await this.prisma.$transaction(async (tx: any) => {
-      await tx.productionSizePlan.deleteMany({ where: { productionOrderId: id } });
-      const sizeRows = colors.flatMap((c: any) =>
-        Object.entries(c.sizes).map(([size, qty]) => ({
-          productionOrderId: id,
-          colorName: c.colorName,
-          colorCode: c.colorCode || null,
-          size,
-          ratio: Number(ratio[size] || 0),
-          plannedQty: Number(qty),
-        })),
-      );
-      if (sizeRows.length) await tx.productionSizePlan.createMany({ data: sizeRows });
-
-      await tx.productionMaterialCalc.deleteMany({ where: { productionOrderId: id } });
-      if (materials.length) {
-        await tx.productionMaterialCalc.createMany({ data: materials.map((x) => ({ productionOrderId: id, ...x })) });
+      for (const row of nextRows as any[]) {
+        const old: any = existingMap.get(`${row.colorName}|||${row.colorCode || ""}|||${row.size}`);
+        await tx.productionSizePlan.upsert({
+          where: { productionOrderId_colorName_size: { productionOrderId: id, colorName: row.colorName, size: row.size } },
+          create: row,
+          update: { colorCode: row.colorCode, ratio: row.ratio, plannedQty: row.plannedQty, actualQty: old?.actualQty ?? row.actualQty },
+        });
+        if (!old || Number(old.plannedQty || 0) !== Number(row.plannedQty || 0)) {
+          await tx.productionCutQtyHistory.create({ data: {
+            productionOrderId: id, colorName: row.colorName, colorCode: row.colorCode, size: row.size,
+            plannedQty: row.plannedQty, previousActualQty: old?.actualQty ?? null, actualQty: old?.actualQty ?? row.actualQty,
+            changeType: old ? "PLANNED_RECALCULATE" : "INITIAL_CALCULATE", createdById: actor.id, createdByName: actor.name,
+          }});
+        }
       }
-      if (order.status === "DRAFT") {
-        await tx.productionOrder.update({ where: { id }, data: { status: "PLANNING" } });
+      const stale = existing.filter((x: any) => !nextKeys.has(`${x.colorName}|||${x.colorCode || ""}|||${this.normalizeProductionSize(x.size)}`));
+      if (stale.length) await tx.productionSizePlan.deleteMany({ where: { id: { in: stale.map((x: any) => x.id) } } });
+      if (order.status === "DRAFT") await tx.productionOrder.update({ where: { id }, data: { status: "PLANNING" } });
+    });
+
+    const sizeRows = await this.prisma.productionSizePlan.findMany({ where: { productionOrderId: id }, orderBy: [{ colorName: "asc" }, { size: "asc" }] });
+    const npl = await this.calculateMaterialsFromSizePlans(id, sizeRows);
+    const totalPlannedQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.plannedQty || 0), 0);
+    const totalActualQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.actualQty ?? x.plannedQty ?? 0), 0);
+    return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, effectiveConsumptionM: effective, colors: this.groupCutRows(sizeRows), materials: npl.materials };
+  }
+
+  private groupCutRows(rows: any[]) {
+    const grouped = new Map<string, any>();
+    for (const row of rows) {
+      const key = `${row.colorName}|||${row.colorCode || ""}`;
+      const x = grouped.get(key) || { colorName: row.colorName, colorCode: row.colorCode || null, plannedQty: 0, actualQty: 0, sizes: {} };
+      const plannedQty = Number(row.plannedQty || 0);
+      const actualQty = Number(row.actualQty ?? row.plannedQty ?? 0);
+      x.plannedQty += plannedQty;
+      x.actualQty += actualQty;
+      x.sizes[row.size] = { plannedQty, actualQty };
+      grouped.set(key, x);
+    }
+    return [...grouped.values()];
+  }
+
+  async saveActualCutQuantities(id: string, body: any, user?: Actor) {
+    const order = await this.prisma.productionOrder.findUnique({ where: { id } });
+    if (!order) throw new NotFoundException("Không tìm thấy lệnh SX.");
+    const incoming = Array.isArray(body?.rows) ? body.rows : [];
+    if (!incoming.length) throw new BadRequestException("Chưa có số lượng cắt thực tế để lưu.");
+    const plans = await this.prisma.productionSizePlan.findMany({ where: { productionOrderId: id } });
+    if (!plans.length) throw new BadRequestException("Hãy tính sản lượng dự kiến trước.");
+    const actor = this.actor(user);
+
+    await this.prisma.$transaction(async (tx: any) => {
+      for (const input of incoming) {
+        const colorName = String(input?.colorName || "").trim();
+        const size = this.normalizeProductionSize(input?.size);
+        const qtyRaw = this.n(input?.actualQty);
+        if (!colorName || !size || qtyRaw === null || qtyRaw < 0 || !Number.isInteger(qtyRaw)) throw new BadRequestException("Số lượng cắt thực tế phải là số nguyên từ 0 trở lên.");
+        const plan: any = plans.find((x: any) => x.colorName === colorName && this.normalizeProductionSize(x.size) === size);
+        if (!plan) throw new BadRequestException(`Không tìm thấy kế hoạch cắt ${colorName} · size ${size}.`);
+        const nextActual = Number(qtyRaw);
+        const prevActual = Number(plan.actualQty ?? plan.plannedQty ?? 0);
+        if (nextActual === prevActual) continue;
+        await tx.productionSizePlan.update({ where: { id: plan.id }, data: { actualQty: nextActual } });
+        await tx.productionCutQtyHistory.create({ data: {
+          productionOrderId: id, colorName: plan.colorName, colorCode: plan.colorCode, size: plan.size,
+          plannedQty: Number(plan.plannedQty || 0), previousActualQty: prevActual, actualQty: nextActual,
+          changeType: "ACTUAL_UPDATE", createdById: actor.id, createdByName: actor.name,
+        }});
       }
     });
 
-    return { totalQty, effectiveConsumptionM: effective, colors, materials };
+    const sizeRows = await this.prisma.productionSizePlan.findMany({ where: { productionOrderId: id }, orderBy: [{ colorName: "asc" }, { size: "asc" }] });
+    const npl = await this.calculateMaterialsFromSizePlans(id, sizeRows);
+    const totalPlannedQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.plannedQty || 0), 0);
+    const totalActualQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.actualQty ?? x.plannedQty ?? 0), 0);
+    const cutHistory = await this.prisma.productionCutQtyHistory.findMany({ where: { productionOrderId: id }, orderBy: { createdAt: "desc" }, take: 200 });
+    return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, colors: this.groupCutRows(sizeRows), materials: npl.materials, cutHistory };
   }
 
   async sendOrder(id: string) {

@@ -3593,11 +3593,32 @@ model ProductionSizePlan {
   size              String
   ratio             Int      @default(0)
   plannedQty        Int      @default(0)
+  actualQty         Int?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
   @@unique([productionOrderId, colorName, size])
   @@index([productionOrderId])
+  @@index([colorName])
+  @@index([size])
+}
+
+model ProductionCutQtyHistory {
+  id                String   @id @default(cuid())
+  productionOrderId String
+  colorName         String
+  colorCode         String?
+  size              String
+  plannedQty        Int      @default(0)
+  previousActualQty Int?
+  actualQty         Int?
+  changeType        String   @default("ACTUAL_UPDATE")
+  createdById       String?
+  createdByName     String?
+  createdAt         DateTime @default(now())
+
+  @@index([productionOrderId])
+  @@index([productionOrderId, createdAt])
   @@index([colorName])
   @@index([size])
 }
