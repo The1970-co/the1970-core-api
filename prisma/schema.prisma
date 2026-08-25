@@ -3495,6 +3495,42 @@ model ProductionAccessoryItem {
 }
 
 
+
+model ProductionAccessoryReceipt {
+  id String @id @default(cuid())
+  code String @unique
+  supplierId String?
+  receivedAt DateTime @default(now())
+  receivedById String?
+  receivedByName String?
+  note String?
+  createdById String?
+  createdByName String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  items ProductionAccessoryReceiptItem[]
+  @@index([supplierId])
+  @@index([receivedAt])
+  @@index([createdAt])
+}
+
+model ProductionAccessoryReceiptItem {
+  id String @id @default(cuid())
+  receiptId String
+  receipt ProductionAccessoryReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  accessoryItemId String
+  accessoryCodeSnapshot String
+  accessoryNameSnapshot String
+  unit ProductionAccessoryUnit
+  qty Decimal @db.Decimal(14, 3)
+  unitPrice Decimal? @db.Decimal(14, 2)
+  note String?
+  sortOrder Int @default(0)
+  createdAt DateTime @default(now())
+  @@index([receiptId, sortOrder])
+  @@index([accessoryItemId])
+}
+
 model ProductionAccessoryTemplate {
   id             String                @id @default(cuid())
   name           String                @unique

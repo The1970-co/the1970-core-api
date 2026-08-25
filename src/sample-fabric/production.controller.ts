@@ -123,6 +123,18 @@ export class ProductionController {
     return this.service.deleteAccessoryTemplate(id);
   }
 
+  @Get("accessory-receipts")
+  @RequirePermissions("accessories.view")
+  accessoryReceipts(){return this.service.listAccessoryReceipts();}
+
+  @Get("accessory-receipts/:id")
+  @RequirePermissions("accessories.view")
+  accessoryReceipt(@Param("id") id:string){return this.service.getAccessoryReceipt(id);}
+
+  @Post("accessory-receipts")
+  @RequirePermissions("accessories.stock")
+  createAccessoryReceipt(@Body() body:any,@Req() req:any){return this.service.createAccessoryReceipt(body,req.user);}
+
   @Get("accessories")
   @RequirePermissions("accessories.view")
   accessories(@Query() query: any, @Req() req: any) {
