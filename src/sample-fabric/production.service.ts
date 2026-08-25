@@ -521,7 +521,42 @@ export class ProductionService {
   private async nextAccessoryReceiptCode() { const d=new Date(); const suffix=`${String(d.getDate()).padStart(2,"0")}${String(d.getMonth()+1).padStart(2,"0")}${d.getFullYear()}`; const rows=await this.prisma.productionAccessoryReceipt.findMany({where:{code:{endsWith:suffix}},select:{code:true}}); const max=rows.reduce((m:number,r:any)=>Math.max(m,Number(String(r.code||"").match(/^PN-NPL-(\d+)-/)?.[1]||0)),0); return `PN-NPL-${String(max+1).padStart(3,"0")}-${suffix}`; }
   async listAccessoryReceipts(){return this.prisma.productionAccessoryReceipt.findMany({include:{items:{orderBy:{sortOrder:"asc"}}},orderBy:{receivedAt:"desc"},take:200});}
   async getAccessoryReceipt(id:string){const row=await this.prisma.productionAccessoryReceipt.findUnique({where:{id},include:{items:{orderBy:{sortOrder:"asc"}}}});if(!row)throw new NotFoundException("Không tìm thấy phiếu nhập NPL.");return row;}
-  async createAccessoryReceipt(body:any,user?:any){const rows=Array.isArray(body?.items)?body.items.filter((x:any)=>x?.accessoryItemId&&Number(this.n(x?.qty)||0)>0):[];if(!rows.length)throw new BadRequestException("Phiếu nhập NPL chưa có mặt hàng.");const ids=[...new Set(rows.map((x:any)=>String(x.accessoryItemId)))];const items:any[]=await this.prisma.productionAccessoryItem.findMany({where:{id:{in:ids},isActive:true}});if(items.length!==ids.length)throw new BadRequestException("Có NPL không tồn tại hoặc đã ngừng sử dụng.");const actor=this.actor(user);return this.prisma.$transaction(async(tx:any)=>{const code=String(body?.code||"").trim().toUpperCase()||await this.nextAccessoryReceiptCode();const receipt=await tx.productionAccessoryReceipt.create({data:{code,supplierId:body?.supplierId||null,receivedAt:body?.receivedAt?new Date(body.receivedAt):new Date(),receivedById:body?.receivedById||actor.id,receivedByName:String(body?.receivedByName||actor.name||"").trim()||null,note:body?.note||null,createdById:actor.id,createdByName:actor.name,items:{create:rows.map((x:any,i:number)=>{const item=items.find((y:any)=>y.id===x.accessoryItemId);return{accessoryItemId:item.id,accessoryCodeSnapshot:item.code,accessoryNameSnapshot:item.name,unit:item.unit,qty:Number(this.n(x.qty)||0),unitPrice:this.n(x.unitPrice),note:x.note||null,sortOrder:i+1}})}},include:{items:{orderBy:{sortOrder:"asc"}}}});for(const row of rows){await tx.productionAccessoryItem.update({where:{id:row.accessoryItemId},data:{stockQty:{increment:Number(this.n(row.qty)||0)}}});}return receipt;});}
+  async createAccessoryReceipt(body:any,user?:any){
+    const rows=Array.isArray(body?.items)?body.items.filter((x:any)=>x?.accessoryItemId&&Number(this.n(x?.qty)||0)>0):[];
+    if(!rows.length)throw new BadRequestException("Phiếu nhập NPL chưa có mặt hàng.");
+    const ids=[...new Set(rows.map((x:any)=>String(x.accessoryItemId)))];
+    const items:any[]=await this.prisma.productionAccessoryItem.findMany({where:{id:{in:ids},isActive:true}});
+    if(items.length!==ids.length)throw new BadRequestException("Có NPL không tồn tại hoặc đã ngừng sử dụng.");
+    const actor=this.actor(user);
+    const code=String(body?.code||"").trim().toUpperCase()||await this.nextAccessoryReceiptCode();
+    return this.prisma.productionAccessoryReceipt.create({
+      data:{
+        code,supplierId:body?.supplierId||null,receivedAt:body?.receivedAt?new Date(body.receivedAt):new Date(),
+        receivedById:body?.receivedById||actor.id,receivedByName:String(body?.receivedByName||actor.name||"").trim()||null,
+        note:body?.note||null,status:"DRAFT",createdById:actor.id,createdByName:actor.name,
+        items:{create:rows.map((x:any,i:number)=>{const item=items.find((y:any)=>y.id===x.accessoryItemId);return{accessoryItemId:item.id,accessoryCodeSnapshot:item.code,accessoryNameSnapshot:item.name,unit:item.unit,qty:Number(this.n(x.qty)||0),unitPrice:this.n(x.unitPrice),note:x.note||null,sortOrder:i+1}})}
+      },
+      include:{items:{orderBy:{sortOrder:"asc"}}}
+    });
+  }
+
+  async postAccessoryReceipt(id:string,user?:any){
+    const actor=this.actor(user);
+    return this.prisma.$transaction(async(tx:any)=>{
+      const receipt=await tx.productionAccessoryReceipt.findUnique({where:{id},include:{items:{orderBy:{sortOrder:"asc"}}}});
+      if(!receipt)throw new NotFoundException("Không tìm thấy phiếu nhập NPL.");
+      if(String(receipt.status||"DRAFT")==="POSTED")return receipt;
+      if(!receipt.items.length)throw new BadRequestException("Phiếu nhập NPL chưa có mặt hàng.");
+      for(const row of receipt.items){
+        await tx.productionAccessoryItem.update({where:{id:row.accessoryItemId},data:{stockQty:{increment:Number(row.qty||0)}}});
+      }
+      return tx.productionAccessoryReceipt.update({
+        where:{id},
+        data:{status:"POSTED",postedAt:new Date(),postedById:actor.id,postedByName:actor.name},
+        include:{items:{orderBy:{sortOrder:"asc"}}}
+      });
+    });
+  }
 
   async adjustAccessoryStock(id: string, body: any, user?: any) {
     const item = await this.prisma.productionAccessoryItem.findUnique({ where: { id } });

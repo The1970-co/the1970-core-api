@@ -3504,6 +3504,10 @@ model ProductionAccessoryReceipt {
   receivedById String?
   receivedByName String?
   note String?
+  status String @default("DRAFT")
+  postedAt DateTime?
+  postedById String?
+  postedByName String?
   createdById String?
   createdByName String?
   createdAt DateTime @default(now())

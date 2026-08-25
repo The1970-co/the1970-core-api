@@ -135,6 +135,10 @@ export class ProductionController {
   @RequirePermissions("accessories.stock")
   createAccessoryReceipt(@Body() body:any,@Req() req:any){return this.service.createAccessoryReceipt(body,req.user);}
 
+  @Post("accessory-receipts/:id/post")
+  @RequirePermissions("accessories.stock")
+  postAccessoryReceipt(@Param("id") id:string,@Req() req:any){return this.service.postAccessoryReceipt(id,req.user);}
+
   @Get("accessories")
   @RequirePermissions("accessories.view")
   accessories(@Query() query: any, @Req() req: any) {
