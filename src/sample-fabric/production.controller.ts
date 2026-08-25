@@ -99,6 +99,30 @@ export class ProductionController {
     return this.service.deactivateAccessorySupplier(id);
   }
 
+  @Get("accessory-templates")
+  @RequirePermissions("production.view")
+  accessoryTemplates() {
+    return this.service.listAccessoryTemplates();
+  }
+
+  @Post("accessory-templates")
+  @RequirePermissions("production.edit")
+  createAccessoryTemplate(@Body() body: any, @Req() req: any) {
+    return this.service.createAccessoryTemplate(body, req.user);
+  }
+
+  @Patch("accessory-templates/:id")
+  @RequirePermissions("production.edit")
+  updateAccessoryTemplate(@Param("id") id: string, @Body() body: any) {
+    return this.service.updateAccessoryTemplate(id, body);
+  }
+
+  @Delete("accessory-templates/:id")
+  @RequirePermissions("production.manage")
+  deleteAccessoryTemplate(@Param("id") id: string) {
+    return this.service.deleteAccessoryTemplate(id);
+  }
+
   @Get("accessories")
   @RequirePermissions("accessories.view")
   accessories(@Query() query: any, @Req() req: any) {

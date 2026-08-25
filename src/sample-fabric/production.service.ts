@@ -359,6 +359,92 @@ export class ProductionService {
     return this.prisma.productionAccessorySupplier.update({ where: { id }, data: { isActive: false } });
   }
 
+  async listAccessoryTemplates() {
+    return this.prisma.productionAccessoryTemplate.findMany({
+      where: { isActive: true },
+      include: { items: { orderBy: { sortOrder: "asc" } } },
+      orderBy: [{ updatedAt: "desc" }, { name: "asc" }],
+    });
+  }
+
+  async createAccessoryTemplate(body: any, user?: any) {
+    const name = String(body?.name || "").trim();
+    if (!name) throw new BadRequestException("Thiếu tên mẫu NPL.");
+    const duplicate = await this.prisma.productionAccessoryTemplate.findUnique({ where: { name }, select: { id: true } });
+    if (duplicate) throw new BadRequestException("Tên mẫu NPL đã tồn tại. Hãy đặt tên khác.");
+    const rows = Array.isArray(body?.items) ? body.items : [];
+    if (!rows.length) throw new BadRequestException("Mẫu NPL chưa có phụ kiện.");
+    const actor = this.actor(user);
+    return this.prisma.productionAccessoryTemplate.create({
+      data: {
+        name,
+        productKind: body?.productKind || "OTHER",
+        sourceType: String(body?.sourceType || "MANUAL").trim().toUpperCase(),
+        sourceFileName: String(body?.sourceFileName || "").trim() || null,
+        createdById: actor.id,
+        createdByName: actor.name,
+        items: {
+          create: rows.map((x: any, index: number) => ({
+            accessoryItemId: String(x?.accessoryItemId || "").trim() || null,
+            accessoryCodeSnapshot: String(x?.accessoryCodeSnapshot || "").trim() || null,
+            accessoryNameSnapshot: String(x?.accessoryNameSnapshot || "").trim() || null,
+            qtyPerProduct: Number(this.n(x?.qtyPerProduct) || 0),
+            wastePercent: Number(this.n(x?.wastePercent) || 0),
+            sizeScoped: x?.sizeScoped === true,
+            note: String(x?.note || "").trim() || null,
+            sortOrder: index,
+          })),
+        },
+      },
+      include: { items: { orderBy: { sortOrder: "asc" } } },
+    });
+  }
+
+  async updateAccessoryTemplate(id: string, body: any) {
+    const current = await this.prisma.productionAccessoryTemplate.findUnique({ where: { id }, select: { id: true } });
+    if (!current) throw new NotFoundException("Không tìm thấy mẫu NPL.");
+    const name = body?.name !== undefined ? String(body.name || "").trim() : undefined;
+    if (name === "") throw new BadRequestException("Tên mẫu NPL không được để trống.");
+    if (name) {
+      const duplicate = await this.prisma.productionAccessoryTemplate.findFirst({ where: { name, id: { not: id } }, select: { id: true } });
+      if (duplicate) throw new BadRequestException("Tên mẫu NPL đã tồn tại. Hãy đặt tên khác.");
+    }
+    return this.prisma.$transaction(async (tx: any) => {
+      await tx.productionAccessoryTemplate.update({
+        where: { id },
+        data: {
+          ...(name !== undefined ? { name } : {}),
+          ...(body?.productKind !== undefined ? { productKind: body.productKind || "OTHER" } : {}),
+          ...(body?.sourceType !== undefined ? { sourceType: String(body.sourceType || "MANUAL").trim().toUpperCase() } : {}),
+          ...(body?.sourceFileName !== undefined ? { sourceFileName: String(body.sourceFileName || "").trim() || null } : {}),
+        },
+      });
+      if (Array.isArray(body?.items)) {
+        await tx.productionAccessoryTemplateItem.deleteMany({ where: { templateId: id } });
+        if (body.items.length) await tx.productionAccessoryTemplateItem.createMany({
+          data: body.items.map((x: any, index: number) => ({
+            templateId: id,
+            accessoryItemId: String(x?.accessoryItemId || "").trim() || null,
+            accessoryCodeSnapshot: String(x?.accessoryCodeSnapshot || "").trim() || null,
+            accessoryNameSnapshot: String(x?.accessoryNameSnapshot || "").trim() || null,
+            qtyPerProduct: Number(this.n(x?.qtyPerProduct) || 0),
+            wastePercent: Number(this.n(x?.wastePercent) || 0),
+            sizeScoped: x?.sizeScoped === true,
+            note: String(x?.note || "").trim() || null,
+            sortOrder: index,
+          })),
+        });
+      }
+      return tx.productionAccessoryTemplate.findUnique({ where: { id }, include: { items: { orderBy: { sortOrder: "asc" } } } });
+    });
+  }
+
+  async deleteAccessoryTemplate(id: string) {
+    const row = await this.prisma.productionAccessoryTemplate.findUnique({ where: { id }, select: { id: true } });
+    if (!row) throw new NotFoundException("Không tìm thấy mẫu NPL.");
+    return this.prisma.productionAccessoryTemplate.update({ where: { id }, data: { isActive: false } });
+  }
+
   async listAccessories(query?: any, user?: any) {
     const q = String(query?.q || "").trim();
     const rows = await this.prisma.productionAccessoryItem.findMany({
@@ -847,7 +933,9 @@ export class ProductionService {
       if (String(item.typeName || "").trim() === "Mác Size") {
         if (!taggedSize) throw new BadRequestException(`NPL ${item.code} · ${item.name} là Mác Size nhưng chưa được gán size trong kho NPL.`);
         const sizeQty = this.totalForTaggedSize(totalsBySize, taggedSize);
-        if (sizeQty > 0) materials.push(makeRow(sizeQty * per, taggedSize));
+        // Luôn giữ dòng Mác Size đã chọn trong bảng NPL, kể cả size đó không có trong lệnh hiện tại.
+        // Trước đây sizeQty = 0 bị bỏ qua nên nhập Excel/mẫu xong sang bước 5 trông như mất NPL.
+        materials.push(makeRow(sizeQty * per, taggedSize));
       } else if (spec.sizeScoped && Object.keys(totalsBySize).length) {
         for (const [size, qty] of Object.entries(totalsBySize)) materials.push(makeRow(Number(qty) * per, size));
       } else {
