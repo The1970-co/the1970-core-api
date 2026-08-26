@@ -230,6 +230,18 @@ export class ProductionController {
     return this.service.saveActualCutQuantities(id, body, req.user);
   }
 
+  @Post("orders/:id/cancel")
+  @RequirePermissions("production.edit")
+  cancel(@Param("id") id: string, @Req() req: any) {
+    return this.service.cancelOrder(id, req.user);
+  }
+
+  @Delete("orders/:id")
+  @RequirePermissions("production.manage")
+  deleteOrder(@Param("id") id: string) {
+    return this.service.deleteOrder(id);
+  }
+
   @Post("orders/:id/send")
   @RequirePermissions("production.edit")
   send(@Param("id") id: string) {

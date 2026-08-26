@@ -222,10 +222,18 @@ export class ProductionService {
       orderBy: { createdAt: "desc" },
     });
 
-    const allocated = await this.prisma.productionOrderRoll.groupBy({
-      by: ["fabricReceiptRollId"],
-      _sum: { allocatedM: true, allocatedKg: true },
+    const activeAllocationOrders = await this.prisma.productionOrder.findMany({
+      where: { status: { not: "CANCELLED" } },
+      select: { id: true },
     });
+    const activeAllocationOrderIds: string[] = activeAllocationOrders.map((x: any) => String(x.id));
+    const allocated = activeAllocationOrderIds.length
+      ? await this.prisma.productionOrderRoll.groupBy({
+          by: ["fabricReceiptRollId"],
+          where: { productionOrderId: { in: activeAllocationOrderIds } },
+          _sum: { allocatedM: true, allocatedKg: true },
+        })
+      : [];
     const currentRows = orderId
       ? await this.prisma.productionOrderRoll.findMany({
           where: { productionOrderId: orderId },
@@ -643,25 +651,91 @@ export class ProductionService {
       },
       orderBy: { updatedAt: "desc" },
     });
-    const factoryIds = [...new Set(rows.map((x: any) => x.productionPartnerId))];
-    const sampleIds = [...new Set(rows.map((x: any) => x.designSampleId).filter(Boolean))];
-    const productIds = [...new Set(rows.map((x: any) => x.productId).filter(Boolean))];
-    const [factories, samples, products] = await Promise.all([
+
+    const orderIds: string[] = rows.map((x: any) => String(x.id));
+    const factoryIds: string[] = Array.from(new Set<string>(rows.map((x: any) => String(x.productionPartnerId)).filter(Boolean)));
+    const sampleIds: string[] = Array.from(new Set<string>(rows.map((x: any) => String(x.designSampleId || "")).filter(Boolean)));
+    const productIds: string[] = Array.from(new Set<string>(rows.map((x: any) => String(x.productId || "")).filter(Boolean)));
+
+    const [factories, samples, products, rollRows, sizeRows, accessoryRows, materialRows] = await Promise.all([
       factoryIds.length ? this.prisma.productionPartner.findMany({ where: { id: { in: factoryIds } }, select: { id: true, code: true, name: true } }) : [],
       sampleIds.length ? this.prisma.designSample.findMany({ where: { id: { in: sampleIds } }, select: { id: true, code: true, name: true, coverImageUrl: true } }) : [],
       productIds.length ? this.prisma.product.findMany({ where: { id: { in: productIds } }, select: { id: true, name: true, slug: true, imageUrl: true, variants: { select: { sku: true }, take: 10 } } }) : [],
+      orderIds.length ? this.prisma.productionOrderRoll.findMany({ where: { productionOrderId: { in: orderIds } }, select: { productionOrderId: true, allocatedM: true } }) : [],
+      orderIds.length ? this.prisma.productionSizePlan.findMany({ where: { productionOrderId: { in: orderIds } }, select: { productionOrderId: true, plannedQty: true, actualQty: true, size: true } }) : [],
+      orderIds.length ? this.prisma.productionOrderAccessorySpec.findMany({ where: { productionOrderId: { in: orderIds } }, select: { productionOrderId: true } }) : [],
+      orderIds.length ? this.prisma.productionMaterialCalc.findMany({ where: { productionOrderId: { in: orderIds } }, select: { productionOrderId: true } }) : [],
     ]);
+
+    const summaryByOrder = new Map<string, any>();
+    for (const id of orderIds) {
+      summaryByOrder.set(id, {
+        rollCount: 0,
+        allocatedM: 0,
+        sizeRowCount: 0,
+        totalPlannedQty: 0,
+        totalActualQty: 0,
+        accessorySpecCount: 0,
+        materialCalcCount: 0,
+      });
+    }
+    for (const row of rollRows as any[]) {
+      const s = summaryByOrder.get(row.productionOrderId);
+      if (!s) continue;
+      s.rollCount += 1;
+      s.allocatedM += Number(row.allocatedM || 0);
+    }
+    for (const row of sizeRows as any[]) {
+      const s = summaryByOrder.get(row.productionOrderId);
+      if (!s) continue;
+      s.sizeRowCount += 1;
+      s.totalPlannedQty += Number(row.plannedQty || 0);
+      s.totalActualQty += Number(row.actualQty ?? row.plannedQty ?? 0);
+    }
+    for (const row of accessoryRows as any[]) {
+      const s = summaryByOrder.get(row.productionOrderId);
+      if (s) s.accessorySpecCount += 1;
+    }
+    for (const row of materialRows as any[]) {
+      const s = summaryByOrder.get(row.productionOrderId);
+      if (s) s.materialCalcCount += 1;
+    }
+
     return rows.map((r: any) => {
       const sample = r.designSampleId ? samples.find((x: any) => x.id === r.designSampleId) : null;
       const product = r.productId ? products.find((x: any) => x.id === r.productId) : null;
       const code = r.sourceCode || sample?.code || (product ? this.productCode(product) : "");
       const name = r.sourceName || sample?.name || product?.name || null;
       const imageUrl = r.sourceImageUrl || sample?.coverImageUrl || product?.imageUrl || null;
+      const summary = summaryByOrder.get(r.id) || {};
+      const sizeSet = Array.isArray(r.sizeSet) ? r.sizeSet : [];
+      const sizeRatio = r.sizeRatio && typeof r.sizeRatio === "object" && !Array.isArray(r.sizeRatio) ? r.sizeRatio : {};
+      const sizeRatioText = sizeSet
+        .map((size: string) => `${size}:${Number((sizeRatio as any)?.[size] || 0)}`)
+        .join(" · ");
+
       return {
-        ...r, sourceCode: code, sourceName: name, sourceImageUrl: imageUrl,
+        ...r,
+        sourceCode: code,
+        sourceName: name,
+        sourceImageUrl: imageUrl,
         sample: sample ? { ...sample, code, name } : null,
         source: { type: r.sourceType, id: r.designSampleId || r.productId, code, name, imageUrl },
         factory: factories.find((x: any) => x.id === r.productionPartnerId) || null,
+        progress: {
+          nplDone: Number(summary.accessorySpecCount || 0) > 0,
+          fabricDone: Number(summary.rollCount || 0) > 0,
+          sizeDone: sizeSet.length > 0 && Object.keys(sizeRatio as any).length > 0,
+          calculationDone: Number(summary.sizeRowCount || 0) > 0,
+          sent: ["SENT", "CUTTING", "SEWING", "QC", "COMPLETED"].includes(String(r.status || "")),
+          rollCount: Number(summary.rollCount || 0),
+          allocatedM: Number(summary.allocatedM || 0),
+          nplCount: Number(summary.accessorySpecCount || 0),
+          materialCalcCount: Number(summary.materialCalcCount || 0),
+          totalPlannedQty: Number(summary.totalPlannedQty || 0),
+          totalActualQty: Number(summary.totalActualQty || 0),
+          sizeRatioText,
+        },
       };
     });
   }
@@ -1113,6 +1187,45 @@ export class ProductionService {
     const totalActualQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.actualQty ?? x.plannedQty ?? 0), 0);
     const cutHistory = await this.prisma.productionCutQtyHistory.findMany({ where: { productionOrderId: id }, orderBy: { createdAt: "desc" }, take: 200 });
     return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, colors: this.groupCutRows(sizeRows), materials: npl.materials, cutHistory };
+  }
+
+  async cancelOrder(id: string, user?: any) {
+    const order = await this.prisma.productionOrder.findUnique({ where: { id } });
+    if (!order) throw new NotFoundException("Không tìm thấy lệnh SX.");
+    if (String(order.status) === "COMPLETED") {
+      throw new BadRequestException("Lệnh đã hoàn thành, không thể huỷ.");
+    }
+    const actor = this.actor(user);
+    await this.prisma.$transaction(async (tx: any) => {
+      // Giữ nguyên cây vải/NPL/size/lịch sử để tra cứu. availableFabricRolls sẽ bỏ qua allocation của lệnh CANCELLED.
+      await tx.productionOrder.update({
+        where: { id },
+        data: {
+          status: "CANCELLED",
+          note: [String(order.note || "").trim(), `Đã huỷ bởi ${actor.name || "—"} lúc ${new Date().toISOString()}`]
+            .filter(Boolean)
+            .join("\n"),
+        },
+      });
+    });
+    return this.getOrder(id);
+  }
+
+  async deleteOrder(id: string) {
+    const order = await this.prisma.productionOrder.findUnique({ where: { id }, select: { id: true, status: true } });
+    if (!order) throw new NotFoundException("Không tìm thấy lệnh SX.");
+    if (!["DRAFT", "PLANNING", "CANCELLED"].includes(String(order.status))) {
+      throw new BadRequestException("Chỉ được xoá lệnh chưa triển khai, đang lên kế hoạch hoặc đã huỷ.");
+    }
+    await this.prisma.$transaction(async (tx: any) => {
+      await tx.productionOrderRoll.deleteMany({ where: { productionOrderId: id } });
+      await tx.productionCutQtyHistory.deleteMany({ where: { productionOrderId: id } });
+      await tx.productionSizePlan.deleteMany({ where: { productionOrderId: id } });
+      await tx.productionMaterialCalc.deleteMany({ where: { productionOrderId: id } });
+      await tx.productionOrderAccessorySpec.deleteMany({ where: { productionOrderId: id } });
+      await tx.productionOrder.delete({ where: { id } });
+    });
+    return { success: true, id };
   }
 
   async sendOrder(id: string) {
