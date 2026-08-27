@@ -46,7 +46,7 @@ export class ProductionController {
   }
 
   @Get("fabric-rolls")
-  @RequirePermissions("production.view")
+  @RequirePermissions("production.view", "production.step3")
   rolls(@Query("orderId") orderId?: string, @Query("q") q?: string) {
     return this.service.availableFabricRolls(orderId, q);
   }
@@ -100,25 +100,25 @@ export class ProductionController {
   }
 
   @Get("accessory-templates")
-  @RequirePermissions("production.view")
+  @RequirePermissions("production.view", "production.step2")
   accessoryTemplates() {
     return this.service.listAccessoryTemplates();
   }
 
   @Post("accessory-templates")
-  @RequirePermissions("production.edit")
+  @RequirePermissions("production.edit", "production.step2")
   createAccessoryTemplate(@Body() body: any, @Req() req: any) {
     return this.service.createAccessoryTemplate(body, req.user);
   }
 
   @Patch("accessory-templates/:id")
-  @RequirePermissions("production.edit")
+  @RequirePermissions("production.edit", "production.step2")
   updateAccessoryTemplate(@Param("id") id: string, @Body() body: any) {
     return this.service.updateAccessoryTemplate(id, body);
   }
 
   @Delete("accessory-templates/:id")
-  @RequirePermissions("production.manage")
+  @RequirePermissions("production.manage", "production.step2")
   deleteAccessoryTemplate(@Param("id") id: string) {
     return this.service.deleteAccessoryTemplate(id);
   }
@@ -171,13 +171,13 @@ export class ProductionController {
   }
 
   @Get("sample-spec/:sampleId")
-  @RequirePermissions("production.view")
+  @RequirePermissions("production.view", "production.source.sample.view")
   sampleSpec(@Param("sampleId") id: string) {
     return this.service.getSampleSpec(id);
   }
 
   @Patch("sample-spec/:sampleId")
-  @RequirePermissions("production.manage")
+  @RequirePermissions("production.manage", "production.source.sample.view")
   saveSampleSpec(@Param("sampleId") id: string, @Body() body: any) {
     return this.service.saveSampleSpec(id, body);
   }
@@ -195,37 +195,37 @@ export class ProductionController {
   }
 
   @Post("orders")
-  @RequirePermissions("production.create")
+  @RequirePermissions("production.create", "production.step1")
   createOrder(@Body() body: any, @Req() req: any) {
     return this.service.createOrder(body, req.user);
   }
 
   @Patch("orders/:id")
-  @RequirePermissions("production.edit")
+  @RequirePermissions("production.edit", "production.step1")
   updateOrder(@Param("id") id: string, @Body() body: any) {
     return this.service.updateOrder(id, body);
   }
 
   @Patch("orders/:id/spec")
   @RequirePermissions("production.edit")
-  saveOrderSpec(@Param("id") id: string, @Body() body: any) {
-    return this.service.saveOrderSpec(id, body);
+  saveOrderSpec(@Param("id") id: string, @Body() body: any, @Req() req: any) {
+    return this.service.saveOrderSpec(id, body, req.user);
   }
 
   @Patch("orders/:id/rolls")
-  @RequirePermissions("production.edit")
+  @RequirePermissions("production.edit", "production.step3")
   setRolls(@Param("id") id: string, @Body() body: any) {
     return this.service.setOrderRolls(id, body);
   }
 
   @Post("orders/:id/calculate")
-  @RequirePermissions("production.calculate")
+  @RequirePermissions("production.calculate", "production.step5")
   calculate(@Param("id") id: string, @Req() req: any) {
     return this.service.calculateOrder(id, req.user);
   }
 
   @Patch("orders/:id/cut-actual")
-  @RequirePermissions("production.edit")
+  @RequirePermissions("production.edit", "production.step5")
   saveActualCutQuantities(@Param("id") id: string, @Body() body: any, @Req() req: any) {
     return this.service.saveActualCutQuantities(id, body, req.user);
   }
@@ -243,13 +243,13 @@ export class ProductionController {
   }
 
   @Post("orders/:id/send")
-  @RequirePermissions("production.edit")
+  @RequirePermissions("production.edit", "production.step6")
   send(@Param("id") id: string) {
     return this.service.sendOrder(id);
   }
 
   @Get("orders/:id/print")
-  @RequirePermissions("production.view")
+  @RequirePermissions("production.view", "production.step6")
   print(@Param("id") id: string) {
     return this.service.printPayload(id);
   }

@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 
 type Actor = { id?: string; sub?: string; name?: string; fullName?: string; email?: string };
@@ -157,22 +157,27 @@ export class ProductionService {
   }
 
   async meta(user?: any) {
+    const canViewSamples = this.userHas(user, "production.source.sample.view");
+    const canUseNplStep = this.userHas(user, "production.step2");
+    const canUseFabricStep = this.userHas(user, "production.step3");
     const [samples, products, factories, accessories, rolls] = await Promise.all([
-      this.prisma.designSample.findMany({
-        where: { status: { not: "ON_HOLD" } },
-        select: {
-          id: true,
-          code: true,
-          name: true,
-          year: true,
-          season: true,
-          category: true,
-          coverImageUrl: true,
-          fabricColorName: true,
-          fabricColorCode: true,
-        },
-        orderBy: { updatedAt: "desc" },
-      }),
+      canViewSamples
+        ? this.prisma.designSample.findMany({
+            where: { status: { not: "ON_HOLD" } },
+            select: {
+              id: true,
+              code: true,
+              name: true,
+              year: true,
+              season: true,
+              category: true,
+              coverImageUrl: true,
+              fabricColorName: true,
+              fabricColorCode: true,
+            },
+            orderBy: { updatedAt: "desc" },
+          })
+        : Promise.resolve([]),
       this.prisma.product.findMany({
         select: {
           id: true,
@@ -186,11 +191,13 @@ export class ProductionService {
         take: 1000,
       }),
       this.prisma.productionPartner.findMany({ where: { isActive: true }, orderBy: { name: "asc" } }),
-      this.prisma.productionAccessoryItem.findMany({
-        where: { isActive: true },
-        orderBy: [{ typeName: "asc" }, { name: "asc" }],
-      }),
-      this.availableFabricRolls(),
+      canUseNplStep
+        ? this.prisma.productionAccessoryItem.findMany({
+            where: { isActive: true },
+            orderBy: [{ typeName: "asc" }, { name: "asc" }],
+          })
+        : Promise.resolve([]),
+      canUseFabricStep ? this.availableFabricRolls() : Promise.resolve([]),
     ]);
     return {
       samples,
@@ -783,6 +790,9 @@ export class ProductionService {
     const productionPartnerId = String(body?.productionPartnerId || "").trim();
     if (!sourceId) throw new BadRequestException("Chưa chọn mã sản xuất.");
     if (!productionPartnerId) throw new BadRequestException("Chưa chọn nhà may.");
+    if (sourceType === "SAMPLE" && !this.userHas(user, "production.source.sample.view")) {
+      throw new ForbiddenException("Bạn không có quyền xem hoặc tạo lệnh từ Mẫu mới / Triển khai mẫu.");
+    }
 
     const factory = await this.prisma.productionPartner.findUnique({ where: { id: productionPartnerId } });
     if (!factory) throw new NotFoundException("Không tìm thấy nhà may.");
@@ -888,10 +898,27 @@ export class ProductionService {
     });
   }
 
-  async saveOrderSpec(id: string, body: any) {
+  async saveOrderSpec(id: string, body: any, user?: any) {
     if (!(await this.prisma.productionOrder.findUnique({ where: { id }, select: { id: true } }))) {
       throw new NotFoundException("Không tìm thấy lệnh SX.");
     }
+
+    const touchesNpl = Array.isArray(body?.materials);
+    const touchesSizeOrFabric = [
+      "fabricWidthCm",
+      "fabricConsumptionM",
+      "fabricWastePercent",
+      "sizeSet",
+      "sizeRatio",
+    ].some((key) => Object.prototype.hasOwnProperty.call(body || {}, key));
+
+    if (touchesNpl && !this.userHas(user, "production.step2")) {
+      throw new ForbiddenException("Bạn không có quyền thao tác Bước 2 · Nguyên phụ liệu.");
+    }
+    if (touchesSizeOrFabric && !this.userHas(user, "production.step4")) {
+      throw new ForbiddenException("Bạn không có quyền thao tác Bước 4 · Size, tỷ lệ và định mức vải.");
+    }
+
     await this.prisma.$transaction(async (tx: any) => {
       await tx.productionOrder.update({
         where: { id },
