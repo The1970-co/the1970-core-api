@@ -165,6 +165,16 @@ export class OmniInboxController {
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
+  @Post("messages/:messageId/refresh-attachment")
+  @RequireAnyPermissions(
+    "omni_inbox.view",
+    PERMISSIONS.MENU_OMNI_MESSAGES,
+  )
+  refreshMessageAttachment(@Param("messageId") messageId: string) {
+    return this.service.refreshMessageAttachment(messageId);
+  }
+
+  @UseGuards(JwtGuard, PermissionGuard)
   @Patch("conversations/:id/read")
   @RequireAnyPermissions(
     "omni_inbox.view",

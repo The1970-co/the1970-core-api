@@ -2981,6 +2981,86 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     return { success: true, ...payload };
   }
 
+  async refreshMessageAttachment(messageId: string) {
+    const message: any = await this.prisma.omniMessage.findUnique({
+      where: { id: messageId },
+      select: {
+        id: true,
+        conversationId: true,
+        providerMessageId: true,
+        attachmentUrl: true,
+        type: true,
+      },
+    });
+
+    if (!message) {
+      throw new NotFoundException("Không tìm thấy tin nhắn.");
+    }
+    if (safeText(message.type).toUpperCase() !== "IMAGE") {
+      throw new BadRequestException("Tin nhắn này không phải ảnh.");
+    }
+
+    const providerMessageId = safeText(message.providerMessageId);
+    if (!providerMessageId) {
+      throw new BadRequestException(
+        "Ảnh cũ này chưa có Meta message ID để tải lại.",
+      );
+    }
+
+    // Backfill lưu attachment của message có text dưới dạng:
+    // {MID}:attachment:{index}. Graph API cần MID gốc.
+    const attachmentMatch = providerMessageId.match(/^(.*):attachment:(\d+)$/);
+    const metaMessageId = safeText(
+      attachmentMatch ? attachmentMatch[1] : providerMessageId,
+    );
+    const attachmentIndex = attachmentMatch
+      ? Math.max(0, Number(attachmentMatch[2] || 0))
+      : 0;
+
+    let detail: any;
+    try {
+      detail = await this.metaFetch(metaMessageId, {
+        fields: "id,attachments",
+      });
+    } catch (error: any) {
+      this.logger.warn(
+        `[META_ATTACHMENT_REFRESH_FAILED] local=${messageId} meta=${metaMessageId} | ${error?.message || error}`,
+      );
+      throw new BadRequestException(
+        `Không tải lại được ảnh từ Meta: ${safeText(error?.message) || "Graph API lỗi"}`,
+      );
+    }
+
+    const rows = Array.isArray(detail?.attachments?.data)
+      ? detail.attachments.data
+      : [];
+    const attachment = rows[attachmentIndex] || rows[0] || null;
+    const attachmentUrl = safeText(
+      attachment?.image_data?.url ||
+        attachment?.video_data?.url ||
+        attachment?.file_url ||
+        attachment?.url ||
+        attachment?.payload?.url,
+    );
+
+    if (!attachmentUrl) {
+      throw new BadRequestException(
+        "Meta không còn trả URL cho ảnh này.",
+      );
+    }
+
+    const updated = await this.prisma.omniMessage.update({
+      where: { id: messageId },
+      data: { attachmentUrl },
+    });
+
+    this.logger.log(
+      `[META_ATTACHMENT_REFRESH_OK] local=${messageId} meta=${metaMessageId} index=${attachmentIndex}`,
+    );
+
+    return updated;
+  }
+
   async markRead(id: string) {
     const item = await this.prisma.omniConversation.update({
       where: { id },
