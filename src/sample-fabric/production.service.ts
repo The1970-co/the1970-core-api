@@ -37,6 +37,14 @@ export class ProductionService {
     return keys.has("*") || keys.has(permission);
   }
 
+  private isAdminUser(user: any) {
+    const roles = [user?.role, ...(Array.isArray(user?.roles) ? user.roles : [])]
+      .map((x) => String(x || "").trim().toLowerCase())
+      .filter(Boolean);
+    return roles.includes("owner") || roles.includes("admin");
+  }
+
+
   private accessorySupplierForUser(row: any, user?: any) {
     if (!row) return row;
     if (this.userHas(user, "accessories.supplier_identity.view")) return row;
@@ -815,7 +823,7 @@ export class ProductionService {
     const totalPlannedQty = sizes.reduce((sum: number, x: any) => sum + Number(x.plannedQty || 0), 0);
     const totalActualQty = sizes.reduce((sum: number, x: any) => sum + Number(x.actualQty ?? x.plannedQty ?? 0), 0);
     const lining = this.liningSummary(order, rolls, totalPlannedQty, totalActualQty);
-    const costSummary = await this.productionCostSummary(id, totalActualQty, materials, rolls, user);
+    const costSummary = await this.productionCostSummary(id, totalActualQty, materials, rolls, user, order.productionExtraCosts);
     return {
       ...order, sourceCode, sourceName, sourceImageUrl,
       source: { type: order.sourceType, id: order.designSampleId || order.productId, code: sourceCode, name: sourceName, imageUrl: sourceImageUrl },
@@ -1285,6 +1293,7 @@ export class ProductionService {
 
   private canViewProductionCost(user?: any) {
     return !!user
+      && this.isAdminUser(user)
       && this.userHas(user, "fabric_receipt.cost.view")
       && this.userHas(user, "accessories.cost.view");
   }
@@ -1295,6 +1304,7 @@ export class ProductionService {
     materials: any[],
     orderRolls: any[],
     user?: any,
+    extraCostsRaw?: any,
   ) {
     if (!this.canViewProductionCost(user)) {
       return {
@@ -1481,10 +1491,22 @@ export class ProductionService {
       };
     });
 
+    const extraCosts = (Array.isArray(extraCostsRaw) ? extraCostsRaw : [])
+      .map((x: any, index: number) => ({
+        id: String(x?.id || `EXTRA_${index + 1}`),
+        type: String(x?.type || "OTHER"),
+        label: String(x?.label || "").trim() || "Phụ phí khác",
+        amountVnd: Math.max(0, Number(this.n(x?.amountVnd) || 0)),
+        note: String(x?.note || "").trim() || null,
+      }))
+      .filter((x: any) => x.amountVnd > 0 || x.label);
+
     const mainFabricCostVnd = fabricLines.filter((x: any) => x.role === "MAIN").reduce((sum: number, x: any) => sum + Number(x.costVnd || 0), 0);
     const liningFabricCostVnd = fabricLines.filter((x: any) => x.role === "LINING").reduce((sum: number, x: any) => sum + Number(x.costVnd || 0), 0);
     const accessoryCostVnd = accessoryLines.reduce((sum: number, x: any) => sum + Number(x.costVnd || 0), 0);
-    const totalMaterialCostVnd = mainFabricCostVnd + liningFabricCostVnd + accessoryCostVnd;
+    const extraCostVnd = extraCosts.reduce((sum: number, x: any) => sum + Number(x.amountVnd || 0), 0);
+    const baseMaterialCostVnd = mainFabricCostVnd + liningFabricCostVnd + accessoryCostVnd;
+    const totalMaterialCostVnd = baseMaterialCostVnd + extraCostVnd;
     const missingPriceCount = fabricLines.filter((x: any) => x.missingPrice).length + accessoryLines.filter((x: any) => x.missingPrice).length;
     const complete = totalActualQty > 0 && missingPriceCount === 0;
 
@@ -1496,11 +1518,14 @@ export class ProductionService {
       mainFabricCostVnd,
       liningFabricCostVnd,
       accessoryCostVnd,
+      extraCostVnd,
+      baseMaterialCostVnd,
       totalMaterialCostVnd,
       materialCostPerProductVnd: totalActualQty > 0 ? totalMaterialCostVnd / totalActualQty : null,
+      extraCosts,
       fabricLines,
       accessoryLines,
-      note: "Giá vải dùng landed cost theo giá cây + tỷ giá + phần ship phân bổ theo cây; NPL dùng đơn giá hiện tại trong kho NPL.",
+      note: "Giá vải dùng landed cost theo giá cây + tỷ giá + phần ship phân bổ theo cây; NPL dùng đơn giá hiện tại trong kho NPL; phụ phí Bước 6 cộng thẳng vào tổng giá sản xuất.",
     };
   }
 
@@ -1580,7 +1605,7 @@ export class ProductionService {
     const totalPlannedQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.plannedQty || 0), 0);
     const totalActualQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.actualQty ?? x.plannedQty ?? 0), 0);
     const lining = this.liningSummary(order, rolls, totalPlannedQty, totalActualQty);
-    const costSummary = await this.productionCostSummary(id, totalActualQty, npl.materials, rolls, user);
+    const costSummary = await this.productionCostSummary(id, totalActualQty, npl.materials, rolls, user, order.productionExtraCosts);
     return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, effectiveConsumptionM: effective, colors: this.groupCutRows(sizeRows), materials: npl.materials, lining, costSummary };
   }
 
@@ -1636,7 +1661,7 @@ export class ProductionService {
     const rolls = await this.prisma.productionOrderRoll.findMany({ where: { productionOrderId: id } });
     const freshOrder = await this.prisma.productionOrder.findUnique({ where: { id } });
     const lining = this.liningSummary(freshOrder || order, rolls, totalPlannedQty, totalActualQty);
-    const costSummary = await this.productionCostSummary(id, totalActualQty, npl.materials, rolls, user);
+    const costSummary = await this.productionCostSummary(id, totalActualQty, npl.materials, rolls, user, (freshOrder || order).productionExtraCosts);
     return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, colors: this.groupCutRows(sizeRows), materials: npl.materials, cutHistory, lining, costSummary };
   }
 
@@ -1662,6 +1687,31 @@ export class ProductionService {
     return this.getOrder(id);
   }
 
+  async saveProductionExtraCosts(id: string, body: any, user?: any) {
+    if (!this.isAdminUser(user)) {
+      throw new ForbiddenException("Chỉ Admin / Owner được duyệt và cấu hình chi phí ở Bước 6.");
+    }
+    const order = await this.prisma.productionOrder.findUnique({ where: { id }, select: { id: true } });
+    if (!order) throw new NotFoundException("Không tìm thấy lệnh SX.");
+
+    const rows = (Array.isArray(body?.items) ? body.items : [])
+      .map((x: any, index: number) => ({
+        id: String(x?.id || `EXTRA_${Date.now()}_${index}`),
+        type: String(x?.type || "OTHER"),
+        label: String(x?.label || "").trim() || "Phụ phí khác",
+        amountVnd: Math.max(0, Number(this.n(x?.amountVnd) || 0)),
+        note: String(x?.note || "").trim() || null,
+      }))
+      .filter((x: any) => x.label);
+
+    await this.prisma.productionOrder.update({
+      where: { id },
+      data: { productionExtraCosts: rows.length ? rows : null },
+    });
+    return this.getOrder(id, user);
+  }
+
+
   async deleteOrder(id: string) {
     const order = await this.prisma.productionOrder.findUnique({ where: { id }, select: { id: true, status: true } });
     if (!order) throw new NotFoundException("Không tìm thấy lệnh SX.");
@@ -1679,7 +1729,10 @@ export class ProductionService {
     return { success: true, id };
   }
 
-  async sendOrder(id: string) {
+  async sendOrder(id: string, user?: any) {
+    if (!this.isAdminUser(user)) {
+      throw new ForbiddenException("Chỉ Admin / Owner được gửi lệnh tại Bước 6.");
+    }
     const order = await this.prisma.productionOrder.findUnique({ where: { id } });
     if (!order) throw new NotFoundException("Không tìm thấy lệnh SX.");
     const [rollCount, sizeCount] = await Promise.all([
@@ -1697,7 +1750,7 @@ export class ProductionService {
         })
         .catch(() => null);
     }
-    return this.getOrder(id);
+    return this.getOrder(id, user);
   }
 
   async printPayload(id: string) {

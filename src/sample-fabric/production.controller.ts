@@ -248,10 +248,16 @@ export class ProductionController {
     return this.service.deleteOrder(id);
   }
 
+  @Patch("orders/:id/costs")
+  @RequirePermissions("production.view")
+  saveProductionCosts(@Param("id") id: string, @Body() body: any, @Req() req: any) {
+    return this.service.saveProductionExtraCosts(id, body, req.user);
+  }
+
   @Post("orders/:id/send")
   @RequirePermissions("production.view", "production.step6")
-  send(@Param("id") id: string) {
-    return this.service.sendOrder(id);
+  send(@Param("id") id: string, @Req() req: any) {
+    return this.service.sendOrder(id, req.user);
   }
 
   @Get("orders/:id/print")

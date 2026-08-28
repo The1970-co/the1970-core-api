@@ -3661,6 +3661,7 @@ model ProductionOrder {
   liningFabricWastePercent   Decimal                @default(0) @db.Decimal(7, 3)
   liningFabricComponents     Json?
   liningFabricAssignments    Json?
+  productionExtraCosts       Json?
   sizeSet                    Json?
   sizeRatio           Json?
   plannedQtyOverride  Int?
