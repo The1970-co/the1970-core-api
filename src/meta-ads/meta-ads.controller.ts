@@ -256,15 +256,16 @@ export class MetaAdsController {
   @Post('actions/scale-adset')
   scaleAdSet(
     @Body()
-    body: { metaAdSetId?: string; metaAdId?: string; percent?: number; dryRun?: boolean } = {},
+    body: { metaAdSetId?: string; metaAdId?: string; percent?: number; targetBudget?: number; dryRun?: boolean } = {},
   ) {
     return this.metaAdsPerformanceAutopilotService.executeAdSetScale(
       String(body?.metaAdSetId || ''),
-      Number(body?.percent || 20),
+      body?.targetBudget ? Number(body?.percent ?? 0) : Number(body?.percent ?? 20),
       Boolean(body?.dryRun),
       {
         source: 'manual',
         metaAdId: String(body?.metaAdId || ''),
+        targetBudget: Number(body?.targetBudget || 0) || undefined,
       },
     );
   }

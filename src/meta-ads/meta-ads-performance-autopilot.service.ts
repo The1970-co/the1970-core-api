@@ -276,7 +276,7 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
           scanned: 1,
           upserted: 1,
           failed: 0,
-          message: `Scale Ad Set +${input.percent}%: ${input.oldBudget} -> ${input.newBudget}`,
+          message: `${input.percent >= 0 ? 'Tăng' : 'Giảm'} ngân sách ${input.percent >= 0 ? '+' : ''}${input.percent}%: ${input.oldBudget} -> ${input.newBudget}`,
           errorJson: {
             metaAdSetId: input.metaAdSetId,
             metaCampaignId: input.metaCampaignId || null,
@@ -302,7 +302,7 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
     metaAdSetId: string,
     percent = this.scalePercent,
     dryRun = this.runtimeDryRun,
-    context: { source?: string; metaAdId?: string; roas?: number; spend?: number } = {},
+    context: { source?: string; metaAdId?: string; roas?: number; spend?: number; targetBudget?: number } = {},
   ) {
     const adSetId = String(metaAdSetId || '').trim();
     if (!adSetId) throw new Error('Thiếu metaAdSetId');
@@ -339,8 +339,33 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
       throw new Error('Không tìm thấy daily_budget ở Ad Set hoặc Campaign. Có thể quảng cáo đang dùng lifetime budget.');
     }
 
-    const safePercent = Math.min(50, Math.max(1, Number(percent) || this.scalePercent));
-    const nextBudget = Math.round(currentBudget * (1 + safePercent / 100));
+    const requestedTargetBudget = Math.round(Number(context?.targetBudget || 0));
+    const rawPercent = Number(percent);
+
+    let safePercent = 0;
+    let nextBudget = 0;
+
+    if (requestedTargetBudget > 0) {
+      nextBudget = requestedTargetBudget;
+      safePercent = currentBudget > 0
+        ? Number((((nextBudget - currentBudget) / currentBudget) * 100).toFixed(2))
+        : 0;
+    } else {
+      if (!Number.isFinite(rawPercent) || rawPercent === 0) {
+        throw new Error('percent phải khác 0 hoặc phải có targetBudget');
+      }
+
+      // Auto Scale cũ vẫn chỉ truyền percent dương.
+      // Thao tác thủ công cho phép tăng tối đa +50% hoặc giảm tối đa -90%.
+      safePercent = rawPercent > 0
+        ? Math.min(50, Math.max(1, rawPercent))
+        : Math.max(-90, Math.min(-1, rawPercent));
+      nextBudget = Math.round(currentBudget * (1 + safePercent / 100));
+    }
+
+    if (nextBudget <= 0) {
+      throw new Error('Ngân sách sau điều chỉnh phải lớn hơn 0');
+    }
 
     if (!dryRun) {
       if (budgetLevel === 'CAMPAIGN') {
