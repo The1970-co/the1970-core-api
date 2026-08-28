@@ -931,6 +931,8 @@ export class ProductionService {
         ...(body?.liningFabricWastePercent !== undefined
           ? { liningFabricWastePercent: this.n(body.liningFabricWastePercent) || 0 }
           : {}),
+        ...(body?.liningFabricComponents !== undefined ? { liningFabricComponents: body.liningFabricComponents || null } : {}),
+        ...(body?.liningFabricAssignments !== undefined ? { liningFabricAssignments: body.liningFabricAssignments || null } : {}),
         ...(body?.sizeSet !== undefined ? { sizeSet: body.sizeSet || null } : {}),
         ...(body?.sizeRatio !== undefined ? { sizeRatio: body.sizeRatio || null } : {}),
         ...(body?.plannedQtyOverride !== undefined
@@ -947,12 +949,14 @@ export class ProductionService {
     }
 
     const touchesNpl = Array.isArray(body?.materials);
+    const touchesLiningAssignments = Object.prototype.hasOwnProperty.call(body || {}, "liningFabricAssignments");
     const touchesSizeOrFabric = [
       "fabricWidthCm",
       "fabricConsumptionM",
       "fabricWastePercent",
       "liningFabricConsumptionM",
       "liningFabricWastePercent",
+      "liningFabricComponents",
       "sizeSet",
       "sizeRatio",
     ].some((key) => Object.prototype.hasOwnProperty.call(body || {}, key));
@@ -962,6 +966,9 @@ export class ProductionService {
     }
     if (touchesSizeOrFabric && !this.userHas(user, "production.step4")) {
       throw new ForbiddenException("Bạn không có quyền thao tác Bước 4 · Size, tỷ lệ và định mức vải.");
+    }
+    if (touchesLiningAssignments && !this.userHas(user, "production.step5")) {
+      throw new ForbiddenException("Bạn không có quyền gán cây vải lót ở Bước 5.");
     }
 
     await this.prisma.$transaction(async (tx: any) => {
@@ -978,6 +985,8 @@ export class ProductionService {
           ...(body?.liningFabricWastePercent !== undefined
             ? { liningFabricWastePercent: this.n(body.liningFabricWastePercent) || 0 }
             : {}),
+          ...(body?.liningFabricComponents !== undefined ? { liningFabricComponents: body.liningFabricComponents || null } : {}),
+          ...(body?.liningFabricAssignments !== undefined ? { liningFabricAssignments: body.liningFabricAssignments || null } : {}),
           ...(body?.sizeSet !== undefined ? { sizeSet: body.sizeSet || null } : {}),
           ...(body?.sizeRatio !== undefined ? { sizeRatio: body.sizeRatio || null } : {}),
         },
@@ -1147,33 +1156,129 @@ export class ProductionService {
     return { totalQty, totalsBySize, materials };
   }
 
+  private normalizeLiningComponents(order: any) {
+    const raw = Array.isArray(order?.liningFabricComponents) ? order.liningFabricComponents : [];
+    const rows = raw
+      .map((x: any, index: number) => {
+        const key = String(x?.key || x?.id || `LINING_${index + 1}`).trim();
+        const name = String(x?.name || x?.label || key).trim();
+        const unit = String(x?.unit || "M").trim().toUpperCase() === "G" ? "G" : "M";
+        const consumption = Math.max(0, Number(this.n(x?.consumption) || 0));
+        const wastePercent = Math.max(0, Number(this.n(x?.wastePercent) || 0));
+        const enabled = x?.enabled !== false && consumption > 0;
+        return { key, name, unit, consumption, wastePercent, enabled };
+      })
+      .filter((x: any) => x.key && x.name && x.enabled);
+
+    // Tương thích lệnh V18 cũ: nếu chưa cấu hình theo từng phần thì dùng định mức lót tổng cũ.
+    if (!rows.length && Number(order?.liningFabricConsumptionM || 0) > 0) {
+      rows.push({
+        key: "LEGACY_LINING",
+        name: "Vải lót",
+        unit: "M",
+        consumption: Number(order.liningFabricConsumptionM || 0),
+        wastePercent: Number(order.liningFabricWastePercent || 0),
+        enabled: true,
+      });
+    }
+    return rows;
+  }
+
   private liningSummary(order: any, rolls: any[], totalPlannedQty: number, totalActualQty: number) {
     const liningRolls = rolls.filter((r: any) => String(r.fabricRole || "MAIN").toUpperCase() === "LINING");
-    const allocatedM = liningRolls.reduce((sum: number, r: any) => sum + Number(r.allocatedM || 0), 0);
-    const consumption = Number(order.liningFabricConsumptionM || 0);
-    const wastePercent = Number(order.liningFabricWastePercent || 0);
-    const effectiveConsumptionM = consumption > 0 ? consumption * (1 + wastePercent / 100) : 0;
-    const possibleQty = effectiveConsumptionM > 0 ? Math.floor(allocatedM / effectiveConsumptionM) : 0;
-    const requiredPlannedM = effectiveConsumptionM * Math.max(0, Number(totalPlannedQty || 0));
-    const requiredActualM = effectiveConsumptionM * Math.max(0, Number(totalActualQty || 0));
-    const shortagePlannedM = Math.max(0, requiredPlannedM - allocatedM);
-    const shortageActualM = Math.max(0, requiredActualM - allocatedM);
+    const rollMap = new Map(liningRolls.map((r: any) => [String(r.fabricReceiptRollId), r]));
+    const components = this.normalizeLiningComponents(order);
+    const rawAssignments = order?.liningFabricAssignments && typeof order.liningFabricAssignments === "object" && !Array.isArray(order.liningFabricAssignments)
+      ? order.liningFabricAssignments as Record<string, any>
+      : {};
+
+    const assignments: Record<string, string[]> = {};
+    for (const component of components) {
+      const supplied = Array.isArray(rawAssignments?.[component.key]) ? rawAssignments[component.key] : [];
+      const ids = supplied.map((x: any) => String(x || "")).filter((id: string) => rollMap.has(id));
+      // Lệnh V18 cũ: định mức tổng mặc định dùng toàn bộ cây lót đã chọn.
+      assignments[component.key] = component.key === "LEGACY_LINING" && !ids.length
+        ? liningRolls.map((r: any) => String(r.fabricReceiptRollId))
+        : Array.from(new Set(ids));
+    }
+
+    const groupMap = new Map<string, any>();
+    for (const component of components) {
+      const rollIds = assignments[component.key] || [];
+      const assignmentKey = `${component.unit}|||${[...rollIds].sort().join("|") || "UNASSIGNED"}`;
+      const effectivePerProduct = component.consumption * (1 + component.wastePercent / 100);
+      const current = groupMap.get(assignmentKey) || {
+        key: assignmentKey,
+        unit: component.unit,
+        rollIds,
+        components: [],
+        effectivePerProduct: 0,
+      };
+      current.components.push(component);
+      current.effectivePerProduct += effectivePerProduct;
+      groupMap.set(assignmentKey, current);
+    }
+
+    const groups = [...groupMap.values()].map((group: any) => {
+      const selectedRolls = group.rollIds.map((id: string) => rollMap.get(id)).filter(Boolean);
+      const allocated = group.unit === "G"
+        ? selectedRolls.reduce((sum: number, r: any) => sum + Number(r.allocatedKg || 0) * 1000, 0)
+        : selectedRolls.reduce((sum: number, r: any) => sum + Number(r.allocatedM || 0), 0);
+      const possibleQty = group.effectivePerProduct > 0 ? Math.floor(allocated / group.effectivePerProduct) : 0;
+      const requiredPlanned = group.effectivePerProduct * Math.max(0, Number(totalPlannedQty || 0));
+      const requiredActual = group.effectivePerProduct * Math.max(0, Number(totalActualQty || 0));
+      const shortagePlanned = Math.max(0, requiredPlanned - allocated);
+      const shortageActual = Math.max(0, requiredActual - allocated);
+      return {
+        ...group,
+        allocated,
+        possibleQty,
+        requiredPlanned,
+        requiredActual,
+        shortagePlanned,
+        shortageActual,
+        shortagePlannedQty: Math.max(0, Number(totalPlannedQty || 0) - possibleQty),
+        shortageActualQty: Math.max(0, Number(totalActualQty || 0) - possibleQty),
+        rollCount: selectedRolls.length,
+        rolls: selectedRolls.map((r: any) => ({
+          id: r.fabricReceiptRollId,
+          rollCode: r.rollCode || null,
+          colorName: r.colorName || null,
+          allocatedM: Number(r.allocatedM || 0),
+          allocatedKg: Number(r.allocatedKg || 0),
+        })),
+      };
+    });
+    const groupByKey = new Map(groups.map((x: any) => [x.key, x]));
+
+    const parts = components.map((component: any) => {
+      const rollIds = assignments[component.key] || [];
+      const groupKey = `${component.unit}|||${[...rollIds].sort().join("|") || "UNASSIGNED"}`;
+      const group: any = groupByKey.get(groupKey);
+      const effectivePerProduct = component.consumption * (1 + component.wastePercent / 100);
+      return {
+        ...component,
+        rollIds,
+        assigned: rollIds.length > 0,
+        effectivePerProduct,
+        requiredPlanned: effectivePerProduct * Math.max(0, Number(totalPlannedQty || 0)),
+        requiredActual: effectivePerProduct * Math.max(0, Number(totalActualQty || 0)),
+        groupKey,
+        groupAllocated: Number(group?.allocated || 0),
+        groupPossibleQty: Number(group?.possibleQty || 0),
+        groupShortageActual: Number(group?.shortageActual || 0),
+        groupShortageActualQty: Number(group?.shortageActualQty || 0),
+        rolls: group?.rolls || [],
+      };
+    });
+
     return {
-      enabled: liningRolls.length > 0 || consumption > 0,
+      enabled: components.length > 0 || liningRolls.length > 0,
       rollCount: liningRolls.length,
-      allocatedM,
-      consumptionM: consumption,
-      wastePercent,
-      effectiveConsumptionM,
-      possibleQty,
-      requiredPlannedM,
-      requiredActualM,
-      shortagePlannedM,
-      shortageActualM,
-      shortagePlannedQty: Math.max(0, Number(totalPlannedQty || 0) - possibleQty),
-      shortageActualQty: Math.max(0, Number(totalActualQty || 0) - possibleQty),
-      enoughForPlanned: effectiveConsumptionM > 0 && possibleQty >= Number(totalPlannedQty || 0),
-      enoughForActual: effectiveConsumptionM > 0 && possibleQty >= Number(totalActualQty || 0),
+      components: parts,
+      groups,
+      allAssigned: components.length > 0 && parts.every((x: any) => x.assigned),
+      enoughForActual: groups.length > 0 && groups.every((x: any) => x.rollIds.length > 0 && Number(x.shortageActual || 0) <= 0.0001),
     };
   }
 
@@ -1186,8 +1291,9 @@ export class ProductionService {
     const consumption = Number(order.fabricConsumptionM || 0);
     if (consumption <= 0) throw new BadRequestException("Chưa nhập định mức vải chính / sản phẩm.");
     if (!mainRolls.length) throw new BadRequestException("Chưa chọn cây vải chính.");
-    if (liningRolls.length && Number(order.liningFabricConsumptionM || 0) <= 0) {
-      throw new BadRequestException("Đã chọn vải lót nhưng chưa nhập định mức vải lót / sản phẩm ở Bước 4.");
+    const liningComponents = this.normalizeLiningComponents(order);
+    if (liningRolls.length && !liningComponents.length) {
+      throw new BadRequestException("Đã chọn cây vải lót nhưng chưa cấu hình định mức lót thân/tay/túi/cổ ở Bước 4.");
     }
 
     const effective = consumption * (1 + Number(order.fabricWastePercent || 0) / 100);
