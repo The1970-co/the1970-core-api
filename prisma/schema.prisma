@@ -3781,3 +3781,59 @@ model ProductionMaterialCalc {
   @@index([accessoryItemId])
   @@index([sizeLabel])
 }
+
+model ProductionNplIssue {
+  id                String   @id @default(cuid())
+  productionOrderId String
+  roundNo           Int
+  note              String?
+  createdById       String?
+  createdByName     String?
+  createdAt         DateTime @default(now())
+
+  @@unique([productionOrderId, roundNo])
+  @@index([productionOrderId])
+  @@index([productionOrderId, createdAt])
+}
+
+model ProductionNplIssueItem {
+  id                String   @id @default(cuid())
+  issueId           String
+  productionOrderId String
+  accessoryItemId   String
+  accessoryCode     String?
+  accessoryName     String
+  sizeLabel         String?
+  sizeKey           String   @default("")
+  unit              String
+  requiredQtyAtIssue Decimal @db.Decimal(14, 3)
+  issuedBeforeQty    Decimal  @default(0) @db.Decimal(14, 3)
+  issuedQty          Decimal  @db.Decimal(14, 3)
+  remainingAfterQty  Decimal  @default(0) @db.Decimal(14, 3)
+  stockBeforeQty     Decimal? @db.Decimal(14, 3)
+  stockAfterQty      Decimal? @db.Decimal(14, 3)
+  note               String?
+  createdAt          DateTime @default(now())
+
+  @@index([issueId])
+  @@index([productionOrderId])
+  @@index([productionOrderId, accessoryItemId, sizeKey])
+  @@index([accessoryItemId])
+}
+
+model ProductionNplIssueNote {
+  id                String   @id @default(cuid())
+  productionOrderId String
+  accessoryItemId   String
+  sizeKey           String   @default("")
+  note              String?
+  updatedById       String?
+  updatedByName     String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([productionOrderId, accessoryItemId, sizeKey])
+  @@index([productionOrderId])
+  @@index([accessoryItemId])
+}
+

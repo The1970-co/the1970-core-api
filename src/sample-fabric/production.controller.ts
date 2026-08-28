@@ -236,6 +236,18 @@ export class ProductionController {
     return this.service.saveActualCutQuantities(id, body, req.user);
   }
 
+  @Patch("orders/:id/npl-notes")
+  @RequirePermissions("production.view", "production.step5")
+  saveNplIssueNotes(@Param("id") id: string, @Body() body: any, @Req() req: any) {
+    return this.service.saveNplIssueNotes(id, body, req.user);
+  }
+
+  @Post("orders/:id/npl-issues")
+  @RequirePermissions("production.view", "production.step5")
+  createNplIssue(@Param("id") id: string, @Body() body: any, @Req() req: any) {
+    return this.service.createNplIssue(id, body, req.user);
+  }
+
   @Post("orders/:id/cancel")
   @RequirePermissions("production.edit")
   cancel(@Param("id") id: string, @Req() req: any) {

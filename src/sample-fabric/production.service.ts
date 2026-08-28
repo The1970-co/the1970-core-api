@@ -823,12 +823,13 @@ export class ProductionService {
     const totalPlannedQty = sizes.reduce((sum: number, x: any) => sum + Number(x.plannedQty || 0), 0);
     const totalActualQty = sizes.reduce((sum: number, x: any) => sum + Number(x.actualQty ?? x.plannedQty ?? 0), 0);
     const lining = this.liningSummary(order, rolls, totalPlannedQty, totalActualQty);
-    const costSummary = await this.productionCostSummary(id, totalActualQty, materials, rolls, user, order.productionExtraCosts, order.productionPriceMultiplier);
+    const nplIssueState = await this.nplIssueState(id, materials);
+    const costSummary = await this.productionCostSummary(id, totalActualQty, nplIssueState.materials, rolls, user, order.productionExtraCosts, order.productionPriceMultiplier);
     return {
       ...order, sourceCode, sourceName, sourceImageUrl,
       source: { type: order.sourceType, id: order.designSampleId || order.productId, code: sourceCode, name: sourceName, imageUrl: sourceImageUrl },
       sample: legacySample ? { ...legacySample, code: sourceCode, name: sourceName, coverImageUrl: sourceImageUrl } : null,
-      factory, rolls, sizes, materials, accessorySpecs, cutHistory, lining, costSummary,
+      factory, rolls, sizes, materials: nplIssueState.materials, accessorySpecs, cutHistory, lining, costSummary, nplIssueHistory: nplIssueState.nplIssueHistory, nplIssueCount: nplIssueState.nplIssueCount, nextNplIssueRound: nplIssueState.nextRoundNo,
     };
   }
 
@@ -1163,6 +1164,220 @@ export class ProductionService {
       if (materials.length) await tx.productionMaterialCalc.createMany({ data: materials.map((x) => ({ productionOrderId: id, ...x })) });
     });
     return { totalQty, totalsBySize, materials };
+  }
+
+  private nplIssueKey(accessoryItemId: any, sizeLabel: any) {
+    return `${String(accessoryItemId || "")}|||${String(sizeLabel || "").trim().toUpperCase()}`;
+  }
+
+  private async nplIssueState(id: string, materialsInput?: any[]) {
+    const materials = materialsInput || await this.prisma.productionMaterialCalc.findMany({
+      where: { productionOrderId: id },
+      orderBy: [{ accessoryName: "asc" }, { sizeLabel: "asc" }],
+    });
+
+    const [issueRows, issueItems, notes] = await Promise.all([
+      this.prisma.productionNplIssue.findMany({
+        where: { productionOrderId: id },
+        orderBy: { roundNo: "desc" },
+      }),
+      this.prisma.productionNplIssueItem.findMany({
+        where: { productionOrderId: id },
+        orderBy: { createdAt: "asc" },
+      }),
+      this.prisma.productionNplIssueNote.findMany({
+        where: { productionOrderId: id },
+      }),
+    ]);
+
+    const accessoryIds = [...new Set((materials || []).map((x: any) => String(x.accessoryItemId || "")).filter(Boolean))];
+    const items = accessoryIds.length ? await this.prisma.productionAccessoryItem.findMany({
+      where: { id: { in: accessoryIds } },
+      select: { id: true, stockQty: true },
+    }) : [];
+    const stockById = new Map(items.map((x: any) => [String(x.id), Number(x.stockQty || 0)]));
+
+    const issuedByKey = new Map<string, number>();
+    for (const row of issueItems as any[]) {
+      const key = this.nplIssueKey(row.accessoryItemId, row.sizeKey || row.sizeLabel);
+      issuedByKey.set(key, (issuedByKey.get(key) || 0) + Number(row.issuedQty || 0));
+    }
+    const noteByKey = new Map((notes as any[]).map((x: any) => [this.nplIssueKey(x.accessoryItemId, x.sizeKey), String(x.note || "")]));
+
+    const augmented = (materials || []).map((m: any) => {
+      const key = this.nplIssueKey(m.accessoryItemId, m.sizeLabel);
+      const issuedQty = issuedByKey.get(key) || 0;
+      const requiredQty = Number(m.requiredQty || 0);
+      const remainingToIssue = Math.max(0, requiredQty - issuedQty);
+      const stockQtyCurrent = stockById.get(String(m.accessoryItemId)) || 0;
+      return {
+        ...m,
+        issuedQty,
+        remainingToIssue,
+        stockQtyCurrent,
+        shortageQty: Math.max(0, remainingToIssue - stockQtyCurrent),
+        issueNote: noteByKey.get(key) || "",
+      };
+    });
+
+    const itemsByIssue = new Map<string, any[]>();
+    for (const item of issueItems as any[]) {
+      const arr = itemsByIssue.get(String(item.issueId)) || [];
+      arr.push(item);
+      itemsByIssue.set(String(item.issueId), arr);
+    }
+    const history = (issueRows as any[]).map((x: any) => ({
+      ...x,
+      items: itemsByIssue.get(String(x.id)) || [],
+      totalLines: (itemsByIssue.get(String(x.id)) || []).length,
+    }));
+
+    return {
+      materials: augmented,
+      nplIssueHistory: history,
+      nplIssueCount: history.length,
+      nextRoundNo: history.length ? Math.max(...history.map((x: any) => Number(x.roundNo || 0))) + 1 : 1,
+    };
+  }
+
+  async saveNplIssueNotes(id: string, body: any, user?: Actor) {
+    const order = await this.prisma.productionOrder.findUnique({ where: { id }, select: { id: true } });
+    if (!order) throw new NotFoundException("Không tìm thấy lệnh SX.");
+    const rows = Array.isArray(body?.rows) ? body.rows : [];
+    const actor = this.actor(user);
+    for (const row of rows) {
+      const accessoryItemId = String(row?.accessoryItemId || "").trim();
+      const sizeKey = String(row?.sizeLabel || "").trim().toUpperCase();
+      if (!accessoryItemId) continue;
+      await this.prisma.productionNplIssueNote.upsert({
+        where: { productionOrderId_accessoryItemId_sizeKey: { productionOrderId: id, accessoryItemId, sizeKey } },
+        create: {
+          productionOrderId: id,
+          accessoryItemId,
+          sizeKey,
+          note: String(row?.note || "").trim() || null,
+          updatedById: actor.id,
+          updatedByName: actor.name,
+        },
+        update: {
+          note: String(row?.note || "").trim() || null,
+          updatedById: actor.id,
+          updatedByName: actor.name,
+        },
+      });
+    }
+    const state = await this.nplIssueState(id);
+    return state;
+  }
+
+  async createNplIssue(id: string, body: any, user?: Actor) {
+    const order = await this.prisma.productionOrder.findUnique({ where: { id }, select: { id: true } });
+    if (!order) throw new NotFoundException("Không tìm thấy lệnh SX.");
+
+    const requested = (Array.isArray(body?.rows) ? body.rows : [])
+      .map((x: any) => ({
+        accessoryItemId: String(x?.accessoryItemId || "").trim(),
+        sizeLabel: String(x?.sizeLabel || "").trim().toUpperCase() || null,
+        qty: Number(this.n(x?.qty) || 0),
+        note: String(x?.note || "").trim() || null,
+      }))
+      .filter((x: any) => x.accessoryItemId && x.qty > 0);
+
+    if (!requested.length) throw new BadRequestException("Chưa nhập số lượng NPL cần xuất lần này.");
+
+    const materials = await this.prisma.productionMaterialCalc.findMany({ where: { productionOrderId: id } });
+    if (!materials.length) throw new BadRequestException("Chưa có bảng tính NPL. Hãy tính sản lượng ở Bước 5 trước.");
+
+    const state = await this.nplIssueState(id, materials);
+    const stateMap = new Map((state.materials || []).map((x: any) => [this.nplIssueKey(x.accessoryItemId, x.sizeLabel), x]));
+    const actor = this.actor(user);
+
+    const result = await this.prisma.$transaction(async (tx: any) => {
+      const maxRound = await tx.productionNplIssue.aggregate({
+        where: { productionOrderId: id },
+        _max: { roundNo: true },
+      });
+      const roundNo = Number(maxRound?._max?.roundNo || 0) + 1;
+      const issue = await tx.productionNplIssue.create({
+        data: {
+          productionOrderId: id,
+          roundNo,
+          note: String(body?.note || "").trim() || null,
+          createdById: actor.id,
+          createdByName: actor.name,
+        },
+      });
+
+      for (const row of requested) {
+        const key = this.nplIssueKey(row.accessoryItemId, row.sizeLabel);
+        const material: any = stateMap.get(key);
+        if (!material) throw new BadRequestException(`Không tìm thấy dòng NPL ${row.accessoryItemId}${row.sizeLabel ? ` · size ${row.sizeLabel}` : ""}.`);
+
+        const remaining = Number(material.remainingToIssue || 0);
+        if (row.qty > remaining + 0.0001) {
+          throw new BadRequestException(`${material.accessoryCode || ""} · ${material.accessoryName}: lần này chỉ còn phải cấp ${remaining}.`);
+        }
+
+        const stockItem = await tx.productionAccessoryItem.findUnique({
+          where: { id: row.accessoryItemId },
+          select: { id: true, stockQty: true },
+        });
+        if (!stockItem) throw new BadRequestException(`Không tìm thấy NPL ${material.accessoryCode || row.accessoryItemId}.`);
+        const stockBefore = Number(stockItem.stockQty || 0);
+        if (row.qty > stockBefore + 0.0001) {
+          throw new BadRequestException(`${material.accessoryCode || ""} · ${material.accessoryName}: kho chỉ còn ${stockBefore}, không thể cấp ${row.qty}.`);
+        }
+
+        const stockAfter = Math.max(0, stockBefore - row.qty);
+        await tx.productionAccessoryItem.update({
+          where: { id: row.accessoryItemId },
+          data: { stockQty: { decrement: row.qty } },
+        });
+
+        const issuedBefore = Number(material.issuedQty || 0);
+        const remainingAfter = Math.max(0, Number(material.requiredQty || 0) - issuedBefore - row.qty);
+        await tx.productionNplIssueItem.create({
+          data: {
+            issueId: issue.id,
+            productionOrderId: id,
+            accessoryItemId: row.accessoryItemId,
+            accessoryCode: material.accessoryCode || null,
+            accessoryName: material.accessoryName,
+            sizeLabel: row.sizeLabel,
+            sizeKey: row.sizeLabel || "",
+            unit: material.unit,
+            requiredQtyAtIssue: Number(material.requiredQty || 0),
+            issuedBeforeQty: issuedBefore,
+            issuedQty: row.qty,
+            remainingAfterQty: remainingAfter,
+            stockBeforeQty: stockBefore,
+            stockAfterQty: stockAfter,
+            note: row.note,
+          },
+        });
+
+        await tx.productionNplIssueNote.upsert({
+          where: { productionOrderId_accessoryItemId_sizeKey: { productionOrderId: id, accessoryItemId: row.accessoryItemId, sizeKey: row.sizeLabel || "" } },
+          create: {
+            productionOrderId: id,
+            accessoryItemId: row.accessoryItemId,
+            sizeKey: row.sizeLabel || "",
+            note: row.note,
+            updatedById: actor.id,
+            updatedByName: actor.name,
+          },
+          update: {
+            note: row.note,
+            updatedById: actor.id,
+            updatedByName: actor.name,
+          },
+        });
+      }
+      return issue;
+    });
+
+    const fresh = await this.nplIssueState(id);
+    return { success: true, issue: result, ...fresh };
   }
 
   private normalizeLiningComponents(order: any) {
@@ -1625,8 +1840,9 @@ export class ProductionService {
     const totalPlannedQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.plannedQty || 0), 0);
     const totalActualQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.actualQty ?? x.plannedQty ?? 0), 0);
     const lining = this.liningSummary(order, rolls, totalPlannedQty, totalActualQty);
-    const costSummary = await this.productionCostSummary(id, totalActualQty, npl.materials, rolls, user, order.productionExtraCosts, order.productionPriceMultiplier);
-    return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, effectiveConsumptionM: effective, colors: this.groupCutRows(sizeRows), materials: npl.materials, lining, costSummary };
+    const issueState = await this.nplIssueState(id, npl.materials);
+    const costSummary = await this.productionCostSummary(id, totalActualQty, issueState.materials, rolls, user, order.productionExtraCosts, order.productionPriceMultiplier);
+    return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, effectiveConsumptionM: effective, colors: this.groupCutRows(sizeRows), materials: issueState.materials, lining, costSummary, nplIssueHistory: issueState.nplIssueHistory, nextNplIssueRound: issueState.nextRoundNo };
   }
 
   private groupCutRows(rows: any[]) {
@@ -1681,8 +1897,9 @@ export class ProductionService {
     const rolls = await this.prisma.productionOrderRoll.findMany({ where: { productionOrderId: id } });
     const freshOrder = await this.prisma.productionOrder.findUnique({ where: { id } });
     const lining = this.liningSummary(freshOrder || order, rolls, totalPlannedQty, totalActualQty);
-    const costSummary = await this.productionCostSummary(id, totalActualQty, npl.materials, rolls, user, (freshOrder || order).productionExtraCosts, (freshOrder || order).productionPriceMultiplier);
-    return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, colors: this.groupCutRows(sizeRows), materials: npl.materials, cutHistory, lining, costSummary };
+    const issueState = await this.nplIssueState(id, npl.materials);
+    const costSummary = await this.productionCostSummary(id, totalActualQty, issueState.materials, rolls, user, (freshOrder || order).productionExtraCosts, (freshOrder || order).productionPriceMultiplier);
+    return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, colors: this.groupCutRows(sizeRows), materials: issueState.materials, cutHistory, lining, costSummary, nplIssueHistory: issueState.nplIssueHistory, nextNplIssueRound: issueState.nextRoundNo };
   }
 
   async cancelOrder(id: string, user?: any) {
@@ -1751,6 +1968,9 @@ export class ProductionService {
       await tx.productionOrderRoll.deleteMany({ where: { productionOrderId: id } });
       await tx.productionCutQtyHistory.deleteMany({ where: { productionOrderId: id } });
       await tx.productionSizePlan.deleteMany({ where: { productionOrderId: id } });
+      await tx.productionNplIssueItem.deleteMany({ where: { productionOrderId: id } });
+      await tx.productionNplIssue.deleteMany({ where: { productionOrderId: id } });
+      await tx.productionNplIssueNote.deleteMany({ where: { productionOrderId: id } });
       await tx.productionMaterialCalc.deleteMany({ where: { productionOrderId: id } });
       await tx.productionOrderAccessorySpec.deleteMany({ where: { productionOrderId: id } });
       await tx.productionOrder.delete({ where: { id } });
