@@ -106,13 +106,13 @@ export class ProductionController {
   }
 
   @Post("accessory-templates")
-  @RequirePermissions("production.edit", "production.step2")
+  @RequirePermissions("production.view", "production.step2")
   createAccessoryTemplate(@Body() body: any, @Req() req: any) {
     return this.service.createAccessoryTemplate(body, req.user);
   }
 
   @Patch("accessory-templates/:id")
-  @RequirePermissions("production.edit", "production.step2")
+  @RequirePermissions("production.view", "production.step2")
   updateAccessoryTemplate(@Param("id") id: string, @Body() body: any) {
     return this.service.updateAccessoryTemplate(id, body);
   }
@@ -201,31 +201,31 @@ export class ProductionController {
   }
 
   @Patch("orders/:id")
-  @RequirePermissions("production.edit", "production.step1")
+  @RequirePermissions("production.view", "production.step1")
   updateOrder(@Param("id") id: string, @Body() body: any) {
     return this.service.updateOrder(id, body);
   }
 
   @Patch("orders/:id/spec")
-  @RequirePermissions("production.edit")
+  @RequirePermissions("production.view")
   saveOrderSpec(@Param("id") id: string, @Body() body: any, @Req() req: any) {
     return this.service.saveOrderSpec(id, body, req.user);
   }
 
   @Patch("orders/:id/rolls")
-  @RequirePermissions("production.edit", "production.step3")
+  @RequirePermissions("production.view", "production.step3")
   setRolls(@Param("id") id: string, @Body() body: any) {
     return this.service.setOrderRolls(id, body);
   }
 
   @Post("orders/:id/calculate")
-  @RequirePermissions("production.calculate", "production.step5")
+  @RequirePermissions("production.view", "production.step5")
   calculate(@Param("id") id: string, @Req() req: any) {
     return this.service.calculateOrder(id, req.user);
   }
 
   @Patch("orders/:id/cut-actual")
-  @RequirePermissions("production.edit", "production.step5")
+  @RequirePermissions("production.view", "production.step5")
   saveActualCutQuantities(@Param("id") id: string, @Body() body: any, @Req() req: any) {
     return this.service.saveActualCutQuantities(id, body, req.user);
   }
@@ -243,7 +243,7 @@ export class ProductionController {
   }
 
   @Post("orders/:id/send")
-  @RequirePermissions("production.edit", "production.step6")
+  @RequirePermissions("production.view", "production.step6")
   send(@Param("id") id: string) {
     return this.service.sendOrder(id);
   }

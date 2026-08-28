@@ -1010,6 +1010,34 @@ export class MetaAdsSyncService {
       throw new Error(`Mapping Meta Ad ${metaAdId} chưa được lưu chắc chắn vào DB`);
     }
 
+    // Lưu thêm một bản mapping độc lập trong MetaSyncLog.
+    // rawJson của MetaAd vẫn là nguồn chính; log này là fallback nếu một luồng sync khác
+    // vô tình ghi đè rawJson về dữ liệu Meta thuần ở tương lai.
+    try {
+      await (this.prisma as any).metaSyncLog.create({
+        data: {
+          metaAccountId: null,
+          syncType: 'META_ADS_AUTOPILOT_AD_MAPPING',
+          status: 'SUCCESS',
+          range: 'manual_mapping',
+          startedAt: new Date(),
+          finishedAt: new Date(),
+          durationMs: 0,
+          scanned: 1,
+          upserted: 1,
+          failed: 0,
+          message: `Saved manual mapping ${metaAdId} -> ${productCode}${mapping.color ? ` · ${mapping.color}` : ''}`,
+          errorJson: {
+            metaAdId,
+            mapping: persistedMapping,
+          },
+        },
+      });
+    } catch (error: any) {
+      // Mapping trong MetaAd đã lưu thành công; lỗi audit fallback không được làm fail thao tác.
+      this.logger.warn(`[META_AD_MAPPING_AUDIT] ${metaAdId}: ${error?.message || error}`);
+    }
+
     // Bắt lần load sau lấy DB mới, không giữ cache 60s cũ.
     this.autopilotActiveAdsCache = null;
     this.autopilotActiveAdsInFlight = null;
@@ -1124,7 +1152,7 @@ export class MetaAdsSyncService {
 
       // DB cache chỉ để thumbnail và fallback nếu bulk call thiếu field.
       const adIds = activeAds.map((x: any) => String(x?.id || '')).filter(Boolean);
-      const [cachedAds, cachedAdSets, cachedCampaigns] = await Promise.all([
+      const [cachedAds, cachedAdSets, cachedCampaigns, mappingLogs] = await Promise.all([
         adIds.length
           ? (this.prisma as any).metaAd.findMany({
               where: { metaAdId: { in: adIds } },
@@ -1143,7 +1171,27 @@ export class MetaAdsSyncService {
               select: { metaCampaignId: true, name: true, dailyBudget: true, lifetimeBudget: true },
             })
           : Promise.resolve([]),
+        adIds.length
+          ? (this.prisma as any).metaSyncLog.findMany({
+              where: {
+                syncType: 'META_ADS_AUTOPILOT_AD_MAPPING',
+                status: 'SUCCESS',
+              },
+              orderBy: { startedAt: 'desc' },
+              take: 2000,
+              select: { startedAt: true, errorJson: true },
+            })
+          : Promise.resolve([]),
       ]);
+
+      const fallbackMappingByAd = new Map<string, any>();
+      for (const log of mappingLogs || []) {
+        const payload = log?.errorJson && typeof log.errorJson === 'object' ? log.errorJson : {};
+        const logAdId = String(payload?.metaAdId || '').trim();
+        if (!logAdId || !adIds.includes(logAdId) || fallbackMappingByAd.has(logAdId)) continue;
+        const logMapping = payload?.mapping && typeof payload.mapping === 'object' ? payload.mapping : null;
+        if (logMapping?.productCode) fallbackMappingByAd.set(logAdId, logMapping);
+      }
 
       const cachedAdMap = new Map((cachedAds || []).map((x: any) => [String(x.metaAdId), x]));
       const thumbMap = new Map((cachedAds || []).map((x: any) => [String(x.metaAdId), x.thumbnailUrl || x.imageUrl || null]));
@@ -1157,10 +1205,11 @@ export class MetaAdsSyncService {
         const liveAdSet = liveAdSetsById?.[adSetId] || {};
         const liveCampaign = liveCampaignsById?.[campaignId] || {};
         const cachedAd = cachedAdMap.get(metaAdId) as any;
-        const manualMapping =
+        const rawManualMapping =
           cachedAd?.rawJson && typeof cachedAd.rawJson === 'object'
             ? cachedAd.rawJson?._autopilotMapping || null
             : null;
+        const manualMapping = rawManualMapping || fallbackMappingByAd.get(metaAdId) || null;
         const cachedAdSet = cachedAdSetMap.get(adSetId) as any;
         const cachedCampaign = cachedCampaignMap.get(campaignId) as any;
 
