@@ -812,11 +812,14 @@ export class ProductionService {
     const sourceCode = order.sourceCode || legacySample?.code || (legacyProduct ? this.productCode(legacyProduct) : "");
     const sourceName = order.sourceName || legacySample?.name || legacyProduct?.name || null;
     const sourceImageUrl = order.sourceImageUrl || legacySample?.coverImageUrl || legacyProduct?.imageUrl || null;
+    const totalPlannedQty = sizes.reduce((sum: number, x: any) => sum + Number(x.plannedQty || 0), 0);
+    const totalActualQty = sizes.reduce((sum: number, x: any) => sum + Number(x.actualQty ?? x.plannedQty ?? 0), 0);
+    const lining = this.liningSummary(order, rolls, totalPlannedQty, totalActualQty);
     return {
       ...order, sourceCode, sourceName, sourceImageUrl,
       source: { type: order.sourceType, id: order.designSampleId || order.productId, code: sourceCode, name: sourceName, imageUrl: sourceImageUrl },
       sample: legacySample ? { ...legacySample, code: sourceCode, name: sourceName, coverImageUrl: sourceImageUrl } : null,
-      factory, rolls, sizes, materials, accessorySpecs, cutHistory,
+      factory, rolls, sizes, materials, accessorySpecs, cutHistory, lining,
     };
   }
 
@@ -924,6 +927,10 @@ export class ProductionService {
         ...(body?.fabricWastePercent !== undefined
           ? { fabricWastePercent: this.n(body.fabricWastePercent) || 0 }
           : {}),
+        ...(body?.liningFabricConsumptionM !== undefined ? { liningFabricConsumptionM: this.n(body.liningFabricConsumptionM) } : {}),
+        ...(body?.liningFabricWastePercent !== undefined
+          ? { liningFabricWastePercent: this.n(body.liningFabricWastePercent) || 0 }
+          : {}),
         ...(body?.sizeSet !== undefined ? { sizeSet: body.sizeSet || null } : {}),
         ...(body?.sizeRatio !== undefined ? { sizeRatio: body.sizeRatio || null } : {}),
         ...(body?.plannedQtyOverride !== undefined
@@ -944,6 +951,8 @@ export class ProductionService {
       "fabricWidthCm",
       "fabricConsumptionM",
       "fabricWastePercent",
+      "liningFabricConsumptionM",
+      "liningFabricWastePercent",
       "sizeSet",
       "sizeRatio",
     ].some((key) => Object.prototype.hasOwnProperty.call(body || {}, key));
@@ -964,6 +973,10 @@ export class ProductionService {
           ...(body?.fabricConsumptionM !== undefined ? { fabricConsumptionM: this.n(body.fabricConsumptionM) } : {}),
           ...(body?.fabricWastePercent !== undefined
             ? { fabricWastePercent: this.n(body.fabricWastePercent) || 0 }
+            : {}),
+          ...(body?.liningFabricConsumptionM !== undefined ? { liningFabricConsumptionM: this.n(body.liningFabricConsumptionM) } : {}),
+          ...(body?.liningFabricWastePercent !== undefined
+            ? { liningFabricWastePercent: this.n(body.liningFabricWastePercent) || 0 }
             : {}),
           ...(body?.sizeSet !== undefined ? { sizeSet: body.sizeSet || null } : {}),
           ...(body?.sizeRatio !== undefined ? { sizeRatio: body.sizeRatio || null } : {}),
@@ -1039,6 +1052,7 @@ export class ProductionService {
               allocatedM,
               allocatedKg,
               imageUrl: r.images?.[0]?.url || null,
+              fabricRole: String(x?.fabricRole || "MAIN").toUpperCase() === "LINING" ? "LINING" : "MAIN",
             };
           }),
         });
@@ -1133,17 +1147,52 @@ export class ProductionService {
     return { totalQty, totalsBySize, materials };
   }
 
+  private liningSummary(order: any, rolls: any[], totalPlannedQty: number, totalActualQty: number) {
+    const liningRolls = rolls.filter((r: any) => String(r.fabricRole || "MAIN").toUpperCase() === "LINING");
+    const allocatedM = liningRolls.reduce((sum: number, r: any) => sum + Number(r.allocatedM || 0), 0);
+    const consumption = Number(order.liningFabricConsumptionM || 0);
+    const wastePercent = Number(order.liningFabricWastePercent || 0);
+    const effectiveConsumptionM = consumption > 0 ? consumption * (1 + wastePercent / 100) : 0;
+    const possibleQty = effectiveConsumptionM > 0 ? Math.floor(allocatedM / effectiveConsumptionM) : 0;
+    const requiredPlannedM = effectiveConsumptionM * Math.max(0, Number(totalPlannedQty || 0));
+    const requiredActualM = effectiveConsumptionM * Math.max(0, Number(totalActualQty || 0));
+    const shortagePlannedM = Math.max(0, requiredPlannedM - allocatedM);
+    const shortageActualM = Math.max(0, requiredActualM - allocatedM);
+    return {
+      enabled: liningRolls.length > 0 || consumption > 0,
+      rollCount: liningRolls.length,
+      allocatedM,
+      consumptionM: consumption,
+      wastePercent,
+      effectiveConsumptionM,
+      possibleQty,
+      requiredPlannedM,
+      requiredActualM,
+      shortagePlannedM,
+      shortageActualM,
+      shortagePlannedQty: Math.max(0, Number(totalPlannedQty || 0) - possibleQty),
+      shortageActualQty: Math.max(0, Number(totalActualQty || 0) - possibleQty),
+      enoughForPlanned: effectiveConsumptionM > 0 && possibleQty >= Number(totalPlannedQty || 0),
+      enoughForActual: effectiveConsumptionM > 0 && possibleQty >= Number(totalActualQty || 0),
+    };
+  }
+
   async calculateOrder(id: string, user?: Actor) {
     const order = await this.prisma.productionOrder.findUnique({ where: { id } });
     if (!order) throw new NotFoundException("Không tìm thấy lệnh SX.");
     const rolls = await this.prisma.productionOrderRoll.findMany({ where: { productionOrderId: id } });
+    const mainRolls = (rolls as any[]).filter((r: any) => String(r.fabricRole || "MAIN").toUpperCase() !== "LINING");
+    const liningRolls = (rolls as any[]).filter((r: any) => String(r.fabricRole || "MAIN").toUpperCase() === "LINING");
     const consumption = Number(order.fabricConsumptionM || 0);
-    if (consumption <= 0) throw new BadRequestException("Chưa nhập định mức vải / sản phẩm.");
-    if (!rolls.length) throw new BadRequestException("Chưa chọn cây vải.");
+    if (consumption <= 0) throw new BadRequestException("Chưa nhập định mức vải chính / sản phẩm.");
+    if (!mainRolls.length) throw new BadRequestException("Chưa chọn cây vải chính.");
+    if (liningRolls.length && Number(order.liningFabricConsumptionM || 0) <= 0) {
+      throw new BadRequestException("Đã chọn vải lót nhưng chưa nhập định mức vải lót / sản phẩm ở Bước 4.");
+    }
 
     const effective = consumption * (1 + Number(order.fabricWastePercent || 0) / 100);
     const grouped = new Map<string, any>();
-    for (const r of rolls as any[]) {
+    for (const r of mainRolls as any[]) {
       const code = this.normalizeColorCode(r.colorCode) || "";
       const key = `${r.colorName || "Không màu"}|||${code}`;
       const row = grouped.get(key) || { colorName: r.colorName || "Không màu", colorCode: code || null, meters: 0 };
@@ -1202,7 +1251,8 @@ export class ProductionService {
     const npl = await this.calculateMaterialsFromSizePlans(id, sizeRows);
     const totalPlannedQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.plannedQty || 0), 0);
     const totalActualQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.actualQty ?? x.plannedQty ?? 0), 0);
-    return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, effectiveConsumptionM: effective, colors: this.groupCutRows(sizeRows), materials: npl.materials };
+    const lining = this.liningSummary(order, rolls, totalPlannedQty, totalActualQty);
+    return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, effectiveConsumptionM: effective, colors: this.groupCutRows(sizeRows), materials: npl.materials, lining };
   }
 
   private groupCutRows(rows: any[]) {
@@ -1254,7 +1304,10 @@ export class ProductionService {
     const totalPlannedQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.plannedQty || 0), 0);
     const totalActualQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.actualQty ?? x.plannedQty ?? 0), 0);
     const cutHistory = await this.prisma.productionCutQtyHistory.findMany({ where: { productionOrderId: id }, orderBy: { createdAt: "desc" }, take: 200 });
-    return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, colors: this.groupCutRows(sizeRows), materials: npl.materials, cutHistory };
+    const rolls = await this.prisma.productionOrderRoll.findMany({ where: { productionOrderId: id } });
+    const freshOrder = await this.prisma.productionOrder.findUnique({ where: { id } });
+    const lining = this.liningSummary(freshOrder || order, rolls, totalPlannedQty, totalActualQty);
+    return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, colors: this.groupCutRows(sizeRows), materials: npl.materials, cutHistory, lining };
   }
 
   async cancelOrder(id: string, user?: any) {

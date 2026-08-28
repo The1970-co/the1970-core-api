@@ -3654,10 +3654,12 @@ model ProductionOrder {
   dueDate             DateTime?
   sentAt              DateTime?
   productKind         ProductionProductKind  @default(OTHER)
-  fabricWidthCm       Decimal?               @db.Decimal(10, 2)
-  fabricConsumptionM  Decimal?               @db.Decimal(10, 4)
-  fabricWastePercent  Decimal                @default(0) @db.Decimal(7, 3)
-  sizeSet             Json?
+  fabricWidthCm              Decimal?               @db.Decimal(10, 2)
+  fabricConsumptionM         Decimal?               @db.Decimal(10, 4)
+  fabricWastePercent         Decimal                @default(0) @db.Decimal(7, 3)
+  liningFabricConsumptionM   Decimal?               @db.Decimal(10, 4)
+  liningFabricWastePercent   Decimal                @default(0) @db.Decimal(7, 3)
+  sizeSet                    Json?
   sizeRatio           Json?
   plannedQtyOverride  Int?
   note                String?
@@ -3689,11 +3691,13 @@ model ProductionOrderRoll {
   allocatedM          Decimal? @db.Decimal(12, 3)
   allocatedKg         Decimal? @db.Decimal(12, 3)
   imageUrl             String?
+  fabricRole           String   @default("MAIN")
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
 
   @@unique([productionOrderId, fabricReceiptRollId])
   @@index([productionOrderId])
+  @@index([productionOrderId, fabricRole])
   @@index([fabricReceiptRollId])
   @@index([colorName])
 }
