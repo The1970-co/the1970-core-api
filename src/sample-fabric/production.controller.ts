@@ -196,8 +196,8 @@ export class ProductionController {
 
   @Get("orders/:id")
   @RequirePermissions("production.view")
-  order(@Param("id") id: string) {
-    return this.service.getOrder(id);
+  order(@Param("id") id: string, @Req() req: any) {
+    return this.service.getOrder(id, req.user);
   }
 
   @Post("orders")

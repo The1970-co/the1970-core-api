@@ -783,7 +783,7 @@ export class ProductionService {
     });
   }
 
-  async getOrder(id: string) {
+  async getOrder(id: string, user?: any) {
     const order = await this.prisma.productionOrder.findUnique({ where: { id } });
     if (!order) throw new NotFoundException("Không tìm thấy lệnh SX.");
     const [factory, rolls, sizes, materials, accessorySpecs, cutHistory] = await Promise.all([
@@ -815,11 +815,12 @@ export class ProductionService {
     const totalPlannedQty = sizes.reduce((sum: number, x: any) => sum + Number(x.plannedQty || 0), 0);
     const totalActualQty = sizes.reduce((sum: number, x: any) => sum + Number(x.actualQty ?? x.plannedQty ?? 0), 0);
     const lining = this.liningSummary(order, rolls, totalPlannedQty, totalActualQty);
+    const costSummary = await this.productionCostSummary(id, totalActualQty, materials, rolls, user);
     return {
       ...order, sourceCode, sourceName, sourceImageUrl,
       source: { type: order.sourceType, id: order.designSampleId || order.productId, code: sourceCode, name: sourceName, imageUrl: sourceImageUrl },
       sample: legacySample ? { ...legacySample, code: sourceCode, name: sourceName, coverImageUrl: sourceImageUrl } : null,
-      factory, rolls, sizes, materials, accessorySpecs, cutHistory, lining,
+      factory, rolls, sizes, materials, accessorySpecs, cutHistory, lining, costSummary,
     };
   }
 
@@ -1282,6 +1283,227 @@ export class ProductionService {
     };
   }
 
+  private canViewProductionCost(user?: any) {
+    return !!user
+      && this.userHas(user, "fabric_receipt.cost.view")
+      && this.userHas(user, "accessories.cost.view");
+  }
+
+  private async productionCostSummary(
+    id: string,
+    totalActualQty: number,
+    materials: any[],
+    orderRolls: any[],
+    user?: any,
+  ) {
+    if (!this.canViewProductionCost(user)) {
+      return {
+        canView: false,
+        totalActualQty,
+        complete: false,
+        missingPriceCount: 0,
+        mainFabricCostVnd: null,
+        liningFabricCostVnd: null,
+        accessoryCostVnd: null,
+        totalMaterialCostVnd: null,
+        materialCostPerProductVnd: null,
+        fabricLines: [],
+        accessoryLines: [],
+      };
+    }
+
+    const rollIds = [...new Set((orderRolls || []).map((x: any) => String(x.fabricReceiptRollId || "")).filter(Boolean))];
+    const fabricRows = rollIds.length
+      ? await this.prisma.fabricReceiptRoll.findMany({
+          where: { id: { in: rollIds } },
+          select: {
+            id: true,
+            fabricReceiptId: true,
+            fabricCode: true,
+            rollCode: true,
+            colorName: true,
+            actualM: true,
+            actualKg: true,
+            supplierDeclaredM: true,
+            supplierDeclaredKg: true,
+            unitPriceCny: true,
+            priceUnit: true,
+            fabricReceipt: {
+              select: {
+                receiptCode: true,
+                fabricName: true,
+                fabricCode: true,
+                exchangeRateToVnd: true,
+                unitPriceVnd: true,
+                priceUnit: true,
+                fabricCosts: {
+                  select: {
+                    fabricCode: true,
+                    chinaShippingCny: true,
+                    vietnamShippingVnd: true,
+                  },
+                },
+              },
+            },
+          },
+        })
+      : [];
+
+    const receiptIds = [...new Set(fabricRows.map((x: any) => String(x.fabricReceiptId || "")).filter(Boolean))];
+    const siblingRolls = receiptIds.length
+      ? await this.prisma.fabricReceiptRoll.findMany({
+          where: { fabricReceiptId: { in: receiptIds } },
+          select: { id: true, fabricReceiptId: true, fabricCode: true },
+        })
+      : [];
+
+    const siblingCount = new Map<string, number>();
+    for (const row of siblingRolls as any[]) {
+      const key = `${row.fabricReceiptId}|||${String(row.fabricCode || "").trim().toUpperCase()}`;
+      siblingCount.set(key, (siblingCount.get(key) || 0) + 1);
+    }
+
+    const allocationByRoll = new Map((orderRolls || []).map((x: any) => [String(x.fabricReceiptRollId), x]));
+    const fabricLines = fabricRows.map((roll: any) => {
+      const allocation: any = allocationByRoll.get(String(roll.id)) || {};
+      const role = String(allocation.fabricRole || "MAIN").toUpperCase() === "LINING" ? "LINING" : "MAIN";
+      const receipt = roll.fabricReceipt || {};
+      const rate = Number(receipt.exchangeRateToVnd || 0);
+      const code = String(roll.fabricCode || receipt.fabricCode || "").trim().toUpperCase();
+      const priceUnit = String(roll.priceUnit || receipt.priceUnit || "METER").toUpperCase();
+      const fullM = Number(roll.actualM ?? roll.supplierDeclaredM ?? 0);
+      const fullKg = Number(roll.actualKg ?? roll.supplierDeclaredKg ?? 0);
+      const usedM = Number(allocation.allocatedM || 0);
+      const usedKg = Number(allocation.allocatedKg || 0);
+
+      let usedQty = 0;
+      let fullQty = 0;
+      let qtyUnit = "m";
+      if (priceUnit === "KG") {
+        usedQty = usedKg;
+        fullQty = fullKg;
+        qtyUnit = "kg";
+      } else if (priceUnit === "ROLL") {
+        qtyUnit = "cây";
+        if (fullM > 0 && usedM > 0) {
+          usedQty = Math.min(1, usedM / fullM);
+          fullQty = 1;
+        } else if (fullKg > 0 && usedKg > 0) {
+          usedQty = Math.min(1, usedKg / fullKg);
+          fullQty = 1;
+        } else {
+          usedQty = 1;
+          fullQty = 1;
+        }
+      } else {
+        usedQty = usedM;
+        fullQty = fullM;
+        qtyUnit = "m";
+      }
+
+      const unitPriceCny = roll.unitPriceCny === null || roll.unitPriceCny === undefined ? null : Number(roll.unitPriceCny);
+      const legacyUnitPriceVnd = receipt.unitPriceVnd === null || receipt.unitPriceVnd === undefined ? null : Number(receipt.unitPriceVnd);
+      let goodsFullVnd: number | null = null;
+      let priceSource = "";
+
+      if (unitPriceCny !== null && rate > 0) {
+        const pricedQty = priceUnit === "ROLL" ? 1 : fullQty;
+        goodsFullVnd = pricedQty * unitPriceCny * rate;
+        priceSource = "Giá cây × tỷ giá";
+      } else if (legacyUnitPriceVnd !== null) {
+        const receiptPriceUnit = String(receipt.priceUnit || priceUnit).toUpperCase();
+        const pricedQty = receiptPriceUnit === "ROLL" ? 1 : (receiptPriceUnit === "KG" ? fullKg : fullM);
+        goodsFullVnd = pricedQty * legacyUnitPriceVnd;
+        priceSource = "Giá VND phiếu vải";
+      }
+
+      const costRow = Array.isArray(receipt.fabricCosts)
+        ? receipt.fabricCosts.find((x: any) => String(x.fabricCode || "").trim().toUpperCase() === code)
+        : null;
+      const chinaShippingVnd = Number(costRow?.chinaShippingCny || 0) * rate;
+      const vietnamShippingVnd = Number(costRow?.vietnamShippingVnd || 0);
+      const countKey = `${roll.fabricReceiptId}|||${code}`;
+      const codeRollCount = Math.max(1, siblingCount.get(countKey) || 1);
+      const shippingPerRollVnd = (chinaShippingVnd + vietnamShippingVnd) / codeRollCount;
+
+      const fraction = priceUnit === "ROLL"
+        ? Math.max(0, Math.min(1, usedQty))
+        : fullQty > 0
+          ? Math.max(0, Math.min(1, usedQty / fullQty))
+          : 0;
+
+      const missingPrice = goodsFullVnd === null || !Number.isFinite(goodsFullVnd);
+      const costVnd = missingPrice ? 0 : Math.max(0, goodsFullVnd! * fraction + shippingPerRollVnd * fraction);
+
+      return {
+        role,
+        fabricReceiptRollId: roll.id,
+        receiptCode: receipt.receiptCode || null,
+        rollCode: roll.rollCode || null,
+        fabricCode: code || null,
+        fabricName: receipt.fabricName || null,
+        colorName: roll.colorName || null,
+        priceUnit,
+        usedQty,
+        qtyUnit,
+        usedM,
+        usedKg,
+        costVnd,
+        missingPrice,
+        priceSource,
+      };
+    });
+
+    const accessoryIds = [...new Set((materials || []).map((x: any) => String(x.accessoryItemId || "")).filter(Boolean))];
+    const accessoryItems = accessoryIds.length
+      ? await this.prisma.productionAccessoryItem.findMany({
+          where: { id: { in: accessoryIds } },
+          select: { id: true, code: true, name: true, unit: true, unitPrice: true },
+        })
+      : [];
+    const accessoryMap = new Map(accessoryItems.map((x: any) => [String(x.id), x]));
+
+    const accessoryLines = (materials || []).map((m: any) => {
+      const item: any = accessoryMap.get(String(m.accessoryItemId || ""));
+      const unitPrice = item?.unitPrice === null || item?.unitPrice === undefined ? null : Number(item.unitPrice);
+      const requiredQty = Number(m.requiredQty || 0);
+      const missingPrice = unitPrice === null || !Number.isFinite(unitPrice);
+      return {
+        accessoryItemId: m.accessoryItemId,
+        accessoryCode: m.accessoryCode || item?.code || null,
+        accessoryName: m.accessoryName || item?.name || null,
+        sizeLabel: m.sizeLabel || null,
+        unit: m.unit || item?.unit || null,
+        requiredQty,
+        unitPriceVnd: missingPrice ? null : unitPrice,
+        costVnd: missingPrice ? 0 : requiredQty * unitPrice!,
+        missingPrice,
+      };
+    });
+
+    const mainFabricCostVnd = fabricLines.filter((x: any) => x.role === "MAIN").reduce((sum: number, x: any) => sum + Number(x.costVnd || 0), 0);
+    const liningFabricCostVnd = fabricLines.filter((x: any) => x.role === "LINING").reduce((sum: number, x: any) => sum + Number(x.costVnd || 0), 0);
+    const accessoryCostVnd = accessoryLines.reduce((sum: number, x: any) => sum + Number(x.costVnd || 0), 0);
+    const totalMaterialCostVnd = mainFabricCostVnd + liningFabricCostVnd + accessoryCostVnd;
+    const missingPriceCount = fabricLines.filter((x: any) => x.missingPrice).length + accessoryLines.filter((x: any) => x.missingPrice).length;
+    const complete = totalActualQty > 0 && missingPriceCount === 0;
+
+    return {
+      canView: true,
+      totalActualQty,
+      complete,
+      missingPriceCount,
+      mainFabricCostVnd,
+      liningFabricCostVnd,
+      accessoryCostVnd,
+      totalMaterialCostVnd,
+      materialCostPerProductVnd: totalActualQty > 0 ? totalMaterialCostVnd / totalActualQty : null,
+      fabricLines,
+      accessoryLines,
+      note: "Giá vải dùng landed cost theo giá cây + tỷ giá + phần ship phân bổ theo cây; NPL dùng đơn giá hiện tại trong kho NPL.",
+    };
+  }
+
   async calculateOrder(id: string, user?: Actor) {
     const order = await this.prisma.productionOrder.findUnique({ where: { id } });
     if (!order) throw new NotFoundException("Không tìm thấy lệnh SX.");
@@ -1358,7 +1580,8 @@ export class ProductionService {
     const totalPlannedQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.plannedQty || 0), 0);
     const totalActualQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.actualQty ?? x.plannedQty ?? 0), 0);
     const lining = this.liningSummary(order, rolls, totalPlannedQty, totalActualQty);
-    return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, effectiveConsumptionM: effective, colors: this.groupCutRows(sizeRows), materials: npl.materials, lining };
+    const costSummary = await this.productionCostSummary(id, totalActualQty, npl.materials, rolls, user);
+    return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, effectiveConsumptionM: effective, colors: this.groupCutRows(sizeRows), materials: npl.materials, lining, costSummary };
   }
 
   private groupCutRows(rows: any[]) {
@@ -1413,7 +1636,8 @@ export class ProductionService {
     const rolls = await this.prisma.productionOrderRoll.findMany({ where: { productionOrderId: id } });
     const freshOrder = await this.prisma.productionOrder.findUnique({ where: { id } });
     const lining = this.liningSummary(freshOrder || order, rolls, totalPlannedQty, totalActualQty);
-    return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, colors: this.groupCutRows(sizeRows), materials: npl.materials, cutHistory, lining };
+    const costSummary = await this.productionCostSummary(id, totalActualQty, npl.materials, rolls, user);
+    return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, colors: this.groupCutRows(sizeRows), materials: npl.materials, cutHistory, lining, costSummary };
   }
 
   async cancelOrder(id: string, user?: any) {
