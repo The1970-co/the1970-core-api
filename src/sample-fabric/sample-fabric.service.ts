@@ -551,6 +551,101 @@ export class SampleFabricService {
     return { staff, boards, factories, samplePeople, seasons: SAMPLE_SEASONS, ...vocab };
   }
 
+  async listIdeaBoards() {
+    return this.prisma.designSampleIdeaBoard.findMany({
+      include: {
+        samples: {
+          include: {
+            designSample: {
+              select: {
+                id: true,
+                code: true,
+                name: true,
+                year: true,
+                category: true,
+                status: true,
+                coverImageUrl: true,
+                createdAt: true,
+                updatedAt: true,
+                images: { select: { id: true, type: true, url: true, caption: true }, orderBy: { createdAt: "desc" }, take: 4 },
+              },
+            },
+          },
+          orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
+        },
+      },
+      orderBy: [{ updatedAt: "desc" }, { name: "asc" }],
+    });
+  }
+
+  async createIdeaBoard(body: any, user?: Actor) {
+    const name = String(body?.name || "").trim();
+    if (!name) throw new BadRequestException("Thiếu tên bảng ý tưởng.");
+    const duplicate = await this.prisma.designSampleIdeaBoard.findFirst({
+      where: { name: { equals: name, mode: "insensitive" } },
+      select: { id: true },
+    });
+    if (duplicate) throw new BadRequestException("Tên bảng ý tưởng đã tồn tại.");
+    const actor = this.actor(user);
+    return this.prisma.designSampleIdeaBoard.create({
+      data: {
+        name,
+        description: String(body?.description || "").trim() || null,
+        createdById: actor.id,
+        createdByName: actor.name,
+      },
+    });
+  }
+
+  async updateIdeaBoard(id: string, body: any) {
+    const found = await this.prisma.designSampleIdeaBoard.findUnique({ where: { id } });
+    if (!found) throw new NotFoundException("Không tìm thấy bảng ý tưởng.");
+    const name = body?.name !== undefined ? String(body.name || "").trim() : found.name;
+    if (!name) throw new BadRequestException("Thiếu tên bảng ý tưởng.");
+    const duplicate = await this.prisma.designSampleIdeaBoard.findFirst({
+      where: { name: { equals: name, mode: "insensitive" }, NOT: { id } },
+      select: { id: true },
+    });
+    if (duplicate) throw new BadRequestException("Tên bảng ý tưởng đã tồn tại.");
+    return this.prisma.designSampleIdeaBoard.update({
+      where: { id },
+      data: {
+        ...(body?.name !== undefined ? { name } : {}),
+        ...(body?.description !== undefined ? { description: String(body.description || "").trim() || null } : {}),
+      },
+    });
+  }
+
+  async deleteIdeaBoard(id: string) {
+    const found = await this.prisma.designSampleIdeaBoard.findUnique({ where: { id }, select: { id: true } });
+    if (!found) throw new NotFoundException("Không tìm thấy bảng ý tưởng.");
+    await this.prisma.designSampleIdeaBoard.delete({ where: { id } });
+    return { success: true, id };
+  }
+
+  async setSampleIdeaBoards(sampleId: string, body: any) {
+    const sample = await this.prisma.designSample.findUnique({ where: { id: sampleId }, select: { id: true } });
+    if (!sample) throw new NotFoundException("Không tìm thấy mẫu.");
+    const boardIds = Array.from(new Set((Array.isArray(body?.boardIds) ? body.boardIds : []).map((x: any) => String(x || "").trim()).filter(Boolean))) as string[];
+    if (boardIds.length) {
+      const found = await this.prisma.designSampleIdeaBoard.findMany({ where: { id: { in: boardIds } }, select: { id: true } });
+      if (found.length !== boardIds.length) throw new BadRequestException("Có bảng ý tưởng không còn tồn tại.");
+    }
+    await this.prisma.$transaction(async (tx) => {
+      await tx.designSampleIdeaBoardItem.deleteMany({ where: { designSampleId: sampleId } });
+      if (boardIds.length) {
+        await tx.designSampleIdeaBoardItem.createMany({
+          data: boardIds.map((boardId, index) => ({ boardId, designSampleId: sampleId, sortOrder: index })),
+          skipDuplicates: true,
+        });
+      }
+    });
+    return this.prisma.designSample.findUnique({
+      where: { id: sampleId },
+      include: { ideaBoards: { include: { board: true }, orderBy: { createdAt: "asc" } } },
+    });
+  }
+
   async listSamplePeople() {
     return this.prisma.sampleTechnicalPerson.findMany({
       where: { isActive: true },
@@ -638,6 +733,7 @@ export class SampleFabricService {
         images: { orderBy: { createdAt: "desc" } },
         progressLogs: { orderBy: { createdAt: "desc" }, take: 12 },
         sampleDispatches: { include: { fabricColor: true }, orderBy: { sentAt: "desc" } },
+        ideaBoards: { include: { board: true }, orderBy: { createdAt: "asc" } },
         _count: { select: { fabricReceipts: true } },
       },
       orderBy: [{ year: "desc" }, { updatedAt: "desc" }],
@@ -713,7 +809,7 @@ export class SampleFabricService {
         })) },
         progressLogs: { create: { toStatus: status, note: "Tạo mẫu", actorId: actor.id, actorName: actor.name } },
       },
-      include: { fabricBoard: true, fabricColor: true, images: true, progressLogs: true, sampleDispatches: true },
+      include: { fabricBoard: true, fabricColor: true, images: true, progressLogs: true, sampleDispatches: true, ideaBoards: { include: { board: true } } },
     });
   }
 
@@ -808,7 +904,7 @@ export class SampleFabricService {
           ...(body?.note !== undefined ? { note: body.note || null } : {}),
           ...(body?.technicalNote !== undefined ? { technicalNote: body.technicalNote || null } : {}),
         },
-        include: { fabricBoard: true, fabricColor: true, images: true, progressLogs: true, sampleDispatches: true },
+        include: { fabricBoard: true, fabricColor: true, images: true, progressLogs: true, sampleDispatches: true, ideaBoards: { include: { board: true } } },
       });
       if (nextStatus !== current.status) {
         await tx.designSampleProgressLog.create({

@@ -3005,6 +3005,7 @@ model DesignSample {
   fabricReceiptConfigs FabricReceiptFabricConfig[] @relation("FabricReceiptConfigDesignSample")
   sampleDispatches  FabricSampleDispatch[]
   measurementProfile DesignSampleMeasurementProfile?
+  ideaBoards         DesignSampleIdeaBoardItem[]
 
   @@index([year])
   @@index([status])
@@ -3016,6 +3017,40 @@ model DesignSample {
   @@index([patternMakerId])
   @@index([assigneeStaffId])
   @@index([updatedAt])
+}
+
+// ============================================================
+// IDEA BOARDS / BẢNG Ý TƯỞNG MẪU
+// ============================================================
+
+model DesignSampleIdeaBoard {
+  id            String   @id @default(cuid())
+  name          String
+  description   String?
+  createdById   String?
+  createdByName String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  samples DesignSampleIdeaBoardItem[]
+
+  @@index([name])
+  @@index([updatedAt])
+}
+
+model DesignSampleIdeaBoardItem {
+  id             String   @id @default(cuid())
+  boardId        String
+  designSampleId String
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  board        DesignSampleIdeaBoard @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  designSample DesignSample          @relation(fields: [designSampleId], references: [id], onDelete: Cascade)
+
+  @@unique([boardId, designSampleId])
+  @@index([boardId, sortOrder])
+  @@index([designSampleId])
 }
 
 // ============================================================

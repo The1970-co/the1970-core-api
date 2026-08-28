@@ -150,6 +150,36 @@ export class SampleFabricController {
     return this.service.sampleMeta();
   }
 
+  @Get("samples/idea-boards")
+  @RequirePermissions("design_sample.view")
+  listIdeaBoards() {
+    return this.service.listIdeaBoards();
+  }
+
+  @Post("samples/idea-boards")
+  @RequirePermissions("design_sample.edit")
+  createIdeaBoard(@Body() body: any, @Req() req: any) {
+    return this.service.createIdeaBoard(body, req.user);
+  }
+
+  @Patch("samples/idea-boards/:id")
+  @RequirePermissions("design_sample.edit")
+  updateIdeaBoard(@Param("id") id: string, @Body() body: any) {
+    return this.service.updateIdeaBoard(id, body);
+  }
+
+  @Delete("samples/idea-boards/:id")
+  @RequirePermissions("design_sample.edit")
+  deleteIdeaBoard(@Param("id") id: string) {
+    return this.service.deleteIdeaBoard(id);
+  }
+
+  @Patch("samples/:id/idea-boards")
+  @RequirePermissions("design_sample.edit")
+  setSampleIdeaBoards(@Param("id") id: string, @Body() body: any) {
+    return this.service.setSampleIdeaBoards(id, body);
+  }
+
   @Get("samples/people")
   @RequirePermissions("design_sample.view")
   listSamplePeople() {
