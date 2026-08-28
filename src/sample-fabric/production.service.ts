@@ -64,6 +64,11 @@ export class ProductionService {
     return raw;
   }
 
+  private fixedAccessorySize(note?: any) {
+    const matched = String(note || "").match(/\[\[FIXED_SIZE:([^\]]+)\]\]/i);
+    return matched?.[1] ? this.normalizeProductionSize(matched[1]) : null;
+  }
+
   private normalizeAccessorySpecifications(typeName: string, value: any) {
     const specs = value && typeof value === "object" && !Array.isArray(value) ? { ...value } : {};
     if (String(typeName || "").trim() !== "Mác Size") return specs;
@@ -1103,13 +1108,18 @@ export class ProductionService {
         };
       };
 
+      const fixedSize = this.fixedAccessorySize(spec.note);
       if (String(item.typeName || "").trim() === "Mác Size") {
         if (!taggedSize) throw new BadRequestException(`NPL ${item.code} · ${item.name} là Mác Size nhưng chưa được gán size trong kho NPL.`);
         const sizeQty = this.totalForTaggedSize(totalsBySize, taggedSize);
-        // Luôn giữ dòng Mác Size đã chọn trong bảng NPL, kể cả size đó không có trong lệnh hiện tại.
-        // Trước đây sizeQty = 0 bị bỏ qua nên nhập Excel/mẫu xong sang bước 5 trông như mất NPL.
+        // Mác Size luôn bám size đã cấu hình ngay trên mã NPL.
         materials.push(makeRow(sizeQty * per, taggedSize));
+      } else if (fixedSize) {
+        // NPL cố định một size (VD khóa 72cm chỉ dùng cho size L): chỉ tính đúng sản lượng size đó.
+        const sizeQty = this.totalForTaggedSize(totalsBySize, fixedSize);
+        materials.push(makeRow(sizeQty * per, fixedSize));
       } else if (spec.sizeScoped && Object.keys(totalsBySize).length) {
+        // Chế độ "Theo tất cả size": sinh một dòng cho mỗi size.
         for (const [size, qty] of Object.entries(totalsBySize)) materials.push(makeRow(Number(qty) * per, size));
       } else {
         materials.push(makeRow(totalQty * per, null));
