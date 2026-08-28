@@ -935,16 +935,6 @@ export class MetaAdsSyncService {
     if (!metaAdId) throw new Error('Thiếu metaAdId');
     if (!productCode) throw new Error('Thiếu productCode');
 
-    const current = await (this.prisma as any).metaAd.findFirst({
-      where: { metaAdId },
-      select: { rawJson: true },
-    });
-
-    const currentRaw =
-      current?.rawJson && typeof current.rawJson === 'object' && !Array.isArray(current.rawJson)
-        ? current.rawJson
-        : {};
-
     const mapping = {
       productCode,
       color: color || null,
@@ -952,101 +942,107 @@ export class MetaAdsSyncService {
       source: 'mobile_manual',
     };
 
-    let saved = await (this.prisma as any).metaAd.updateMany({
-      where: { metaAdId },
+    // NGUỒN CHÍNH: MetaSyncLog. Đây là dữ liệu nội bộ, không bị Meta structure sync ghi đè.
+    // Chỉ báo "ok" sau khi log này đã được ghi và đọc lại thành công.
+    const audit = await (this.prisma as any).metaSyncLog.create({
       data: {
-        rawJson: {
-          ...currentRaw,
-          _autopilotMapping: mapping,
+        metaAccountId: null,
+        syncType: 'META_ADS_AUTOPILOT_AD_MAPPING',
+        status: 'SUCCESS',
+        range: 'manual_mapping',
+        startedAt: new Date(),
+        finishedAt: new Date(),
+        durationMs: 0,
+        scanned: 1,
+        upserted: 1,
+        failed: 0,
+        message: `Manual mapping ${metaAdId} -> ${productCode}${mapping.color ? ` · ${mapping.color}` : ''}`,
+        errorJson: {
+          metaAdId,
+          mapping,
         },
       },
     });
 
-    // Một số Ads đang chạy được lấy trực tiếp từ Meta nhưng chưa từng có row trong metaAd cache DB.
-    // updateMany khi đó trả count=0 nhưng trước đây vẫn trả ok=true => UI tưởng đã lưu,
-    // còn inventory/control-center load lại thì không có manualMapping nên vẫn UNMAPPED.
-    if (Number(saved?.count || 0) === 0) {
-      await this.syncStructure(this.defaultAdAccountId, 500);
+    if (!audit?.id) {
+      throw new Error(`Không ghi được mapping bền vững cho Meta Ad ${metaAdId}`);
+    }
 
-      const synced = await (this.prisma as any).metaAd.findFirst({
+    // Mirror sang MetaAd.rawJson để tương thích các luồng cũ.
+    // Nếu Ads chưa có row cache thì sync structure trước rồi thử lại.
+    try {
+      let current = await (this.prisma as any).metaAd.findFirst({
         where: { metaAdId },
         select: { rawJson: true },
       });
 
-      const syncedRaw =
-        synced?.rawJson && typeof synced.rawJson === 'object' && !Array.isArray(synced.rawJson)
-          ? synced.rawJson
-          : {};
+      if (!current) {
+        await this.syncStructure(this.defaultAdAccountId, 500);
+        current = await (this.prisma as any).metaAd.findFirst({
+          where: { metaAdId },
+          select: { rawJson: true },
+        });
+      }
 
-      saved = await (this.prisma as any).metaAd.updateMany({
-        where: { metaAdId },
-        data: {
-          rawJson: {
-            ...syncedRaw,
-            _autopilotMapping: mapping,
+      if (current) {
+        const currentRaw =
+          current?.rawJson && typeof current.rawJson === 'object' && !Array.isArray(current.rawJson)
+            ? current.rawJson
+            : {};
+
+        await (this.prisma as any).metaAd.updateMany({
+          where: { metaAdId },
+          data: {
+            rawJson: {
+              ...currentRaw,
+              _autopilotMapping: mapping,
+            },
           },
-        },
-      });
+        });
+      }
+    } catch (error: any) {
+      // Không làm mất mapping đã lưu bền vững chỉ vì cache MetaAd lỗi.
+      this.logger.warn(`[META_AD_MAPPING_MIRROR] ${metaAdId}: ${error?.message || error}`);
     }
 
-    if (Number(saved?.count || 0) === 0) {
-      throw new Error(`Không lưu được mapping cho Meta Ad ${metaAdId}: chưa có Ads này trong cache DB sau khi sync`);
-    }
-
-    // Đọc lại để bảo đảm mapping thực sự đã persist trước khi báo ok.
-    const persisted = await (this.prisma as any).metaAd.findFirst({
-      where: { metaAdId },
-      select: { rawJson: true },
+    // Đọc lại CHÍNH nguồn bền vững, tránh trường hợp UI báo lưu nhưng DB thực tế không có.
+    const verifyLogs = await (this.prisma as any).metaSyncLog.findMany({
+      where: {
+        syncType: 'META_ADS_AUTOPILOT_AD_MAPPING',
+        status: 'SUCCESS',
+      },
+      orderBy: { startedAt: 'desc' },
+      take: 2000,
+      select: { id: true, errorJson: true, startedAt: true },
     });
-    const persistedMapping =
-      persisted?.rawJson && typeof persisted.rawJson === 'object'
-        ? persisted.rawJson?._autopilotMapping || null
+
+    const verifiedLog = (verifyLogs || []).find((log: any) => {
+      const payload = log?.errorJson && typeof log.errorJson === 'object' ? log.errorJson : {};
+      return String(payload?.metaAdId || '').trim() === metaAdId;
+    });
+
+    const verifiedMapping =
+      verifiedLog?.errorJson && typeof verifiedLog.errorJson === 'object'
+        ? (verifiedLog.errorJson as any)?.mapping || null
         : null;
 
     if (
-      String(persistedMapping?.productCode || '').trim().toUpperCase() !== productCode ||
-      String(persistedMapping?.color || '').trim() !== String(mapping.color || '').trim()
+      String(verifiedMapping?.productCode || '').trim().toUpperCase() !== productCode ||
+      String(verifiedMapping?.color || '').trim() !== String(mapping.color || '').trim()
     ) {
-      throw new Error(`Mapping Meta Ad ${metaAdId} chưa được lưu chắc chắn vào DB`);
+      throw new Error(`Mapping Meta Ad ${metaAdId} chưa được lưu chắc chắn vào nguồn mapping nội bộ`);
     }
 
-    // Lưu thêm một bản mapping độc lập trong MetaSyncLog.
-    // rawJson của MetaAd vẫn là nguồn chính; log này là fallback nếu một luồng sync khác
-    // vô tình ghi đè rawJson về dữ liệu Meta thuần ở tương lai.
-    try {
-      await (this.prisma as any).metaSyncLog.create({
-        data: {
-          metaAccountId: null,
-          syncType: 'META_ADS_AUTOPILOT_AD_MAPPING',
-          status: 'SUCCESS',
-          range: 'manual_mapping',
-          startedAt: new Date(),
-          finishedAt: new Date(),
-          durationMs: 0,
-          scanned: 1,
-          upserted: 1,
-          failed: 0,
-          message: `Saved manual mapping ${metaAdId} -> ${productCode}${mapping.color ? ` · ${mapping.color}` : ''}`,
-          errorJson: {
-            metaAdId,
-            mapping: persistedMapping,
-          },
-        },
-      });
-    } catch (error: any) {
-      // Mapping trong MetaAd đã lưu thành công; lỗi audit fallback không được làm fail thao tác.
-      this.logger.warn(`[META_AD_MAPPING_AUDIT] ${metaAdId}: ${error?.message || error}`);
-    }
-
-    // Bắt lần load sau lấy DB mới, không giữ cache 60s cũ.
     this.autopilotActiveAdsCache = null;
     this.autopilotActiveAdsInFlight = null;
 
     return {
       ok: true,
       metaAdId,
-      mapping: persistedMapping,
+      mapping: verifiedMapping,
       persisted: true,
+      source: 'META_SYNC_LOG',
+      mappingLogId: verifiedLog?.id || audit.id,
     };
   }
 
@@ -1209,7 +1205,7 @@ export class MetaAdsSyncService {
           cachedAd?.rawJson && typeof cachedAd.rawJson === 'object'
             ? cachedAd.rawJson?._autopilotMapping || null
             : null;
-        const manualMapping = rawManualMapping || fallbackMappingByAd.get(metaAdId) || null;
+        const manualMapping = fallbackMappingByAd.get(metaAdId) || rawManualMapping || null;
         const cachedAdSet = cachedAdSetMap.get(adSetId) as any;
         const cachedCampaign = cachedCampaignMap.get(campaignId) as any;
 

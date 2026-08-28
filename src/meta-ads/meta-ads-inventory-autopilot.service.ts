@@ -277,28 +277,20 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
   ) {
     if (options.activeOnly !== false && !isMetaAdActive(ad)) return { group: null as ColorStockGroup | null, ambiguous: false, score: 0 };
 
-    // Manual mapping phải được ưu tiên trước heuristic tên Ads.
-    // Đây là nguồn dùng cho Ads cũ không có mã/màu trong tên.
-    const manualProductCode = String(
-      ad?.manualProductCode || ad?.manualMapping?.productCode || '',
-    ).trim().toUpperCase();
-    const manualColor = String(
-      ad?.manualColor || ad?.manualMapping?.color || '',
-    ).trim();
+    // Manual mapping là nguồn ưu tiên cao nhất cho Ads cũ không có mã SP trong tên.
+    const manualProductCode = String(ad?.manualProductCode || ad?.manualMapping?.productCode || '').trim().toUpperCase();
+    const manualColor = String(ad?.manualColor || ad?.manualMapping?.color || '').trim();
 
     if (manualProductCode) {
       const manualGroups = groups.filter(
-        (group) =>
-          String(group.productCode || '').trim().toUpperCase() === manualProductCode,
+        (group) => String(group.productCode || '').trim().toUpperCase() === manualProductCode,
       );
 
       if (manualGroups.length) {
         if (manualColor) {
-          const wantedColor = normalizeText(manualColor);
           const exact = manualGroups.find(
-            (group) => normalizeText(group.color) === wantedColor,
+            (group) => normalizeText(group.color) === normalizeText(manualColor),
           );
-
           if (exact) {
             return {
               group: exact,
@@ -310,7 +302,6 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
           }
         }
 
-        // Nếu mã chỉ có đúng 1 màu thì không cần bắt buộc manualColor.
         if (manualGroups.length === 1) {
           return {
             group: manualGroups[0],
@@ -321,15 +312,12 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
           };
         }
 
-        // Đã có mã nhưng màu chưa match chính xác -> không tự đoán.
         return {
           group: null as ColorStockGroup | null,
           ambiguous: true,
           score: 0,
           manual: true,
-          candidates: manualGroups
-            .slice(0, 10)
-            .map((group) => ({ group, score: 900 })),
+          candidates: manualGroups.slice(0, 10).map((group) => ({ group, score: 900 })),
         };
       }
     }
@@ -491,21 +479,138 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
   }
 
 
+  private async durableManualMappingsByAd(ads: any[]) {
+    const adIds = Array.from(
+      new Set(
+        (ads || [])
+          .map((ad: any) => String(ad?.metaAdId || ad?.adId || ad?.id || '').trim())
+          .filter(Boolean),
+      ),
+    );
+
+    const map = new Map<string, any>();
+    if (!adIds.length) return map;
+
+    try {
+      const logs = await (this.prisma as any).metaSyncLog.findMany({
+        where: {
+          syncType: 'META_ADS_AUTOPILOT_AD_MAPPING',
+          status: 'SUCCESS',
+        },
+        orderBy: { startedAt: 'desc' },
+        take: 5000,
+        select: { errorJson: true, startedAt: true },
+      });
+
+      for (const log of logs || []) {
+        const payload = log?.errorJson && typeof log.errorJson === 'object' ? log.errorJson : {};
+        const metaAdId = String(payload?.metaAdId || '').trim();
+        if (!metaAdId || !adIds.includes(metaAdId) || map.has(metaAdId)) continue;
+        const mapping = payload?.mapping && typeof payload.mapping === 'object' ? payload.mapping : null;
+        if (mapping?.productCode) map.set(metaAdId, mapping);
+      }
+    } catch {}
+
+    return map;
+  }
+
+  private productFamilyGroupsForAd(ad: any, groups: ColorStockGroup[]) {
+    const manualCode = String(ad?.manualProductCode || ad?.manualMapping?.productCode || '').trim().toUpperCase();
+    if (manualCode) {
+      return groups.filter(
+        (group) => String(group.productCode || '').trim().toUpperCase() === manualCode,
+      );
+    }
+
+    const raw = [ad?.name, ad?.adName, ad?.adSetName, ad?.campaignName].filter(Boolean).join(' ');
+    const matchedGroups = groups.filter((group) => this.productMatchesAd(group, raw));
+    const codes = Array.from(
+      new Set(matchedGroups.map((group) => String(group.productCode || '').trim().toUpperCase()).filter(Boolean)),
+    );
+
+    // Chỉ fallback theo mã chính khi tên Ads xác định duy nhất 1 mã SP.
+    if (codes.length !== 1) return [];
+    return matchedGroups.filter(
+      (group) => String(group.productCode || '').trim().toUpperCase() === codes[0],
+    );
+  }
+
+  private familyAssessment(metaAdId: string, familyGroups: ColorStockGroup[]) {
+    const productCode = String(familyGroups[0]?.productCode || '').trim().toUpperCase();
+    const productName = String(familyGroups[0]?.productName || productCode || '').trim();
+    const lowTotalColors = familyGroups.filter((group) => group.totalQty < this.pauseTotalQty);
+    const lowSizeColors = familyGroups.filter((group) => group.lowSizes.length > 0);
+    const criticalColors = familyGroups.filter((group) => this.isCriticalGroup(group));
+
+    const level = lowTotalColors.length || criticalColors.length
+      ? 'FAMILY_LOW_STOCK'
+      : lowSizeColors.length
+        ? 'FAMILY_WATCH'
+        : 'PRODUCT_FAMILY';
+
+    const colorSummary = familyGroups
+      .map((group) => `${group.color}: ${group.totalQty}`)
+      .join(' · ');
+
+    return {
+      metaAdId,
+      safe: lowTotalColors.length === 0 && criticalColors.length === 0,
+      level,
+      mappingMode: 'PRODUCT_FAMILY',
+      colorSpecific: false,
+      productCode,
+      productName,
+      color: null,
+      sizes: [],
+      totalQty: familyGroups.reduce((sum, group) => sum + group.totalQty, 0),
+      groups: familyGroups,
+      availableColors: familyGroups.map((group) => group.color),
+      lowTotalColors: lowTotalColors.map((group) => ({
+        color: group.color,
+        colorKey: group.colorKey,
+        totalQty: group.totalQty,
+      })),
+      warningThresholdTotal: this.pauseTotalQty,
+      reason: lowTotalColors.length
+        ? `Không tìm được màu riêng; tự động theo mã chính ${productCode}. Có ${lowTotalColors.length} màu tổng tồn dưới ${this.pauseTotalQty}: ${lowTotalColors.map((group) => `${group.color} ${group.totalQty}`).join(', ')}. Xem xét tắt Ads hoặc đổi nội dung.`
+        : `Không tìm được màu riêng; tự động theo mã chính ${productCode} (${familyGroups.length} màu). Tồn theo màu: ${colorSummary}`,
+    };
+  }
+
   async assessAdsForScale(ads: any[]) {
     const groups = await this.loadInventoryGroups();
+    const durableManualByAd = await this.durableManualMappingsByAd(ads);
     const colorCountByProduct = new Map<string, number>();
     for (const group of groups) {
       colorCountByProduct.set(group.productCode, (colorCountByProduct.get(group.productCode) || 0) + 1);
     }
 
     return (ads || []).map((ad: any) => {
-      const matched = this.bestGroupForAd(ad, groups, colorCountByProduct, { activeOnly: false });
+      const metaAdId = String(ad?.metaAdId || ad?.adId || ad?.id || '').trim();
+      const durableMapping = durableManualByAd.get(metaAdId) || null;
+      const hydratedAd = durableMapping
+        ? {
+            ...ad,
+            manualProductCode: durableMapping.productCode || ad?.manualProductCode || null,
+            manualColor: durableMapping.color ?? ad?.manualColor ?? null,
+            manualMapping: durableMapping,
+          }
+        : ad;
+
+      const matched = this.bestGroupForAd(hydratedAd, groups, colorCountByProduct, { activeOnly: false });
 
       if (!matched.group) {
+        const familyGroups = this.productFamilyGroupsForAd(hydratedAd, groups);
+        if (familyGroups.length > 1) {
+          return this.familyAssessment(metaAdId, familyGroups);
+        }
+
         return {
           metaAdId: String(ad?.metaAdId || ad?.id || ''),
           safe: false,
           level: matched.ambiguous ? 'AMBIGUOUS' : 'UNMAPPED',
+          mappingMode: 'UNMAPPED',
+          colorSpecific: false,
           sizes: [],
           reason: matched.ambiguous
             ? 'Tên ads match nhiều màu với cùng độ tin cậy, cần kiểm tra mapping'
@@ -523,6 +628,8 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
         metaAdId: String(ad?.metaAdId || ad?.id || ''),
         safe: !hasLow,
         level,
+        mappingMode: matched.manual ? 'MANUAL_COLOR' : 'AUTO_COLOR',
+        colorSpecific: true,
         matchScore: matched.score,
         colorKey: group.colorKey,
         productId: group.productId,

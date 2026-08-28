@@ -500,18 +500,44 @@ export class MetaAdsOrderAttributionService {
       ),
     );
 
-    const dbAds = adIds.length
-      ? await (this.prisma as any).metaAd.findMany({
-          where: { metaAdId: { in: adIds } },
-          select: { metaAdId: true, rawJson: true },
-        })
-      : [];
+    const [dbAds, mappingLogs] = await Promise.all([
+      adIds.length
+        ? (this.prisma as any).metaAd.findMany({
+            where: { metaAdId: { in: adIds } },
+            select: { metaAdId: true, rawJson: true },
+          })
+        : Promise.resolve([]),
+      adIds.length
+        ? (this.prisma as any).metaSyncLog.findMany({
+            where: {
+              syncType: 'META_ADS_AUTOPILOT_AD_MAPPING',
+              status: 'SUCCESS',
+            },
+            orderBy: { startedAt: 'desc' },
+            take: 5000,
+            select: { errorJson: true, startedAt: true },
+          })
+        : Promise.resolve([]),
+    ]);
 
     const manualByAd = new Map<string, AnyRow>();
+
+    // Nguồn bền vững thắng rawJson.
+    for (const log of mappingLogs || []) {
+      const payload = log?.errorJson && typeof log.errorJson === 'object' ? log.errorJson : {};
+      const metaAdId = String(payload?.metaAdId || '').trim();
+      if (!metaAdId || !adIds.includes(metaAdId) || manualByAd.has(metaAdId)) continue;
+      const mapping = payload?.mapping && typeof payload.mapping === 'object' ? payload.mapping : null;
+      if (mapping?.productCode) manualByAd.set(metaAdId, mapping);
+    }
+
+    // Fallback cho mapping cũ trước khi có durable log.
     for (const dbAd of dbAds || []) {
+      const metaAdId = String(dbAd?.metaAdId || '').trim();
+      if (!metaAdId || manualByAd.has(metaAdId)) continue;
       const raw = dbAd?.rawJson;
       const mapping = raw && typeof raw === 'object' ? raw?._autopilotMapping : null;
-      if (mapping?.productCode) manualByAd.set(String(dbAd.metaAdId), mapping);
+      if (mapping?.productCode) manualByAd.set(metaAdId, mapping);
     }
 
     const matched: Array<{ adRow: AnyRow; best: AnyRow | null; confidence: number }> = rows.map((adRow: AnyRow) => {
