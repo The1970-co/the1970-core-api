@@ -823,7 +823,7 @@ export class ProductionService {
     const totalPlannedQty = sizes.reduce((sum: number, x: any) => sum + Number(x.plannedQty || 0), 0);
     const totalActualQty = sizes.reduce((sum: number, x: any) => sum + Number(x.actualQty ?? x.plannedQty ?? 0), 0);
     const lining = this.liningSummary(order, rolls, totalPlannedQty, totalActualQty);
-    const costSummary = await this.productionCostSummary(id, totalActualQty, materials, rolls, user, order.productionExtraCosts);
+    const costSummary = await this.productionCostSummary(id, totalActualQty, materials, rolls, user, order.productionExtraCosts, order.productionPriceMultiplier);
     return {
       ...order, sourceCode, sourceName, sourceImageUrl,
       source: { type: order.sourceType, id: order.designSampleId || order.productId, code: sourceCode, name: sourceName, imageUrl: sourceImageUrl },
@@ -1305,6 +1305,7 @@ export class ProductionService {
     orderRolls: any[],
     user?: any,
     extraCostsRaw?: any,
+    priceMultiplierRaw?: any,
   ) {
     if (!this.canViewProductionCost(user)) {
       return {
@@ -1491,22 +1492,34 @@ export class ProductionService {
       };
     });
 
-    const extraCosts = (Array.isArray(extraCostsRaw) ? extraCostsRaw : [])
+    let extraCosts = (Array.isArray(extraCostsRaw) ? extraCostsRaw : [])
       .map((x: any, index: number) => ({
         id: String(x?.id || `EXTRA_${index + 1}`),
-        type: String(x?.type || "OTHER"),
+        type: String(x?.type || "OTHER").toUpperCase(),
         label: String(x?.label || "").trim() || "Phụ phí khác",
         amountVnd: Math.max(0, Number(this.n(x?.amountVnd) || 0)),
         note: String(x?.note || "").trim() || null,
       }))
       .filter((x: any) => x.amountVnd > 0 || x.label);
 
+    if (!extraCosts.some((x: any) => x.type === "FACTORY_LABOR")) {
+      extraCosts = [{ id: "FACTORY_LABOR", type: "FACTORY_LABOR", label: "Gia công nhà may / SP", amountVnd: 0, note: null }, ...extraCosts];
+    }
+
+    const factoryLaborRow = extraCosts.find((x: any) => x.type === "FACTORY_LABOR");
+    const factoryLaborUnitVnd = Number(factoryLaborRow?.amountVnd || 0);
+    const factoryLaborCostVnd = factoryLaborUnitVnd * Math.max(0, totalActualQty);
+    const otherExtraCosts = extraCosts.filter((x: any) => x.type !== "FACTORY_LABOR");
+    const otherExtraCostVnd = otherExtraCosts.reduce((sum: number, x: any) => sum + Number(x.amountVnd || 0), 0);
+
     const mainFabricCostVnd = fabricLines.filter((x: any) => x.role === "MAIN").reduce((sum: number, x: any) => sum + Number(x.costVnd || 0), 0);
     const liningFabricCostVnd = fabricLines.filter((x: any) => x.role === "LINING").reduce((sum: number, x: any) => sum + Number(x.costVnd || 0), 0);
     const accessoryCostVnd = accessoryLines.reduce((sum: number, x: any) => sum + Number(x.costVnd || 0), 0);
-    const extraCostVnd = extraCosts.reduce((sum: number, x: any) => sum + Number(x.amountVnd || 0), 0);
     const baseMaterialCostVnd = mainFabricCostVnd + liningFabricCostVnd + accessoryCostVnd;
-    const totalMaterialCostVnd = baseMaterialCostVnd + extraCostVnd;
+    const totalProductionCostVnd = baseMaterialCostVnd + factoryLaborCostVnd + otherExtraCostVnd;
+    const productionCostPerProductVnd = totalActualQty > 0 ? totalProductionCostVnd / totalActualQty : null;
+    const priceMultiplier = Math.max(0.1, Number(this.n(priceMultiplierRaw) || 2.2));
+    const estimatedSalePriceVnd = productionCostPerProductVnd === null ? null : productionCostPerProductVnd * priceMultiplier;
     const missingPriceCount = fabricLines.filter((x: any) => x.missingPrice).length + accessoryLines.filter((x: any) => x.missingPrice).length;
     const complete = totalActualQty > 0 && missingPriceCount === 0;
 
@@ -1518,14 +1531,21 @@ export class ProductionService {
       mainFabricCostVnd,
       liningFabricCostVnd,
       accessoryCostVnd,
-      extraCostVnd,
       baseMaterialCostVnd,
-      totalMaterialCostVnd,
-      materialCostPerProductVnd: totalActualQty > 0 ? totalMaterialCostVnd / totalActualQty : null,
+      factoryLaborUnitVnd,
+      factoryLaborCostVnd,
+      otherExtraCostVnd,
+      extraCostVnd: factoryLaborCostVnd + otherExtraCostVnd,
+      totalMaterialCostVnd: totalProductionCostVnd,
+      totalProductionCostVnd,
+      materialCostPerProductVnd: productionCostPerProductVnd,
+      productionCostPerProductVnd,
+      priceMultiplier,
+      estimatedSalePriceVnd,
       extraCosts,
       fabricLines,
       accessoryLines,
-      note: "Giá vải dùng landed cost theo giá cây + tỷ giá + phần ship phân bổ theo cây; NPL dùng đơn giá hiện tại trong kho NPL; phụ phí Bước 6 cộng thẳng vào tổng giá sản xuất.",
+      note: "Giá gốc/SP = (vải chính + vải lót + NPL + gia công nhà may + phụ phí khác) / số lượng cắt thực tế. Giá bán ước tính = giá gốc/SP × hệ số.",
     };
   }
 
@@ -1605,7 +1625,7 @@ export class ProductionService {
     const totalPlannedQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.plannedQty || 0), 0);
     const totalActualQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.actualQty ?? x.plannedQty ?? 0), 0);
     const lining = this.liningSummary(order, rolls, totalPlannedQty, totalActualQty);
-    const costSummary = await this.productionCostSummary(id, totalActualQty, npl.materials, rolls, user, order.productionExtraCosts);
+    const costSummary = await this.productionCostSummary(id, totalActualQty, npl.materials, rolls, user, order.productionExtraCosts, order.productionPriceMultiplier);
     return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, effectiveConsumptionM: effective, colors: this.groupCutRows(sizeRows), materials: npl.materials, lining, costSummary };
   }
 
@@ -1661,7 +1681,7 @@ export class ProductionService {
     const rolls = await this.prisma.productionOrderRoll.findMany({ where: { productionOrderId: id } });
     const freshOrder = await this.prisma.productionOrder.findUnique({ where: { id } });
     const lining = this.liningSummary(freshOrder || order, rolls, totalPlannedQty, totalActualQty);
-    const costSummary = await this.productionCostSummary(id, totalActualQty, npl.materials, rolls, user, (freshOrder || order).productionExtraCosts);
+    const costSummary = await this.productionCostSummary(id, totalActualQty, npl.materials, rolls, user, (freshOrder || order).productionExtraCosts, (freshOrder || order).productionPriceMultiplier);
     return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, colors: this.groupCutRows(sizeRows), materials: npl.materials, cutHistory, lining, costSummary };
   }
 
@@ -1694,19 +1714,28 @@ export class ProductionService {
     const order = await this.prisma.productionOrder.findUnique({ where: { id }, select: { id: true } });
     if (!order) throw new NotFoundException("Không tìm thấy lệnh SX.");
 
-    const rows = (Array.isArray(body?.items) ? body.items : [])
+    let rows = (Array.isArray(body?.items) ? body.items : [])
       .map((x: any, index: number) => ({
         id: String(x?.id || `EXTRA_${Date.now()}_${index}`),
-        type: String(x?.type || "OTHER"),
+        type: String(x?.type || "OTHER").toUpperCase(),
         label: String(x?.label || "").trim() || "Phụ phí khác",
         amountVnd: Math.max(0, Number(this.n(x?.amountVnd) || 0)),
         note: String(x?.note || "").trim() || null,
       }))
       .filter((x: any) => x.label);
 
+    if (!rows.some((x: any) => x.type === "FACTORY_LABOR")) {
+      rows = [{ id: "FACTORY_LABOR", type: "FACTORY_LABOR", label: "Gia công nhà may / SP", amountVnd: 0, note: null }, ...rows];
+    }
+
+    const productionPriceMultiplier = Math.max(0.1, Number(this.n(body?.priceMultiplier) || 2.2));
+
     await this.prisma.productionOrder.update({
       where: { id },
-      data: { productionExtraCosts: rows.length ? rows : null },
+      data: {
+        productionExtraCosts: rows,
+        productionPriceMultiplier,
+      },
     });
     return this.getOrder(id, user);
   }
