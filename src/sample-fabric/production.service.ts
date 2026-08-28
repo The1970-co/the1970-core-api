@@ -533,6 +533,37 @@ export class ProductionService {
   }
 
 
+  async hardDeleteAccessory(id: string) {
+    const current = await this.prisma.productionAccessoryItem.findUnique({ where: { id } });
+    if (!current) throw new NotFoundException("Không tìm thấy NPL.");
+
+    // Xoá cứng mã NPL khỏi kho. Các bảng lịch sử đã có snapshot mã/tên
+    // (phiếu nhập NPL, kết quả tính NPL) được giữ lại để không mất chứng từ cũ.
+    // Các cấu hình đang tham chiếu trực tiếp NPL phải được gỡ để không còn id mồ côi.
+    return this.prisma.$transaction(async (tx: any) => {
+      const removed = {
+        sampleSpecs: await tx.sampleAccessorySpec.deleteMany({ where: { accessoryItemId: id } }),
+        orderSpecs: await tx.productionOrderAccessorySpec.deleteMany({ where: { accessoryItemId: id } }),
+        templateItems: await tx.productionAccessoryTemplateItem.deleteMany({ where: { accessoryItemId: id } }),
+      };
+
+      await tx.productionAccessoryItem.delete({ where: { id } });
+
+      return {
+        success: true,
+        id,
+        code: current.code,
+        name: current.name,
+        removedReferences: {
+          sampleSpecs: removed.sampleSpecs.count,
+          orderSpecs: removed.orderSpecs.count,
+          templateItems: removed.templateItems.count,
+        },
+      };
+    });
+  }
+
+
   private async nextAccessoryReceiptCode() { const d=new Date(); const suffix=`${String(d.getDate()).padStart(2,"0")}${String(d.getMonth()+1).padStart(2,"0")}${d.getFullYear()}`; const rows=await this.prisma.productionAccessoryReceipt.findMany({where:{code:{endsWith:suffix}},select:{code:true}}); const max=rows.reduce((m:number,r:any)=>Math.max(m,Number(String(r.code||"").match(/^PN-NPL-(\d+)-/)?.[1]||0)),0); return `PN-NPL-${String(max+1).padStart(3,"0")}-${suffix}`; }
   async listAccessoryReceipts(){return this.prisma.productionAccessoryReceipt.findMany({include:{items:{orderBy:{sortOrder:"asc"}}},orderBy:{receivedAt:"desc"},take:200});}
   async getAccessoryReceipt(id:string){const row=await this.prisma.productionAccessoryReceipt.findUnique({where:{id},include:{items:{orderBy:{sortOrder:"asc"}}}});if(!row)throw new NotFoundException("Không tìm thấy phiếu nhập NPL.");return row;}

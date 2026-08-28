@@ -157,6 +157,12 @@ export class ProductionController {
     return this.service.updateAccessory(id, body, req.user);
   }
 
+  @Delete("accessories/:id")
+  @RequirePermissions("accessories.manage")
+  deleteAccessory(@Param("id") id: string, @Req() req: any) {
+    return this.service.hardDeleteAccessory(id);
+  }
+
   @Post("accessories/:id/stock")
   @RequirePermissions("accessories.stock")
   adjustStock(@Param("id") id: string, @Body() body: any, @Req() req: any) {
@@ -249,7 +255,7 @@ export class ProductionController {
   }
 
   @Get("orders/:id/print")
-  @RequirePermissions("production.view", "production.step6")
+  @RequirePermissions("production.view")
   print(@Param("id") id: string) {
     return this.service.printPayload(id);
   }
