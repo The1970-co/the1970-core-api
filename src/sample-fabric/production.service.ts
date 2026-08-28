@@ -967,8 +967,8 @@ export class ProductionService {
     if (touchesSizeOrFabric && !this.userHas(user, "production.step4")) {
       throw new ForbiddenException("Bạn không có quyền thao tác Bước 4 · Size, tỷ lệ và định mức vải.");
     }
-    if (touchesLiningAssignments && !this.userHas(user, "production.step5")) {
-      throw new ForbiddenException("Bạn không có quyền gán cây vải lót ở Bước 5.");
+    if (touchesLiningAssignments && !this.userHas(user, "production.step4")) {
+      throw new ForbiddenException("Bạn không có quyền gán cây vải lót ở Bước 4.");
     }
 
     await this.prisma.$transaction(async (tx: any) => {
