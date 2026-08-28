@@ -537,6 +537,92 @@ export class FinancialReportService {
         .map(([id, metric]) => ({ id, label: label(id), ...finalize(metric) }))
         .sort((a, b) => b.netRevenue - a.netRevenue);
 
+    // Thống kê sản phẩm theo tập đơn đang được lọc.
+    // "SL tạo hợp lệ" luôn loại đơn CANCELLED; đơn huỷ chỉ giữ ở cột riêng để đối chiếu.
+    const productMap = new Map<string, {
+      id: string;
+      productName: string;
+      skus: Set<string>;
+      validOrderIds: Set<string>;
+      completedOrderIds: Set<string>;
+      cancelledOrderIds: Set<string>;
+      createdQty: number;
+      completedQty: number;
+      cancelledQty: number;
+      validRevenue: number;
+      completedRevenue: number;
+    }>();
+
+    filtered.forEach((order: any) => {
+      const status = this.normalize(order.status);
+      const cancelled = status === "CANCELLED";
+      const completed = status === "COMPLETED";
+      const orderId = String(order.id || order.orderCode || "");
+
+      (Array.isArray(order.items) ? order.items : []).forEach((item: any) => {
+        const productName = String(item.productName || item.sku || "Sản phẩm chưa rõ").trim() || "Sản phẩm chưa rõ";
+        const key = productName.toUpperCase();
+        const qty = Math.max(0, this.n(item.qty));
+        const sku = String(item.sku || "").trim();
+        const lineRevenue = this.n(item.lineTotal) || this.n(item.unitPrice) * qty;
+
+        let row = productMap.get(key);
+        if (!row) {
+          row = {
+            id: key,
+            productName,
+            skus: new Set<string>(),
+            validOrderIds: new Set<string>(),
+            completedOrderIds: new Set<string>(),
+            cancelledOrderIds: new Set<string>(),
+            createdQty: 0,
+            completedQty: 0,
+            cancelledQty: 0,
+            validRevenue: 0,
+            completedRevenue: 0,
+          };
+          productMap.set(key, row);
+        }
+
+        if (sku) row.skus.add(sku);
+        if (cancelled) {
+          if (orderId) row.cancelledOrderIds.add(orderId);
+          row.cancelledQty += qty;
+          return;
+        }
+
+        if (orderId) row.validOrderIds.add(orderId);
+        row.createdQty += qty;
+        row.validRevenue += lineRevenue;
+
+        if (completed) {
+          if (orderId) row.completedOrderIds.add(orderId);
+          row.completedQty += qty;
+          row.completedRevenue += lineRevenue;
+        }
+      });
+    });
+
+    const productRows = Array.from(productMap.values())
+      .map((row) => ({
+        id: row.id,
+        productName: row.productName,
+        skuCount: row.skus.size,
+        skus: Array.from(row.skus).sort(),
+        orderCount: row.validOrderIds.size,
+        completedOrderCount: row.completedOrderIds.size,
+        cancelledOrderCount: row.cancelledOrderIds.size,
+        createdQty: row.createdQty,
+        completedQty: row.completedQty,
+        pendingQty: Math.max(0, row.createdQty - row.completedQty),
+        cancelledQty: row.cancelledQty,
+        completionRate: row.createdQty ? Number(((row.completedQty / row.createdQty) * 100).toFixed(1)) : 0,
+        validRevenue: row.validRevenue,
+        completedRevenue: row.completedRevenue,
+      }))
+      .filter((row) => row.createdQty > 0 || row.cancelledQty > 0)
+      .sort((a, b) => b.createdQty - a.createdQty || b.validRevenue - a.validRevenue);
+
     const createdStaffOptions = (staff as any[]).map((row) => ({ id: row.id, name: this.staffLabel(row) }));
     const assignedStaffOptions = [{ id: "UNASSIGNED", name: "Chưa gán nhân viên" }, ...createdStaffOptions];
 
@@ -644,6 +730,7 @@ export class FinancialReportService {
       channelRows: rows(byChannel, (id) => this.labelChannel(id)),
       carrierRows: rows(byCarrier, (id) => id === "NONE" ? "Chưa có vận chuyển" : id),
       paymentRows: rows(byPayment, (id) => id),
+      productRows,
       orders: filtered.map((order: any) => ({
         id: order.id,
         code: order.orderCode || order.id,
