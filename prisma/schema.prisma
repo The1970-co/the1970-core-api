@@ -2858,6 +2858,8 @@ model FabricBoard {
   designSamples     DesignSample[]
   sampleDispatches  FabricSampleDispatch[]
   fabricReceipts    FabricReceipt[]
+  referencePriceVnd  Decimal? @db.Decimal(14, 0)
+  referencePriceUnit String   @default("METER")
 
   @@unique([supplierId, boardCode, fabricCode])
   @@index([supplierId])

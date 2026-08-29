@@ -414,6 +414,10 @@ export class SampleFabricService {
         name: this.titleCase(body?.name) || null,
         composition: this.parseCompositionTokens(body?.composition).join(", ") || null,
         expectedGsm: this.n(body?.expectedGsm),
+        referencePriceVnd: this.n(body?.referencePriceVnd),
+        referencePriceUnit: ["METER", "KG"].includes(String(body?.referencePriceUnit || "").toUpperCase())
+          ? String(body.referencePriceUnit).toUpperCase()
+          : "METER",
         seasons: Array.from(new Set(this.parseTokens(body?.seasons).filter((x) => SAMPLE_SEASONS.includes(x as any)))),
         productGroups: Array.from(new Set(this.parseTokens(body?.productGroups))),
         coverImageUrl: body?.coverImageUrl || images?.[0]?.url || null,
@@ -476,6 +480,12 @@ export class SampleFabricService {
           ...(body?.name !== undefined ? { name: this.titleCase(body.name) || null } : {}),
           ...(body?.composition !== undefined ? { composition: this.parseCompositionTokens(body.composition).join(", ") || null } : {}),
           ...(body?.expectedGsm !== undefined ? { expectedGsm: this.n(body.expectedGsm) } : {}),
+          ...(body?.referencePriceVnd !== undefined ? { referencePriceVnd: this.n(body.referencePriceVnd) } : {}),
+          ...(body?.referencePriceUnit !== undefined ? {
+            referencePriceUnit: ["METER", "KG"].includes(String(body.referencePriceUnit || "").toUpperCase())
+              ? String(body.referencePriceUnit).toUpperCase()
+              : "METER",
+          } : {}),
           ...(body?.seasons !== undefined ? { seasons: Array.from(new Set(this.parseTokens(body.seasons).filter((x) => SAMPLE_SEASONS.includes(x as any)))) } : {}),
           ...(body?.productGroups !== undefined ? { productGroups: Array.from(new Set(this.parseTokens(body.productGroups))) } : {}),
           ...(body?.coverImageUrl !== undefined ? { coverImageUrl: body.coverImageUrl || null } : {}),
