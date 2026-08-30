@@ -3050,6 +3050,7 @@ model DesignSample {
   patternMakerId       String?
   patternMakerName     String?
   producedProductId   String?
+  priorityRank Int? @unique
   status            DesignSampleStatus @default(IDEA)
   assigneeStaffId   String?
   assigneeName      String?

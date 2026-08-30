@@ -143,6 +143,43 @@ export class SampleFabricController {
     return uploadImage(file, "the1970/sample-fabric/library");
   }
 
+  // Lệnh đặt vải
+  @Get("fabric-orders/meta")
+  @RequirePermissions("fabric_library.view")
+  fabricOrderMeta() {
+    return this.service.fabricOrderMeta();
+  }
+
+  @Get("fabric-orders")
+  @RequirePermissions("fabric_library.view")
+  listFabricOrders(@Query() query: any) {
+    return this.service.listFabricOrders(query);
+  }
+
+  @Get("fabric-orders/:id")
+  @RequirePermissions("fabric_library.view")
+  getFabricOrder(@Param("id") id: string) {
+    return this.service.getFabricOrder(id);
+  }
+
+  @Post("fabric-orders")
+  @RequirePermissions("fabric_library.edit")
+  createFabricOrder(@Body() body: any, @Req() req: any) {
+    return this.service.createFabricOrder(body, req.user);
+  }
+
+  @Patch("fabric-orders/:id")
+  @RequirePermissions("fabric_library.edit")
+  updateFabricOrder(@Param("id") id: string, @Body() body: any) {
+    return this.service.updateFabricOrder(id, body);
+  }
+
+  @Delete("fabric-orders/:id")
+  @RequirePermissions("fabric_library.delete")
+  deleteFabricOrder(@Param("id") id: string) {
+    return this.service.deleteFabricOrder(id);
+  }
+
   // Mẫu triển khai
   @Get("samples/meta")
   @RequirePermissions("design_sample.view")

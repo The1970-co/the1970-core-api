@@ -422,7 +422,6 @@ export class SampleFabricService {
         productGroups: Array.from(new Set(this.parseTokens(body?.productGroups))),
         coverImageUrl: body?.coverImageUrl || images?.[0]?.url || null,
         note: String(body?.note || "").trim() || null,
-        imageUrls: Array.isArray(body?.imageUrls) ? Array.from(new Set(body.imageUrls.map((x:any)=>String(x||"").trim()).filter(Boolean))) : [],
         createdById: actor.id,
         createdByName: actor.name,
         colors: { create: colors.filter((x: any) => x?.name).map((x: any) => ({
@@ -709,6 +708,9 @@ export class SampleFabricService {
         orderedAt: body?.orderedAt ? new Date(body.orderedAt) : new Date(),
         expectedAt: body?.expectedAt ? new Date(body.expectedAt) : null,
         note: String(body?.note || "").trim() || null,
+        imageUrls: Array.isArray(body?.imageUrls)
+          ? Array.from(new Set(body.imageUrls.map((x:any)=>String(x||"").trim()).filter(Boolean)))
+          : [],
         createdById: actor.id,
         createdByName: actor.name,
         items: { create: items },
@@ -1019,6 +1021,7 @@ export class SampleFabricService {
         assigneeName: body?.assigneeName || null,
         nextAction: body?.nextAction || null,
         dueDate: body?.dueDate ? new Date(body.dueDate) : null,
+        priorityRank: [1,2,3].includes(Number(body?.priorityRank)) ? Number(body.priorityRank) : null,
         coverImageUrl: body?.coverImageUrl || images?.[0]?.url || null,
         note: body?.note || null,
         technicalNote: body?.technicalNote || null,
@@ -1077,6 +1080,14 @@ export class SampleFabricService {
       ? await this.sampleTechnicalPersonSnapshot(body.patternMakerId, ["PATTERN_MAKER"])
       : undefined;
     return this.prisma.$transaction(async (tx) => {
+      if (body?.priorityRank !== undefined && body?.priorityRank !== null && body?.priorityRank !== "") {
+        const rank = Number(body.priorityRank);
+        if (![1,2,3].includes(rank)) throw new BadRequestException("Ưu tiên mẫu chỉ nhận số 1, 2 hoặc 3.");
+        await tx.designSample.updateMany({
+          where: { priorityRank: rank, id: { not: id } },
+          data: { priorityRank: null },
+        });
+      }
       if (Array.isArray(body?.images)) {
         await tx.designSampleImage.deleteMany({ where: { designSampleId: id } });
         if (body.images.length) await tx.designSampleImage.createMany({
@@ -1122,6 +1133,9 @@ export class SampleFabricService {
           ...(body?.assigneeName !== undefined ? { assigneeName: body.assigneeName || null } : {}),
           ...(body?.nextAction !== undefined ? { nextAction: body.nextAction || null } : {}),
           ...(body?.dueDate !== undefined ? { dueDate: body.dueDate ? new Date(body.dueDate) : null } : {}),
+          ...(body?.priorityRank !== undefined ? {
+            priorityRank: body.priorityRank === null || body.priorityRank === "" ? null : Number(body.priorityRank),
+          } : {}),
           ...(body?.coverImageUrl !== undefined ? { coverImageUrl: body.coverImageUrl || null } : {}),
           ...(body?.note !== undefined ? { note: body.note || null } : {}),
           ...(body?.technicalNote !== undefined ? { technicalNote: body.technicalNote || null } : {}),
