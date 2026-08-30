@@ -1021,7 +1021,7 @@ export class SampleFabricService {
         assigneeName: body?.assigneeName || null,
         nextAction: body?.nextAction || null,
         dueDate: body?.dueDate ? new Date(body.dueDate) : null,
-        priorityRank: [1,2,3].includes(Number(body?.priorityRank)) ? Number(body.priorityRank) : null,
+        priorityRank: Number.isInteger(Number(body?.priorityRank)) && Number(body.priorityRank) > 0 ? Number(body.priorityRank) : null,
         coverImageUrl: body?.coverImageUrl || images?.[0]?.url || null,
         note: body?.note || null,
         technicalNote: body?.technicalNote || null,
@@ -1082,11 +1082,14 @@ export class SampleFabricService {
     return this.prisma.$transaction(async (tx) => {
       if (body?.priorityRank !== undefined && body?.priorityRank !== null && body?.priorityRank !== "") {
         const rank = Number(body.priorityRank);
-        if (![1,2,3].includes(rank)) throw new BadRequestException("Ưu tiên mẫu chỉ nhận số 1, 2 hoặc 3.");
-        await tx.designSample.updateMany({
+        if (!Number.isInteger(rank) || rank <= 0) throw new BadRequestException("STT ưu tiên phải là số nguyên từ 1 trở lên.");
+        const occupied = await tx.designSample.findFirst({
           where: { priorityRank: rank, id: { not: id } },
-          data: { priorityRank: null },
+          select: { id: true, code: true, name: true },
         });
+        if (occupied) {
+          throw new BadRequestException(`STT #${rank} đã được dùng cho ${occupied.code} · ${occupied.name}.`);
+        }
       }
       if (Array.isArray(body?.images)) {
         await tx.designSampleImage.deleteMany({ where: { designSampleId: id } });
