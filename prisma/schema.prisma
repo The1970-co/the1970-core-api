@@ -688,6 +688,7 @@ model FabricSupplier {
   fabricReceipts       FabricReceipt[]
   fabricBoards         FabricBoard[]
   fabricReceiptConfigs FabricReceiptFabricConfig[] @relation("FabricReceiptConfigSupplier")
+  fabricOrders         FabricOrder[]
 
   @@index([name])
   @@index([isActive])
@@ -2799,6 +2800,14 @@ enum FabricPriceUnit {
   ROLL
 }
 
+enum FabricOrderStatus {
+  DRAFT
+  ORDERED
+  PARTIAL
+  RECEIVED
+  CANCELLED
+}
+
 enum FabricImageType {
   FABRIC
   DEFECT
@@ -2842,6 +2851,8 @@ model FabricBoard {
   name              String?
   composition       String?
   expectedGsm       Decimal?           @db.Decimal(10, 2)
+  referencePriceVnd Decimal?            @db.Decimal(14, 0)
+  referencePriceUnit String             @default("METER")
   seasons           String[]           @default([])
   productGroups     String[]           @default([])
   coverImageUrl     String?
@@ -2858,8 +2869,7 @@ model FabricBoard {
   designSamples     DesignSample[]
   sampleDispatches  FabricSampleDispatch[]
   fabricReceipts    FabricReceipt[]
-  referencePriceVnd  Decimal? @db.Decimal(14, 0)
-  referencePriceUnit String   @default("METER")
+  fabricOrderItems  FabricOrderItem[]
 
   @@unique([supplierId, boardCode, fabricCode])
   @@index([supplierId])
@@ -2883,6 +2893,7 @@ model FabricBoardColor {
   designSamples    DesignSample[]
   sampleDispatches FabricSampleDispatch[]
   fabricReceipts   FabricReceipt[]
+  fabricOrderItems FabricOrderItem[]
 
   @@unique([fabricBoardId, code])
   @@index([fabricBoardId])
@@ -2902,6 +2913,64 @@ model FabricBoardImage {
   @@index([fabricBoardId])
   @@index([type])
 }
+
+model FabricOrder {
+  id             String            @id @default(cuid())
+  code           String            @unique
+  supplierId     String
+  status         FabricOrderStatus @default(DRAFT)
+  orderedAt      DateTime          @default(now())
+  expectedAt     DateTime?
+  note           String?
+  imageUrls      String[]          @default([])
+  createdById    String?
+  createdByName  String?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  supplier       FabricSupplier    @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  items          FabricOrderItem[]
+
+  @@index([supplierId])
+  @@index([status])
+  @@index([orderedAt])
+  @@index([updatedAt])
+}
+
+model FabricOrderItem {
+  id                    String            @id @default(cuid())
+  fabricOrderId         String
+  fabricBoardId         String
+  fabricColorId         String?
+  designSampleId        String?
+  quantity              Decimal           @db.Decimal(14, 3)
+  unit                  String            @default("METER")
+  unitPriceVnd          Decimal?          @db.Decimal(14, 0)
+  lineTotalVnd          Decimal?          @db.Decimal(16, 0)
+  note                  String?
+  boardCodeSnapshot     String
+  fabricCodeSnapshot    String?
+  fabricNameSnapshot    String?
+  colorNameSnapshot     String?
+  colorCodeSnapshot     String?
+  sampleCodeSnapshot    String?
+  sampleNameSnapshot    String?
+  supplierCodeSnapshot  String?
+  supplierNameSnapshot  String?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  fabricOrder           FabricOrder       @relation(fields: [fabricOrderId], references: [id], onDelete: Cascade)
+  fabricBoard           FabricBoard       @relation(fields: [fabricBoardId], references: [id], onDelete: Restrict)
+  fabricColor           FabricBoardColor? @relation(fields: [fabricColorId], references: [id], onDelete: SetNull)
+  designSample          DesignSample?     @relation(fields: [designSampleId], references: [id], onDelete: SetNull)
+
+  @@index([fabricOrderId])
+  @@index([fabricBoardId])
+  @@index([fabricColorId])
+  @@index([designSampleId])
+}
+
 
 model FabricSampleDispatch {
   id               String                     @id @default(cuid())
@@ -3008,6 +3077,7 @@ model DesignSample {
   sampleDispatches  FabricSampleDispatch[]
   measurementProfile DesignSampleMeasurementProfile?
   ideaBoards         DesignSampleIdeaBoardItem[]
+  fabricOrderItems   FabricOrderItem[]
 
   @@index([year])
   @@index([status])

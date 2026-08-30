@@ -422,6 +422,7 @@ export class SampleFabricService {
         productGroups: Array.from(new Set(this.parseTokens(body?.productGroups))),
         coverImageUrl: body?.coverImageUrl || images?.[0]?.url || null,
         note: String(body?.note || "").trim() || null,
+        imageUrls: Array.isArray(body?.imageUrls) ? Array.from(new Set(body.imageUrls.map((x:any)=>String(x||"").trim()).filter(Boolean))) : [],
         createdById: actor.id,
         createdByName: actor.name,
         colors: { create: colors.filter((x: any) => x?.name).map((x: any) => ({
@@ -533,6 +534,217 @@ export class SampleFabricService {
   private async assertSampleCodeAvailable(code: string, excludeId?: string) {
     const result = await this.checkSampleCode(code, excludeId);
     if (!result.available) throw new BadRequestException(result.message);
+  }
+
+  // -------------------------
+  // LỆNH ĐẶT VẢI
+  // -------------------------
+  private async nextFabricOrderCode(dateInput?: any) {
+    const d = dateInput ? new Date(dateInput) : new Date();
+    const safe = Number.isNaN(d.getTime()) ? new Date() : d;
+    const yy = String(safe.getFullYear()).slice(-2);
+    const mm = String(safe.getMonth() + 1).padStart(2, "0");
+    const dd = String(safe.getDate()).padStart(2, "0");
+    const prefix = `DV-${yy}${mm}${dd}-`;
+    const latest = await this.prisma.fabricOrder.findFirst({
+      where: { code: { startsWith: prefix } },
+      orderBy: { code: "desc" },
+      select: { code: true },
+    });
+    const current = Number(String(latest?.code || "").split("-").pop() || 0);
+    return `${prefix}${String(current + 1).padStart(3, "0")}`;
+  }
+
+  async fabricOrderMeta() {
+    const [suppliers, boards, samples] = await Promise.all([
+      this.prisma.fabricSupplier.findMany({
+        where: { isActive: true },
+        orderBy: { name: "asc" },
+        select: { id: true, code: true, name: true, phone: true },
+      }),
+      this.prisma.fabricBoard.findMany({
+        where: { isActive: true },
+        orderBy: { updatedAt: "desc" },
+        include: {
+          supplier: { select: { id: true, code: true, name: true } },
+          colors: { orderBy: { name: "asc" } },
+          images: { orderBy: { createdAt: "desc" } },
+        },
+      }),
+      this.prisma.designSample.findMany({
+        orderBy: { updatedAt: "desc" },
+        include: {
+          fabricBoard: { include: { supplier: { select: { id: true, code: true, name: true } } } },
+          fabricColor: true,
+          images: { orderBy: { createdAt: "desc" } },
+        },
+      }),
+    ]);
+    return { suppliers, boards, samples };
+  }
+
+  async listFabricOrders(query?: any) {
+    const q = String(query?.q || "").trim();
+    const status = String(query?.status || "").trim();
+    return this.prisma.fabricOrder.findMany({
+      where: {
+        ...(status ? { status: status as any } : {}),
+        ...(q ? {
+          OR: [
+            { code: { contains: q, mode: "insensitive" } },
+            { supplier: { name: { contains: q, mode: "insensitive" } } },
+            { supplier: { code: { contains: q, mode: "insensitive" } } },
+            { items: { some: { boardCodeSnapshot: { contains: q, mode: "insensitive" } } } },
+            { items: { some: { fabricCodeSnapshot: { contains: q, mode: "insensitive" } } } },
+            { items: { some: { sampleCodeSnapshot: { contains: q, mode: "insensitive" } } } },
+            { items: { some: { sampleNameSnapshot: { contains: q, mode: "insensitive" } } } },
+            { items: { some: { colorNameSnapshot: { contains: q, mode: "insensitive" } } } },
+          ],
+        } : {}),
+      },
+      include: {
+        supplier: { select: { id: true, code: true, name: true, phone: true } },
+        items: {
+          include: {
+            fabricBoard: { select: { id: true, coverImageUrl: true, referencePriceVnd: true, referencePriceUnit: true } },
+            designSample: { select: { id: true, coverImageUrl: true } },
+          },
+          orderBy: { createdAt: "asc" },
+        },
+      },
+      orderBy: [{ orderedAt: "desc" }, { createdAt: "desc" }],
+    });
+  }
+
+  async getFabricOrder(id: string) {
+    const row = await this.prisma.fabricOrder.findUnique({
+      where: { id },
+      include: {
+        supplier: true,
+        items: {
+          include: {
+            fabricBoard: { include: { images: { orderBy: { createdAt: "desc" } } } },
+            fabricColor: true,
+            designSample: { include: { images: { orderBy: { createdAt: "desc" } } } },
+          },
+          orderBy: { createdAt: "asc" },
+        },
+      },
+    });
+    if (!row) throw new NotFoundException("Không tìm thấy lệnh đặt vải.");
+    return row;
+  }
+
+  private async normalizeFabricOrderItems(itemsInput: any[], supplierId: string) {
+    if (!Array.isArray(itemsInput) || !itemsInput.length) throw new BadRequestException("Lệnh đặt vải phải có ít nhất 1 dòng vải.");
+    const boardIds = [...new Set(itemsInput.map((x:any)=>String(x?.fabricBoardId||"")).filter(Boolean))];
+    const colorIds = [...new Set(itemsInput.map((x:any)=>String(x?.fabricColorId||"")).filter(Boolean))];
+    const sampleIds = [...new Set(itemsInput.map((x:any)=>String(x?.designSampleId||"")).filter(Boolean))];
+
+    const [boards, colors, samples] = await Promise.all([
+      this.prisma.fabricBoard.findMany({ where: { id: { in: boardIds } }, include: { supplier: true } }),
+      colorIds.length ? this.prisma.fabricBoardColor.findMany({ where: { id: { in: colorIds } } }) : Promise.resolve([]),
+      sampleIds.length ? this.prisma.designSample.findMany({ where: { id: { in: sampleIds } } }) : Promise.resolve([]),
+    ]);
+    const boardMap = new Map(boards.map((x:any)=>[x.id,x]));
+    const colorMap = new Map((colors as any[]).map((x:any)=>[x.id,x]));
+    const sampleMap = new Map((samples as any[]).map((x:any)=>[x.id,x]));
+
+    return itemsInput.map((raw:any,index:number)=>{
+      const fabricBoardId = String(raw?.fabricBoardId || "");
+      const board:any = boardMap.get(fabricBoardId);
+      if (!board) throw new BadRequestException(`Dòng ${index+1}: Không tìm thấy mã bảng vải.`);
+      if (String(board.supplierId) !== supplierId) throw new BadRequestException(`Dòng ${index+1}: Bảng vải ${board.boardCode} không thuộc NCC đã chọn.`);
+
+      const fabricColorId = String(raw?.fabricColorId || "") || null;
+      const color:any = fabricColorId ? colorMap.get(fabricColorId) : null;
+      if (fabricColorId && (!color || String(color.fabricBoardId) !== fabricBoardId)) throw new BadRequestException(`Dòng ${index+1}: Màu không thuộc bảng vải đã chọn.`);
+
+      const designSampleId = String(raw?.designSampleId || "") || null;
+      const sample:any = designSampleId ? sampleMap.get(designSampleId) : null;
+      const quantity = Number(this.n(raw?.quantity) || 0);
+      if (quantity <= 0) throw new BadRequestException(`Dòng ${index+1}: Số lượng đặt phải lớn hơn 0.`);
+
+      const unit = ["METER","KG"].includes(String(raw?.unit||"").toUpperCase()) ? String(raw.unit).toUpperCase() : "METER";
+      const priceFromBoard = board.referencePriceVnd == null ? null : Number(board.referencePriceVnd);
+      const unitPriceVnd = raw?.unitPriceVnd === "" || raw?.unitPriceVnd === null || raw?.unitPriceVnd === undefined ? priceFromBoard : this.n(raw.unitPriceVnd);
+      const lineTotalVnd = unitPriceVnd == null ? null : Math.round(quantity * Number(unitPriceVnd));
+
+      return {
+        fabricBoardId,
+        fabricColorId,
+        designSampleId,
+        quantity,
+        unit,
+        unitPriceVnd,
+        lineTotalVnd,
+        note: String(raw?.note || "").trim() || null,
+        imageUrls: Array.isArray(raw?.imageUrls) ? Array.from(new Set(raw.imageUrls.map((x:any)=>String(x||"").trim()).filter(Boolean))) : [],
+        boardCodeSnapshot: board.boardCode,
+        fabricCodeSnapshot: board.fabricCode || null,
+        fabricNameSnapshot: board.name || null,
+        colorNameSnapshot: color?.name || sample?.fabricColorName || null,
+        colorCodeSnapshot: color?.code || sample?.fabricColorCode || null,
+        sampleCodeSnapshot: sample?.code || null,
+        sampleNameSnapshot: sample?.name || null,
+        supplierCodeSnapshot: board.supplier?.code || null,
+        supplierNameSnapshot: board.supplier?.name || null,
+      };
+    });
+  }
+
+  async createFabricOrder(body: any, user?: Actor) {
+    const supplierId = String(body?.supplierId || "").trim();
+    if (!supplierId) throw new BadRequestException("Chưa chọn nhà cung cấp vải.");
+    const supplier = await this.prisma.fabricSupplier.findUnique({ where: { id: supplierId } });
+    if (!supplier) throw new BadRequestException("Không tìm thấy nhà cung cấp vải.");
+    const items = await this.normalizeFabricOrderItems(body?.items || [], supplierId);
+    const actor = this.actor(user);
+    const code = String(body?.code || "").trim() || await this.nextFabricOrderCode(body?.orderedAt);
+    return this.prisma.fabricOrder.create({
+      data: {
+        code,
+        supplierId,
+        status: String(body?.status || "DRAFT").toUpperCase() as any,
+        orderedAt: body?.orderedAt ? new Date(body.orderedAt) : new Date(),
+        expectedAt: body?.expectedAt ? new Date(body.expectedAt) : null,
+        note: String(body?.note || "").trim() || null,
+        createdById: actor.id,
+        createdByName: actor.name,
+        items: { create: items },
+      },
+      include: { supplier: true, items: true },
+    });
+  }
+
+  async updateFabricOrder(id: string, body: any) {
+    const current = await this.prisma.fabricOrder.findUnique({ where: { id } });
+    if (!current) throw new NotFoundException("Không tìm thấy lệnh đặt vải.");
+    const supplierId = String(body?.supplierId || current.supplierId).trim();
+    const items = body?.items !== undefined ? await this.normalizeFabricOrderItems(body.items || [], supplierId) : null;
+    return this.prisma.$transaction(async (tx:any)=>{
+      if (items) await tx.fabricOrderItem.deleteMany({ where: { fabricOrderId: id } });
+      await tx.fabricOrder.update({
+        where: { id },
+        data: {
+          ...(body?.supplierId !== undefined ? { supplierId } : {}),
+          ...(body?.status !== undefined ? { status: String(body.status).toUpperCase() as any } : {}),
+          ...(body?.orderedAt !== undefined ? { orderedAt: body.orderedAt ? new Date(body.orderedAt) : current.orderedAt } : {}),
+          ...(body?.expectedAt !== undefined ? { expectedAt: body.expectedAt ? new Date(body.expectedAt) : null } : {}),
+          ...(body?.note !== undefined ? { note: String(body.note || "").trim() || null } : {}),
+          ...(body?.imageUrls !== undefined ? { imageUrls: Array.isArray(body.imageUrls) ? Array.from(new Set(body.imageUrls.map((x:any)=>String(x||"").trim()).filter(Boolean))) : [] } : {}),
+          ...(items ? { items: { create: items } } : {}),
+        },
+      });
+      return tx.fabricOrder.findUnique({ where: { id }, include: { supplier: true, items: true } });
+    });
+  }
+
+  async deleteFabricOrder(id: string) {
+    const current = await this.prisma.fabricOrder.findUnique({ where: { id } });
+    if (!current) throw new NotFoundException("Không tìm thấy lệnh đặt vải.");
+    if (!["DRAFT","CANCELLED"].includes(String(current.status))) throw new BadRequestException("Chỉ xoá lệnh nháp hoặc đã huỷ.");
+    return this.prisma.fabricOrder.delete({ where: { id } });
   }
 
   async sampleMeta() {
