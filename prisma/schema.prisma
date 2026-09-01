@@ -3050,7 +3050,8 @@ model DesignSample {
   patternMakerId       String?
   patternMakerName     String?
   producedProductId   String?
-  priorityRank Int? @unique
+  priorityRank      Int?
+  priorityLane      String             @default("IDEA")
   status            DesignSampleStatus @default(IDEA)
   assigneeStaffId   String?
   assigneeName      String?
@@ -3090,6 +3091,7 @@ model DesignSample {
   @@index([patternMakerId])
   @@index([assigneeStaffId])
   @@index([updatedAt])
+  @@unique([priorityLane, priorityRank])
 }
 
 // ============================================================

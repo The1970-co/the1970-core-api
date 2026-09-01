@@ -1022,6 +1022,7 @@ export class SampleFabricService {
         nextAction: body?.nextAction || null,
         dueDate: body?.dueDate ? new Date(body.dueDate) : null,
         priorityRank: Number.isInteger(Number(body?.priorityRank)) && Number(body.priorityRank) > 0 ? Number(body.priorityRank) : null,
+        priorityLane: String(body?.priorityLane || (String(body?.status || "IDEA")==="IDEA" ? "IDEA" : "DEPLOY")),
         coverImageUrl: body?.coverImageUrl || images?.[0]?.url || null,
         note: body?.note || null,
         technicalNote: body?.technicalNote || null,
@@ -1083,8 +1084,14 @@ export class SampleFabricService {
       if (body?.priorityRank !== undefined && body?.priorityRank !== null && body?.priorityRank !== "") {
         const rank = Number(body.priorityRank);
         if (!Number.isInteger(rank) || rank <= 0) throw new BadRequestException("STT ưu tiên phải là số nguyên từ 1 trở lên.");
+        const current = await tx.designSample.findUnique({
+          where: { id },
+          select: { status: true, priorityLane: true },
+        });
+        const lane = String(body?.priorityLane || current?.priorityLane || (String(current?.status || "IDEA")==="IDEA" ? "IDEA" : "DEPLOY"));
+        if (!["IDEA","DEPLOY"].includes(lane)) throw new BadRequestException("Nhóm STT không hợp lệ.");
         const occupied = await tx.designSample.findFirst({
-          where: { priorityRank: rank, id: { not: id } },
+          where: { priorityRank: rank, priorityLane: lane, id: { not: id } },
           select: { id: true, code: true, name: true },
         });
         if (occupied) {
@@ -1139,6 +1146,7 @@ export class SampleFabricService {
           ...(body?.priorityRank !== undefined ? {
             priorityRank: body.priorityRank === null || body.priorityRank === "" ? null : Number(body.priorityRank),
           } : {}),
+          ...(body?.priorityLane !== undefined ? { priorityLane: String(body.priorityLane || "IDEA") } : {}),
           ...(body?.coverImageUrl !== undefined ? { coverImageUrl: body.coverImageUrl || null } : {}),
           ...(body?.note !== undefined ? { note: body.note || null } : {}),
           ...(body?.technicalNote !== undefined ? { technicalNote: body.technicalNote || null } : {}),
