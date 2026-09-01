@@ -1,13 +1,17 @@
 import { BadRequestException, Injectable, UnauthorizedException } from "@nestjs/common";
 import { FulfillmentStatus, OrderStatus, PaymentStatus, ProductStatus, SalesChannel, VariantStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { WebsiteCatalogService } from "../website-catalog/website-catalog.service";
 import * as bcrypt from "bcrypt";
 import * as jwt from "jsonwebtoken";
 import { createHash, randomInt } from "crypto";
 
 @Injectable()
 export class StorefrontService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly websiteCatalog: WebsiteCatalogService,
+  ) {}
 
   private accessSecret = process.env.CUSTOMER_JWT_SECRET || process.env.JWT_SECRET || "dev-customer-secret";
   private refreshSecret = process.env.CUSTOMER_JWT_REFRESH_SECRET || process.env.CUSTOMER_JWT_SECRET || process.env.JWT_REFRESH_SECRET || this.accessSecret;
@@ -22,37 +26,11 @@ export class StorefrontService {
   private money(value: unknown) { const n = Number(value || 0); return Number.isFinite(n) ? Math.round(n) : 0; }
 
   async listProducts() {
-    const branchId = String(process.env.STOREFRONT_VN_BRANCH_ID || "").trim();
-    const products = await this.prisma.product.findMany({
-      where: { status: ProductStatus.ACTIVE },
-      orderBy: { createdAt: "desc" },
-      select: {
-        id: true, name: true, slug: true, description: true, imageUrl: true, category: true,
-        categoryRel: { select: { name: true } },
-        variants: {
-          where: { status: VariantStatus.ACTIVE },
-          orderBy: { createdAt: "asc" },
-          select: {
-            id: true, sku: true, color: true, size: true, price: true, compareAtPrice: true, imageUrl: true,
-            inventoryItems: { where: branchId ? { branchId } : undefined, select: { availableQty: true, reservedQty: true } },
-          },
-        },
-      },
-    });
-    return products.map((p) => ({
-      id: p.id, name: p.name, slug: p.slug, description: p.description, imageUrl: p.imageUrl,
-      category: p.categoryRel?.name || p.category || null,
-      variants: p.variants.map((v) => ({
-        id: v.id, sku: v.sku, color: v.color || "", size: v.size || "", imageUrl: v.imageUrl,
-        price: this.money(v.price), compareAtPrice: this.money(v.compareAtPrice),
-        stock: v.inventoryItems.reduce((sum, i) => sum + Math.max(0, Number(i.availableQty || 0) - Number(i.reservedQty || 0)), 0),
-      })),
-    }));
+    return this.websiteCatalog.publicList("VN");
   }
 
   async getProduct(slug: string) {
-    const products = await this.listProducts();
-    return products.find((p) => p.slug.toLowerCase() === String(slug || "").toLowerCase()) || null;
+    return this.websiteCatalog.publicGet(slug, "VN");
   }
 
   private async issueTokens(account: any, meta?: { userAgent?: string; ipAddress?: string }) {
