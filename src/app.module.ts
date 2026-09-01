@@ -36,6 +36,7 @@ import { OmniInboxModule } from "./omni-inbox/omni-inbox.module";
 import { MobilePushModule } from "./mobile-push/mobile-push.module";
 import { FinancialReportModule } from "./reports/financial-report.module";
 import { SampleFabricModule } from "./sample-fabric/sample-fabric.module";
+import { StorefrontModule } from "./storefront/storefront.module";
 @Module({
   imports: [
     PrismaModule,
@@ -75,6 +76,7 @@ import { SampleFabricModule } from "./sample-fabric/sample-fabric.module";
     MobilePushModule,
     FinancialReportModule,
     SampleFabricModule,
+    StorefrontModule,
   ],
 })
 export class AppModule {}

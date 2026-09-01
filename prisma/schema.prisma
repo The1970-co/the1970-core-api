@@ -23,9 +23,9 @@ model AdminUser {
 }
 
 model Product {
-  id                   String                @id @default(uuid())
+  id                   String                      @id @default(uuid())
   name                 String
-  slug                 String                @unique
+  slug                 String                      @unique
   category             String?
   categoryId           String?
   productType          String?
@@ -33,16 +33,17 @@ model Product {
   weight               Float?
   imageUrl             String?
   description          String?
-  status               ProductStatus         @default(DRAFT)
-  createdAt            DateTime              @default(now())
-  updatedAt            DateTime              @updatedAt
-  categoryRel          Category?             @relation(fields: [categoryId], references: [id])
+  status               ProductStatus               @default(DRAFT)
+  createdAt            DateTime                    @default(now())
+  updatedAt            DateTime                    @updatedAt
+  categoryRel          Category?                   @relation(fields: [categoryId], references: [id])
   variants             ProductVariant[]
   purchaseReceiptItems PurchaseReceiptItem[]
   promotionProducts    PromotionProduct[]
-  designSamples         DesignSample[]
-  fabricReceipts        FabricReceipt[]
-  fabricReceiptConfigs  FabricReceiptFabricConfig[] @relation("FabricReceiptConfigProduct")
+  designSamples        DesignSample[]
+  fabricReceipts       FabricReceipt[]
+  fabricReceiptConfigs FabricReceiptFabricConfig[] @relation("FabricReceiptConfigProduct")
+  websiteListing       WebsiteProduct?
 
   @@index([categoryId])
 }
@@ -139,6 +140,7 @@ model Customer {
   updatedAt              DateTime          @updatedAt
   addresses              CustomerAddress[]
   orders                 Order[]
+  account                CustomerAccount?
 
   @@index([phone])
   @@index([email])
@@ -240,8 +242,8 @@ model Order {
   payments                Payment[]
   shipment                Shipment?
   omniConversationId      String?
-  omniConversation        OmniConversation? @relation(fields: [omniConversationId], references: [id], onDelete: SetNull)
-  quickOrderRequestId     String? @unique
+  omniConversation        OmniConversation?       @relation(fields: [omniConversationId], references: [id], onDelete: SetNull)
+  quickOrderRequestId     String?                 @unique
 
   @@index([omniConversationId])
   @@index([customerPhone])
@@ -666,24 +668,23 @@ model Supplier {
   isActive  Boolean           @default(true)
   createdAt DateTime          @default(now())
   updatedAt DateTime          @updatedAt
-  receipts       PurchaseReceipt[]
+  receipts  PurchaseReceipt[]
 
   @@index([name])
   @@index([isActive])
 }
 
-
 model FabricSupplier {
-  id             String          @id @default(cuid())
-  name           String
-  code           String          @unique
-  phone          String?
-  email          String?
-  address        String?
-  note           String?
-  isActive       Boolean         @default(true)
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
+  id                   String                      @id @default(cuid())
+  name                 String
+  code                 String                      @unique
+  phone                String?
+  email                String?
+  address              String?
+  note                 String?
+  isActive             Boolean                     @default(true)
+  createdAt            DateTime                    @default(now())
+  updatedAt            DateTime                    @updatedAt
   designSamples        DesignSample[]
   fabricReceipts       FabricReceipt[]
   fabricBoards         FabricBoard[]
@@ -1992,13 +1993,13 @@ model PayrollOrderLink {
 }
 
 model PayrollConfig {
-  id             String  @id @default(cuid())
-  staffId        String
-  staffCode      String?
-  staffName      String?
-  branchId       String?
-  branchName     String?
-  attendanceCode String?
+  id               String  @id @default(cuid())
+  staffId          String
+  staffCode        String?
+  staffName        String?
+  branchId         String?
+  branchName       String?
+  attendanceCode   String?
   sourceTemplateId String?
 
   salaryType          String  @default("MONTHLY") // MONTHLY | DAILY | SHIFT | NONE
@@ -2436,55 +2437,54 @@ model OmniCustomer {
   @@index([name])
 }
 
-
 model OmniAssignmentSetting {
-  id                         String   @id @default("default")
-  isActive                   Boolean  @default(false)
-  mode                       String   @default("AUTO")
-  priorityOrder              Json
-  requireOnline              Boolean  @default(true)
-  branchPriorityEnabled      Boolean  @default(true)
-  lowestLoadEnabled          Boolean  @default(true)
-  draftOwnerPriorityEnabled  Boolean  @default(true)
-  keepPreviousAssignee       Boolean  @default(true)
-  keepPreviousDays           Int      @default(7)
-  reassignIfAssigneeOffline  Boolean  @default(true)
-  workingHoursOnly           Boolean  @default(false)
-  workStartMinute            Int      @default(480)
-  workEndMinute              Int      @default(1320)
-  workDays                   Json
-  outsideHoursMode           String   @default("QUEUE")
-  onlineWindowSeconds        Int      @default(90)
-  maxActiveEnabled           Boolean  @default(true)
-  maxActiveConversations     Int      @default(20)
-  maxUnreadEnabled           Boolean  @default(true)
-  maxUnreadConversations     Int      @default(10)
-  branchRoutingEnabled       Boolean  @default(true)
-  fallbackBranchId           String?
-  noCandidateMode            String   @default("UNASSIGNED")
-  onlyAssignedCanView        Boolean  @default(true)
-  managerCanViewBranch       Boolean  @default(true)
-  onlyAssignedCanReply       Boolean  @default(true)
-  shuffleEachRound           Boolean  @default(true)
-  reassignUnreadEnabled      Boolean  @default(false)
-  reassignAfterMinutes       Int      @default(10)
+  id                        String  @id @default("default")
+  isActive                  Boolean @default(false)
+  mode                      String  @default("AUTO")
+  priorityOrder             Json
+  requireOnline             Boolean @default(true)
+  branchPriorityEnabled     Boolean @default(true)
+  lowestLoadEnabled         Boolean @default(true)
+  draftOwnerPriorityEnabled Boolean @default(true)
+  keepPreviousAssignee      Boolean @default(true)
+  keepPreviousDays          Int     @default(7)
+  reassignIfAssigneeOffline Boolean @default(true)
+  workingHoursOnly          Boolean @default(false)
+  workStartMinute           Int     @default(480)
+  workEndMinute             Int     @default(1320)
+  workDays                  Json
+  outsideHoursMode          String  @default("QUEUE")
+  onlineWindowSeconds       Int     @default(90)
+  maxActiveEnabled          Boolean @default(true)
+  maxActiveConversations    Int     @default(20)
+  maxUnreadEnabled          Boolean @default(true)
+  maxUnreadConversations    Int     @default(10)
+  branchRoutingEnabled      Boolean @default(true)
+  fallbackBranchId          String?
+  noCandidateMode           String  @default("UNASSIGNED")
+  onlyAssignedCanView       Boolean @default(true)
+  managerCanViewBranch      Boolean @default(true)
+  onlyAssignedCanReply      Boolean @default(true)
+  shuffleEachRound          Boolean @default(true)
+  reassignUnreadEnabled     Boolean @default(false)
+  reassignAfterMinutes      Int     @default(10)
 
   // Hàng chờ tin nhắn ngoài giờ / qua đêm
-  morningQueueEnabled               Boolean   @default(true)
-  morningQueueInitialBatchSize      Int       @default(20)
-  morningQueueRepeatIntervalMinutes Int       @default(2)
-  morningQueueRepeatBatchSize       Int       @default(3)
+  morningQueueEnabled               Boolean @default(true)
+  morningQueueInitialBatchSize      Int     @default(20)
+  morningQueueRepeatIntervalMinutes Int     @default(2)
+  morningQueueRepeatBatchSize       Int     @default(3)
 
   // Trạng thái vận hành nội bộ của hàng chờ đầu ca
-  morningQueueRunDate               String?
-  morningQueueInitialDone           Boolean   @default(false)
-  morningQueueLastRunAt             DateTime?
-  morningQueueLastOnlineCount       Int       @default(0)
-  lastAssignedStaffId        String?
-  updatedById                String?
-  updatedByName              String?
-  createdAt                  DateTime @default(now())
-  updatedAt                  DateTime @updatedAt
+  morningQueueRunDate         String?
+  morningQueueInitialDone     Boolean   @default(false)
+  morningQueueLastRunAt       DateTime?
+  morningQueueLastOnlineCount Int       @default(0)
+  lastAssignedStaffId         String?
+  updatedById                 String?
+  updatedByName               String?
+  createdAt                   DateTime  @default(now())
+  updatedAt                   DateTime  @updatedAt
 
   members OmniAssignmentMember[]
 
@@ -2492,21 +2492,21 @@ model OmniAssignmentSetting {
 }
 
 model OmniAssignmentMember {
-  id                      String   @id @default(cuid())
-  settingId               String   @default("default")
-  staffId                 String
-  staffName               String
-  branchId                String?
-  branchName              String?
-  isActive                Boolean  @default(true)
-  receiveMessages         Boolean  @default(true)
-  receiveComments         Boolean  @default(false)
-  sortOrder               Int      @default(0)
-  weight                  Int      @default(1)
-  maxActiveConversations  Int?
-  maxUnreadConversations  Int?
-  createdAt               DateTime @default(now())
-  updatedAt               DateTime @updatedAt
+  id                     String   @id @default(cuid())
+  settingId              String   @default("default")
+  staffId                String
+  staffName              String
+  branchId               String?
+  branchName             String?
+  isActive               Boolean  @default(true)
+  receiveMessages        Boolean  @default(true)
+  receiveComments        Boolean  @default(false)
+  sortOrder              Int      @default(0)
+  weight                 Int      @default(1)
+  maxActiveConversations Int?
+  maxUnreadConversations Int?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
 
   setting OmniAssignmentSetting @relation(fields: [settingId], references: [id], onDelete: Cascade)
 
@@ -2517,36 +2517,36 @@ model OmniAssignmentMember {
 }
 
 model OmniStaffPresence {
-  staffId          String   @id
-  staffName        String?
-  status           String   @default("OFFLINE")
-  manualAway       Boolean  @default(false)
-  activeBranchId   String?
-  lastHeartbeatAt  DateTime @default(now())
-  lastActiveAt     DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  staffId         String   @id
+  staffName       String?
+  status          String   @default("OFFLINE")
+  manualAway      Boolean  @default(false)
+  activeBranchId  String?
+  lastHeartbeatAt DateTime @default(now())
+  lastActiveAt    DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   @@index([status, lastHeartbeatAt])
   @@index([activeBranchId, status])
 }
 
 model OmniAssignmentHistory {
-  id                 String   @id @default(cuid())
-  conversationId     String
-  customerName       String?
-  channel            OmniChannel?
-  branchId           String?
-  previousStaffId    String?
-  previousStaffName  String?
-  assignedStaffId    String?
-  assignedStaffName  String?
-  action             String
-  reason             String?
-  decisionDetail     Json?
-  triggerType        String?
-  createdById        String?
-  createdByName      String?
-  createdAt          DateTime @default(now())
+  id                String       @id @default(cuid())
+  conversationId    String
+  customerName      String?
+  channel           OmniChannel?
+  branchId          String?
+  previousStaffId   String?
+  previousStaffName String?
+  assignedStaffId   String?
+  assignedStaffName String?
+  action            String
+  reason            String?
+  decisionDetail    Json?
+  triggerType       String?
+  createdById       String?
+  createdByName     String?
+  createdAt         DateTime     @default(now())
 
   @@index([conversationId, createdAt])
   @@index([assignedStaffId, createdAt])
@@ -2673,16 +2673,16 @@ model OmniConversationTag {
 }
 
 model OmniNoteTemplate {
-  id             String   @id @default(cuid())
+  id             String                 @id @default(cuid())
   name           String
-  normalizedName String   @unique
+  normalizedName String                 @unique
   color          String?
-  sortOrder       Int      @default(0)
-  isActive        Boolean  @default(true)
+  sortOrder      Int                    @default(0)
+  isActive       Boolean                @default(true)
   createdById    String?
   createdByName  String?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
   notes          OmniConversationNote[]
 
   @@index([isActive, sortOrder])
@@ -2696,10 +2696,10 @@ model OmniConversationNote {
 
   templateId String?
   template   OmniNoteTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
-  staffId   String?
-  staffName String?
-  note      String
-  createdAt DateTime @default(now())
+  staffId    String?
+  staffName  String?
+  note       String
+  createdAt  DateTime          @default(now())
 
   @@index([conversationId, createdAt])
   @@index([templateId])
@@ -2768,7 +2768,6 @@ model MobilePushToken {
   @@index([provider])
   @@index([isActive])
 }
-
 
 // =========================
 // SAMPLE / FABRIC MANAGEMENT
@@ -2844,32 +2843,32 @@ enum FabricBoardImageType {
 }
 
 model FabricBoard {
-  id                String             @id @default(cuid())
-  supplierId        String
-  boardCode         String
-  fabricCode        String?
-  name              String?
-  composition       String?
-  expectedGsm       Decimal?           @db.Decimal(10, 2)
-  referencePriceVnd Decimal?            @db.Decimal(14, 0)
-  referencePriceUnit String             @default("METER")
-  seasons           String[]           @default([])
-  productGroups     String[]           @default([])
-  coverImageUrl     String?
-  note              String?
-  isActive          Boolean            @default(true)
-  createdById       String?
-  createdByName     String?
-  createdAt         DateTime           @default(now())
-  updatedAt         DateTime           @updatedAt
+  id                 String   @id @default(cuid())
+  supplierId         String
+  boardCode          String
+  fabricCode         String?
+  name               String?
+  composition        String?
+  expectedGsm        Decimal? @db.Decimal(10, 2)
+  referencePriceVnd  Decimal? @db.Decimal(14, 0)
+  referencePriceUnit String   @default("METER")
+  seasons            String[] @default([])
+  productGroups      String[] @default([])
+  coverImageUrl      String?
+  note               String?
+  isActive           Boolean  @default(true)
+  createdById        String?
+  createdByName      String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
-  supplier          FabricSupplier     @relation(fields: [supplierId], references: [id], onDelete: Restrict)
-  colors            FabricBoardColor[]
-  images            FabricBoardImage[]
-  designSamples     DesignSample[]
-  sampleDispatches  FabricSampleDispatch[]
-  fabricReceipts    FabricReceipt[]
-  fabricOrderItems  FabricOrderItem[]
+  supplier         FabricSupplier         @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  colors           FabricBoardColor[]
+  images           FabricBoardImage[]
+  designSamples    DesignSample[]
+  sampleDispatches FabricSampleDispatch[]
+  fabricReceipts   FabricReceipt[]
+  fabricOrderItems FabricOrderItem[]
 
   @@unique([supplierId, boardCode, fabricCode])
   @@index([supplierId])
@@ -2880,14 +2879,14 @@ model FabricBoard {
 }
 
 model FabricBoardColor {
-  id               String                 @id @default(cuid())
-  fabricBoardId    String
-  name             String
-  code             String?
-  imageUrl         String?
-  note             String?
-  createdAt        DateTime               @default(now())
-  updatedAt        DateTime               @updatedAt
+  id            String   @id @default(cuid())
+  fabricBoardId String
+  name          String
+  code          String?
+  imageUrl      String?
+  note          String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   fabricBoard      FabricBoard            @relation(fields: [fabricBoardId], references: [id], onDelete: Cascade)
   designSamples    DesignSample[]
@@ -2908,28 +2907,28 @@ model FabricBoardImage {
   caption       String?
   createdAt     DateTime             @default(now())
 
-  fabricBoard   FabricBoard          @relation(fields: [fabricBoardId], references: [id], onDelete: Cascade)
+  fabricBoard FabricBoard @relation(fields: [fabricBoardId], references: [id], onDelete: Cascade)
 
   @@index([fabricBoardId])
   @@index([type])
 }
 
 model FabricOrder {
-  id             String            @id @default(cuid())
-  code           String            @unique
-  supplierId     String
-  status         FabricOrderStatus @default(DRAFT)
-  orderedAt      DateTime          @default(now())
-  expectedAt     DateTime?
-  note           String?
-  imageUrls      String[]          @default([])
-  createdById    String?
-  createdByName  String?
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @updatedAt
+  id            String            @id @default(cuid())
+  code          String            @unique
+  supplierId    String
+  status        FabricOrderStatus @default(DRAFT)
+  orderedAt     DateTime          @default(now())
+  expectedAt    DateTime?
+  note          String?
+  imageUrls     String[]          @default([])
+  createdById   String?
+  createdByName String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
 
-  supplier       FabricSupplier    @relation(fields: [supplierId], references: [id], onDelete: Restrict)
-  items          FabricOrderItem[]
+  supplier FabricSupplier    @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  items    FabricOrderItem[]
 
   @@index([supplierId])
   @@index([status])
@@ -2938,39 +2937,38 @@ model FabricOrder {
 }
 
 model FabricOrderItem {
-  id                    String            @id @default(cuid())
-  fabricOrderId         String
-  fabricBoardId         String
-  fabricColorId         String?
-  designSampleId        String?
-  quantity              Decimal           @db.Decimal(14, 3)
-  unit                  String            @default("METER")
-  unitPriceVnd          Decimal?          @db.Decimal(14, 0)
-  lineTotalVnd          Decimal?          @db.Decimal(16, 0)
-  note                  String?
-  boardCodeSnapshot     String
-  fabricCodeSnapshot    String?
-  fabricNameSnapshot    String?
-  colorNameSnapshot     String?
-  colorCodeSnapshot     String?
-  sampleCodeSnapshot    String?
-  sampleNameSnapshot    String?
-  supplierCodeSnapshot  String?
-  supplierNameSnapshot  String?
-  createdAt             DateTime          @default(now())
-  updatedAt             DateTime          @updatedAt
+  id                   String   @id @default(cuid())
+  fabricOrderId        String
+  fabricBoardId        String
+  fabricColorId        String?
+  designSampleId       String?
+  quantity             Decimal  @db.Decimal(14, 3)
+  unit                 String   @default("METER")
+  unitPriceVnd         Decimal? @db.Decimal(14, 0)
+  lineTotalVnd         Decimal? @db.Decimal(16, 0)
+  note                 String?
+  boardCodeSnapshot    String
+  fabricCodeSnapshot   String?
+  fabricNameSnapshot   String?
+  colorNameSnapshot    String?
+  colorCodeSnapshot    String?
+  sampleCodeSnapshot   String?
+  sampleNameSnapshot   String?
+  supplierCodeSnapshot String?
+  supplierNameSnapshot String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
 
-  fabricOrder           FabricOrder       @relation(fields: [fabricOrderId], references: [id], onDelete: Cascade)
-  fabricBoard           FabricBoard       @relation(fields: [fabricBoardId], references: [id], onDelete: Restrict)
-  fabricColor           FabricBoardColor? @relation(fields: [fabricColorId], references: [id], onDelete: SetNull)
-  designSample          DesignSample?     @relation(fields: [designSampleId], references: [id], onDelete: SetNull)
+  fabricOrder  FabricOrder       @relation(fields: [fabricOrderId], references: [id], onDelete: Cascade)
+  fabricBoard  FabricBoard       @relation(fields: [fabricBoardId], references: [id], onDelete: Restrict)
+  fabricColor  FabricBoardColor? @relation(fields: [fabricColorId], references: [id], onDelete: SetNull)
+  designSample DesignSample?     @relation(fields: [designSampleId], references: [id], onDelete: SetNull)
 
   @@index([fabricOrderId])
   @@index([fabricBoardId])
   @@index([fabricColorId])
   @@index([designSampleId])
 }
-
 
 model FabricSampleDispatch {
   id               String                     @id @default(cuid())
@@ -2992,9 +2990,9 @@ model FabricSampleDispatch {
   createdAt        DateTime                   @default(now())
   updatedAt        DateTime                   @updatedAt
 
-  designSample     DesignSample               @relation(fields: [designSampleId], references: [id], onDelete: Cascade)
-  fabricBoard      FabricBoard                @relation(fields: [fabricBoardId], references: [id], onDelete: Restrict)
-  fabricColor      FabricBoardColor?           @relation(fields: [fabricColorId], references: [id], onDelete: SetNull)
+  designSample DesignSample      @relation(fields: [designSampleId], references: [id], onDelete: Cascade)
+  fabricBoard  FabricBoard       @relation(fields: [fabricBoardId], references: [id], onDelete: Restrict)
+  fabricColor  FabricBoardColor? @relation(fields: [fabricColorId], references: [id], onDelete: SetNull)
 
   @@index([designSampleId])
   @@index([fabricBoardId])
@@ -3043,13 +3041,13 @@ model DesignSample {
   fabricColorId     String?
   fabricColorName   String?
   fabricColorCode   String?
-  sampleFactoryId     String?
-  sampleFactoryName   String?
-  sampleMakerId        String?
-  sampleMakerName      String?
-  patternMakerId       String?
-  patternMakerName     String?
-  producedProductId   String?
+  sampleFactoryId   String?
+  sampleFactoryName String?
+  sampleMakerId     String?
+  sampleMakerName   String?
+  patternMakerId    String?
+  patternMakerName  String?
+  producedProductId String?
   priorityRank      Int?
   priorityLane      String             @default("IDEA")
   status            DesignSampleStatus @default(IDEA)
@@ -3065,22 +3063,23 @@ model DesignSample {
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
 
-  supplier          FabricSupplier?    @relation(fields: [supplierId], references: [id], onDelete: SetNull)
-  fabricBoard       FabricBoard?        @relation(fields: [fabricBoardId], references: [id], onDelete: SetNull)
-  fabricColor       FabricBoardColor?   @relation(fields: [fabricColorId], references: [id], onDelete: SetNull)
-  producedProduct   Product?                  @relation(fields: [producedProductId], references: [id], onDelete: SetNull)
-  sampleMaker       SampleTechnicalPerson?     @relation("DesignSampleSampleMaker", fields: [sampleMakerId], references: [id], onDelete: SetNull)
-  patternMaker      SampleTechnicalPerson?     @relation("DesignSamplePatternMaker", fields: [patternMakerId], references: [id], onDelete: SetNull)
-  colors            DesignSampleColor[]
-  images            DesignSampleImage[]
-  progressLogs      DesignSampleProgressLog[]
-  fabricReceipts    FabricReceipt[]
-  fabricReceiptConfigs FabricReceiptFabricConfig[] @relation("FabricReceiptConfigDesignSample")
-  sampleDispatches  FabricSampleDispatch[]
-  measurementProfile DesignSampleMeasurementProfile?
-  ideaBoards         DesignSampleIdeaBoardItem[]
-  fabricOrderItems   FabricOrderItem[]
+  supplier             FabricSupplier?                 @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  fabricBoard          FabricBoard?                    @relation(fields: [fabricBoardId], references: [id], onDelete: SetNull)
+  fabricColor          FabricBoardColor?               @relation(fields: [fabricColorId], references: [id], onDelete: SetNull)
+  producedProduct      Product?                        @relation(fields: [producedProductId], references: [id], onDelete: SetNull)
+  sampleMaker          SampleTechnicalPerson?          @relation("DesignSampleSampleMaker", fields: [sampleMakerId], references: [id], onDelete: SetNull)
+  patternMaker         SampleTechnicalPerson?          @relation("DesignSamplePatternMaker", fields: [patternMakerId], references: [id], onDelete: SetNull)
+  colors               DesignSampleColor[]
+  images               DesignSampleImage[]
+  progressLogs         DesignSampleProgressLog[]
+  fabricReceipts       FabricReceipt[]
+  fabricReceiptConfigs FabricReceiptFabricConfig[]     @relation("FabricReceiptConfigDesignSample")
+  sampleDispatches     FabricSampleDispatch[]
+  measurementProfile   DesignSampleMeasurementProfile?
+  ideaBoards           DesignSampleIdeaBoardItem[]
+  fabricOrderItems     FabricOrderItem[]
 
+  @@unique([priorityLane, priorityRank])
   @@index([year])
   @@index([status])
   @@index([supplierId])
@@ -3091,7 +3090,6 @@ model DesignSample {
   @@index([patternMakerId])
   @@index([assigneeStaffId])
   @@index([updatedAt])
-  @@unique([priorityLane, priorityRank])
 }
 
 // ============================================================
@@ -3135,16 +3133,16 @@ model DesignSampleIdeaBoardItem {
 // copy thành DesignSampleMeasurementProfile để giữ snapshot lịch sử.
 
 model MeasurementTemplate {
-  id          String                @id @default(cuid())
-  name        String
-  productKind ProductionProductKind @default(OTHER)
-  unitDefault String                @default("cm")
-  note        String?
-  isActive    Boolean               @default(true)
-  createdById String?
+  id            String                @id @default(cuid())
+  name          String
+  productKind   ProductionProductKind @default(OTHER)
+  unitDefault   String                @default("cm")
+  note          String?
+  isActive      Boolean               @default(true)
+  createdById   String?
   createdByName String?
-  createdAt   DateTime              @default(now())
-  updatedAt   DateTime              @updatedAt
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
 
   sizes          MeasurementTemplateSize[]
   rows           MeasurementTemplateRow[]
@@ -3164,7 +3162,7 @@ model MeasurementTemplateSize {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  template MeasurementTemplate       @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  template MeasurementTemplate        @relation(fields: [templateId], references: [id], onDelete: Cascade)
   values   MeasurementTemplateValue[]
 
   @@unique([templateId, size])
@@ -3183,7 +3181,7 @@ model MeasurementTemplateRow {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  template MeasurementTemplate       @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  template MeasurementTemplate        @relation(fields: [templateId], references: [id], onDelete: Cascade)
   values   MeasurementTemplateValue[]
 
   @@index([templateId, sortOrder])
@@ -3221,8 +3219,8 @@ model DesignSampleMeasurementProfile {
   createdAt            DateTime              @default(now())
   updatedAt            DateTime              @updatedAt
 
-  designSample   DesignSample         @relation(fields: [designSampleId], references: [id], onDelete: Cascade)
-  sourceTemplate MeasurementTemplate? @relation(fields: [sourceTemplateId], references: [id], onDelete: SetNull)
+  designSample   DesignSample                  @relation(fields: [designSampleId], references: [id], onDelete: Cascade)
+  sourceTemplate MeasurementTemplate?          @relation(fields: [sourceTemplateId], references: [id], onDelete: SetNull)
   sizes          DesignSampleMeasurementSize[]
   rows           DesignSampleMeasurementRow[]
 
@@ -3292,7 +3290,7 @@ model DesignSampleColor {
   createdAt      DateTime           @default(now())
   updatedAt      DateTime           @updatedAt
 
-  designSample   DesignSample       @relation(fields: [designSampleId], references: [id], onDelete: Cascade)
+  designSample DesignSample @relation(fields: [designSampleId], references: [id], onDelete: Cascade)
 
   @@index([designSampleId])
   @@index([status])
@@ -3304,82 +3302,82 @@ model DesignSampleImage {
   type           DesignSampleImageType @default(SAMPLE)
   url            String
   caption        String?
-  createdAt      DateTime     @default(now())
+  createdAt      DateTime              @default(now())
 
-  designSample   DesignSample @relation(fields: [designSampleId], references: [id], onDelete: Cascade)
+  designSample DesignSample @relation(fields: [designSampleId], references: [id], onDelete: Cascade)
 
   @@index([designSampleId])
 }
 
 model DesignSampleProgressLog {
-  id             String             @id @default(cuid())
+  id             String              @id @default(cuid())
   designSampleId String
   fromStatus     DesignSampleStatus?
   toStatus       DesignSampleStatus
   note           String?
   actorId        String?
   actorName      String?
-  createdAt      DateTime           @default(now())
+  createdAt      DateTime            @default(now())
 
-  designSample   DesignSample       @relation(fields: [designSampleId], references: [id], onDelete: Cascade)
+  designSample DesignSample @relation(fields: [designSampleId], references: [id], onDelete: Cascade)
 
   @@index([designSampleId, createdAt])
   @@index([toStatus])
 }
 
 model FabricReceipt {
-  id                  String              @id @default(cuid())
-  receiptCode         String              @unique
-  designSampleId      String?
-  productId           String?
-  fabricBoardId       String?
-  fabricColorId       String?
-  supplierId          String?
-  branchId            String?
-  fabricBoardCode     String?
-  fabricCode          String?
-  fabricName          String?
-  colorName           String?
-  colorCode           String?
-  lotCode             String?
-  supplierDeclaredM   Decimal?            @db.Decimal(12, 3)
-  supplierDeclaredKg  Decimal?            @db.Decimal(12, 3)
-  actualM             Decimal?            @db.Decimal(12, 3)
-  actualKg            Decimal?            @db.Decimal(12, 3)
-  rollCount           Int                 @default(0)
-  unitPrice           Decimal?            @db.Decimal(14, 2)
-  priceUnit           FabricPriceUnit     @default(METER)
-  priceCurrency       String              @default("VND")
-  exchangeRateToVnd   Decimal?            @db.Decimal(14, 4)
-  unitPriceVnd        Decimal?            @db.Decimal(14, 2)
-  expectedGsm         Decimal?            @db.Decimal(10, 2)
-  measuredGsm         Decimal?            @db.Decimal(10, 2)
-  varianceApproved    Boolean             @default(false)
-  varianceApprovedBy  String?
-  varianceApprovedAt  DateTime?
-  status              FabricReceiptStatus @default(DRAFT)
-  receivedAt          DateTime?
-  completedAt         DateTime?
-  receivedByStaffId   String?
-  receivedByName      String?
-  note                String?
-  createdById         String?
-  createdByName       String?
-  createdAt           DateTime            @default(now())
-  updatedAt           DateTime            @updatedAt
+  id                 String              @id @default(cuid())
+  receiptCode        String              @unique
+  designSampleId     String?
+  productId          String?
+  fabricBoardId      String?
+  fabricColorId      String?
+  supplierId         String?
+  branchId           String?
+  fabricBoardCode    String?
+  fabricCode         String?
+  fabricName         String?
+  colorName          String?
+  colorCode          String?
+  lotCode            String?
+  supplierDeclaredM  Decimal?            @db.Decimal(12, 3)
+  supplierDeclaredKg Decimal?            @db.Decimal(12, 3)
+  actualM            Decimal?            @db.Decimal(12, 3)
+  actualKg           Decimal?            @db.Decimal(12, 3)
+  rollCount          Int                 @default(0)
+  unitPrice          Decimal?            @db.Decimal(14, 2)
+  priceUnit          FabricPriceUnit     @default(METER)
+  priceCurrency      String              @default("VND")
+  exchangeRateToVnd  Decimal?            @db.Decimal(14, 4)
+  unitPriceVnd       Decimal?            @db.Decimal(14, 2)
+  expectedGsm        Decimal?            @db.Decimal(10, 2)
+  measuredGsm        Decimal?            @db.Decimal(10, 2)
+  varianceApproved   Boolean             @default(false)
+  varianceApprovedBy String?
+  varianceApprovedAt DateTime?
+  status             FabricReceiptStatus @default(DRAFT)
+  receivedAt         DateTime?
+  completedAt        DateTime?
+  receivedByStaffId  String?
+  receivedByName     String?
+  note               String?
+  createdById        String?
+  createdByName      String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
 
-  designSample        DesignSample?       @relation(fields: [designSampleId], references: [id], onDelete: SetNull)
-  product             Product?            @relation(fields: [productId], references: [id], onDelete: SetNull)
-  fabricBoard         FabricBoard?         @relation(fields: [fabricBoardId], references: [id], onDelete: SetNull)
-  fabricColor         FabricBoardColor?    @relation(fields: [fabricColorId], references: [id], onDelete: SetNull)
-  supplier            FabricSupplier?     @relation(fields: [supplierId], references: [id], onDelete: SetNull)
-  branch              Branch?             @relation(fields: [branchId], references: [id], onDelete: SetNull)
-  rolls               FabricReceiptRoll[]
-  fabricCosts         FabricReceiptFabricCost[]
-  fabricConfigs       FabricReceiptFabricConfig[]
-  colorMaps           FabricReceiptColorMap[]
-  measurements        FabricMeasurement[]
-  images              FabricReceiptImage[]
+  designSample  DesignSample?               @relation(fields: [designSampleId], references: [id], onDelete: SetNull)
+  product       Product?                    @relation(fields: [productId], references: [id], onDelete: SetNull)
+  fabricBoard   FabricBoard?                @relation(fields: [fabricBoardId], references: [id], onDelete: SetNull)
+  fabricColor   FabricBoardColor?           @relation(fields: [fabricColorId], references: [id], onDelete: SetNull)
+  supplier      FabricSupplier?             @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  branch        Branch?                     @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  rolls         FabricReceiptRoll[]
+  fabricCosts   FabricReceiptFabricCost[]
+  fabricConfigs FabricReceiptFabricConfig[]
+  colorMaps     FabricReceiptColorMap[]
+  measurements  FabricMeasurement[]
+  images        FabricReceiptImage[]
 
   @@index([designSampleId])
   @@index([productId])
@@ -3394,28 +3392,28 @@ model FabricReceipt {
 }
 
 model FabricReceiptRoll {
-  id                  String          @id @default(cuid())
-  fabricReceiptId     String
-  sortOrder           Int             @default(0)
-  fabricCode          String?
-  rollCode            String?
-  colorName           String?
-  colorCode           String?
-  supplierDeclaredM   Decimal?        @db.Decimal(12, 3)
-  supplierDeclaredKg  Decimal?        @db.Decimal(12, 3)
-  actualM             Decimal?        @db.Decimal(12, 3)
-  actualKg            Decimal?        @db.Decimal(12, 3)
-  measuredGsm         Decimal?        @db.Decimal(10, 2)
-  unitPriceCny        Decimal?        @db.Decimal(14, 4)
-  priceUnit           FabricPriceUnit @default(METER)
-  defectNote          String?
-  passed              Boolean       @default(true)
-  createdAt           DateTime      @default(now())
-  updatedAt           DateTime      @updatedAt
+  id                 String          @id @default(cuid())
+  fabricReceiptId    String
+  sortOrder          Int             @default(0)
+  fabricCode         String?
+  rollCode           String?
+  colorName          String?
+  colorCode          String?
+  supplierDeclaredM  Decimal?        @db.Decimal(12, 3)
+  supplierDeclaredKg Decimal?        @db.Decimal(12, 3)
+  actualM            Decimal?        @db.Decimal(12, 3)
+  actualKg           Decimal?        @db.Decimal(12, 3)
+  measuredGsm        Decimal?        @db.Decimal(10, 2)
+  unitPriceCny       Decimal?        @db.Decimal(14, 4)
+  priceUnit          FabricPriceUnit @default(METER)
+  defectNote         String?
+  passed             Boolean         @default(true)
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
 
-  fabricReceipt       FabricReceipt @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
-  measurements        FabricMeasurement[]
-  images              FabricReceiptImage[]
+  fabricReceipt FabricReceipt        @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
+  measurements  FabricMeasurement[]
+  images        FabricReceiptImage[]
 
   @@index([fabricReceiptId])
   @@index([fabricReceiptId, sortOrder])
@@ -3423,22 +3421,22 @@ model FabricReceiptRoll {
 }
 
 model FabricReceiptFabricConfig {
-  id              String        @id @default(cuid())
+  id              String   @id @default(cuid())
   fabricReceiptId String
   fabricCode      String
   materialName    String?
   supplierId      String?
   fabricBoardCode String?
-  fabricWidthCm   Decimal?      @db.Decimal(10, 2)
+  fabricWidthCm   Decimal? @db.Decimal(10, 2)
   productId       String?
   designSampleId  String?
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
-  fabricReceipt   FabricReceipt  @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
-  supplier        FabricSupplier? @relation("FabricReceiptConfigSupplier", fields: [supplierId], references: [id], onDelete: SetNull)
-  product         Product?       @relation("FabricReceiptConfigProduct", fields: [productId], references: [id], onDelete: SetNull)
-  designSample    DesignSample? @relation("FabricReceiptConfigDesignSample", fields: [designSampleId], references: [id], onDelete: SetNull)
+  fabricReceipt FabricReceipt   @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
+  supplier      FabricSupplier? @relation("FabricReceiptConfigSupplier", fields: [supplierId], references: [id], onDelete: SetNull)
+  product       Product?        @relation("FabricReceiptConfigProduct", fields: [productId], references: [id], onDelete: SetNull)
+  designSample  DesignSample?   @relation("FabricReceiptConfigDesignSample", fields: [designSampleId], references: [id], onDelete: SetNull)
 
   @@unique([fabricReceiptId, fabricCode])
   @@index([fabricReceiptId])
@@ -3448,17 +3446,17 @@ model FabricReceiptFabricConfig {
 }
 
 model FabricReceiptFabricCost {
-  id                 String        @id @default(cuid())
-  fabricReceiptId    String
-  fabricCode         String
-  chinaShippingCny             Decimal?      @db.Decimal(14, 2)
-  vietnamShippingRateVndPerKg  Decimal?      @db.Decimal(14, 2)
-  vietnamShippingVnd           Decimal?      @db.Decimal(14, 2)
-  note               String?
-  createdAt          DateTime      @default(now())
-  updatedAt          DateTime      @updatedAt
+  id                          String   @id @default(cuid())
+  fabricReceiptId             String
+  fabricCode                  String
+  chinaShippingCny            Decimal? @db.Decimal(14, 2)
+  vietnamShippingRateVndPerKg Decimal? @db.Decimal(14, 2)
+  vietnamShippingVnd          Decimal? @db.Decimal(14, 2)
+  note                        String?
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
 
-  fabricReceipt      FabricReceipt @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
+  fabricReceipt FabricReceipt @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
 
   @@unique([fabricReceiptId, fabricCode])
   @@index([fabricReceiptId])
@@ -3466,15 +3464,15 @@ model FabricReceiptFabricCost {
 }
 
 model FabricReceiptColorMap {
-  id              String        @id @default(cuid())
+  id              String   @id @default(cuid())
   fabricReceiptId String
   fabricCode      String
   colorName       String
   colorCode       String?
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
-  fabricReceipt   FabricReceipt @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
+  fabricReceipt FabricReceipt @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
 
   @@unique([fabricReceiptId, fabricCode, colorName, colorCode])
   @@index([fabricReceiptId])
@@ -3483,43 +3481,42 @@ model FabricReceiptColorMap {
 }
 
 model FabricMeasurement {
-  id              String             @id @default(cuid())
+  id              String   @id @default(cuid())
   fabricReceiptId String
   rollId          String?
-  areaCm2         Decimal            @db.Decimal(10, 2)
-  weightGrams     Decimal            @db.Decimal(10, 4)
-  gsm             Decimal            @db.Decimal(10, 2)
+  areaCm2         Decimal  @db.Decimal(10, 2)
+  weightGrams     Decimal  @db.Decimal(10, 4)
+  gsm             Decimal  @db.Decimal(10, 2)
   positionLabel   String?
   imageUrl        String?
   note            String?
   measuredById    String?
   measuredByName  String?
-  createdAt       DateTime           @default(now())
+  createdAt       DateTime @default(now())
 
-  fabricReceipt   FabricReceipt      @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
-  roll            FabricReceiptRoll? @relation(fields: [rollId], references: [id], onDelete: SetNull)
+  fabricReceipt FabricReceipt      @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
+  roll          FabricReceiptRoll? @relation(fields: [rollId], references: [id], onDelete: SetNull)
 
   @@index([fabricReceiptId, createdAt])
   @@index([rollId])
 }
 
 model FabricReceiptImage {
-  id              String             @id @default(cuid())
+  id              String          @id @default(cuid())
   fabricReceiptId String
   rollId          String?
-  type            FabricImageType    @default(FABRIC)
+  type            FabricImageType @default(FABRIC)
   url             String
   caption         String?
-  createdAt       DateTime           @default(now())
+  createdAt       DateTime        @default(now())
 
-  fabricReceipt   FabricReceipt      @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
-  roll            FabricReceiptRoll? @relation(fields: [rollId], references: [id], onDelete: SetNull)
+  fabricReceipt FabricReceipt      @relation(fields: [fabricReceiptId], references: [id], onDelete: Cascade)
+  roll          FabricReceiptRoll? @relation(fields: [rollId], references: [id], onDelete: SetNull)
 
   @@index([fabricReceiptId])
   @@index([rollId])
   @@index([type])
 }
-
 
 enum ProductionOrderStatus {
   DRAFT
@@ -3584,78 +3581,78 @@ model ProductionAccessorySupplier {
 }
 
 model ProductionAccessoryItem {
-  id         String                  @id @default(cuid())
-  code       String                  @unique
-  name       String
-  typeName   String
-  imageUrl   String?
-  unit       ProductionAccessoryUnit @default(PIECE)
-  stockQty   Decimal                 @default(0) @db.Decimal(14, 3)
+  id             String                  @id @default(cuid())
+  code           String                  @unique
+  name           String
+  typeName       String
+  imageUrl       String?
+  unit           ProductionAccessoryUnit @default(PIECE)
+  stockQty       Decimal                 @default(0) @db.Decimal(14, 3)
   unitPrice      Decimal?                @db.Decimal(14, 2)
   supplierId     String?
   specifications Json?
   note           String?
-  isActive   Boolean                 @default(true)
-  createdAt  DateTime                @default(now())
-  updatedAt  DateTime                @updatedAt
+  isActive       Boolean                 @default(true)
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
 
   @@index([typeName])
   @@index([supplierId])
   @@index([isActive])
 }
 
-
-
 model ProductionAccessoryReceipt {
-  id String @id @default(cuid())
-  code String @unique
-  supplierId String?
-  receivedAt DateTime @default(now())
-  receivedById String?
+  id             String                           @id @default(cuid())
+  code           String                           @unique
+  supplierId     String?
+  receivedAt     DateTime                         @default(now())
+  receivedById   String?
   receivedByName String?
-  note String?
-  status String @default("DRAFT")
-  postedAt DateTime?
-  postedById String?
-  postedByName String?
-  createdById String?
-  createdByName String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  items ProductionAccessoryReceiptItem[]
+  note           String?
+  status         String                           @default("DRAFT")
+  postedAt       DateTime?
+  postedById     String?
+  postedByName   String?
+  createdById    String?
+  createdByName  String?
+  createdAt      DateTime                         @default(now())
+  updatedAt      DateTime                         @updatedAt
+  items          ProductionAccessoryReceiptItem[]
+
   @@index([supplierId])
   @@index([receivedAt])
   @@index([createdAt])
 }
 
 model ProductionAccessoryReceiptItem {
-  id String @id @default(cuid())
-  receiptId String
-  receipt ProductionAccessoryReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
-  accessoryItemId String
+  id                    String                     @id @default(cuid())
+  receiptId             String
+  receipt               ProductionAccessoryReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  accessoryItemId       String
   accessoryCodeSnapshot String
   accessoryNameSnapshot String
-  unit ProductionAccessoryUnit
-  qty Decimal @db.Decimal(14, 3)
-  unitPrice Decimal? @db.Decimal(14, 2)
-  note String?
-  sortOrder Int @default(0)
-  createdAt DateTime @default(now())
+  unit                  ProductionAccessoryUnit
+  qty                   Decimal                    @db.Decimal(14, 3)
+  unitPrice             Decimal?                   @db.Decimal(14, 2)
+  note                  String?
+  sortOrder             Int                        @default(0)
+  createdAt             DateTime                   @default(now())
+
   @@index([receiptId, sortOrder])
   @@index([accessoryItemId])
 }
 
 model ProductionAccessoryTemplate {
-  id             String                @id @default(cuid())
-  name           String                @unique
-  productKind    ProductionProductKind @default(OTHER)
-  sourceType     String                @default("MANUAL")
+  id             String                            @id @default(cuid())
+  name           String                            @unique
+  productKind    ProductionProductKind             @default(OTHER)
+  sourceType     String                            @default("MANUAL")
   sourceFileName String?
   createdById    String?
   createdByName  String?
-  isActive       Boolean               @default(true)
-  createdAt      DateTime              @default(now())
-  updatedAt      DateTime              @updatedAt
+  isActive       Boolean                           @default(true)
+  createdAt      DateTime                          @default(now())
+  updatedAt      DateTime                          @updatedAt
   items          ProductionAccessoryTemplateItem[]
 
   @@index([productKind])
@@ -3715,37 +3712,37 @@ model SampleAccessorySpec {
 }
 
 model ProductionOrder {
-  id                  String                 @id @default(cuid())
-  code                String                 @unique
-  sourceType          String                 @default("SAMPLE")
-  designSampleId      String?
-  productId           String?
-  sourceCode          String                 @default("")
-  sourceName          String?
-  sourceImageUrl      String?
-  productionPartnerId String
-  status              ProductionOrderStatus  @default(DRAFT)
-  plannedStartAt      DateTime?
-  dueDate             DateTime?
-  sentAt              DateTime?
-  productKind         ProductionProductKind  @default(OTHER)
-  fabricWidthCm              Decimal?               @db.Decimal(10, 2)
-  fabricConsumptionM         Decimal?               @db.Decimal(10, 4)
-  fabricWastePercent         Decimal                @default(0) @db.Decimal(7, 3)
-  liningFabricConsumptionM   Decimal?               @db.Decimal(10, 4)
-  liningFabricWastePercent   Decimal                @default(0) @db.Decimal(7, 3)
-  liningFabricComponents     Json?
-  liningFabricAssignments    Json?
-  productionExtraCosts       Json?
-  productionPriceMultiplier  Decimal                @default(2.2) @db.Decimal(6, 2)
-  sizeSet                    Json?
-  sizeRatio           Json?
-  plannedQtyOverride  Int?
-  note                String?
-  createdById         String?
-  createdByName       String?
-  createdAt           DateTime               @default(now())
-  updatedAt           DateTime               @updatedAt
+  id                        String                @id @default(cuid())
+  code                      String                @unique
+  sourceType                String                @default("SAMPLE")
+  designSampleId            String?
+  productId                 String?
+  sourceCode                String                @default("")
+  sourceName                String?
+  sourceImageUrl            String?
+  productionPartnerId       String
+  status                    ProductionOrderStatus @default(DRAFT)
+  plannedStartAt            DateTime?
+  dueDate                   DateTime?
+  sentAt                    DateTime?
+  productKind               ProductionProductKind @default(OTHER)
+  fabricWidthCm             Decimal?              @db.Decimal(10, 2)
+  fabricConsumptionM        Decimal?              @db.Decimal(10, 4)
+  fabricWastePercent        Decimal               @default(0) @db.Decimal(7, 3)
+  liningFabricConsumptionM  Decimal?              @db.Decimal(10, 4)
+  liningFabricWastePercent  Decimal               @default(0) @db.Decimal(7, 3)
+  liningFabricComponents    Json?
+  liningFabricAssignments   Json?
+  productionExtraCosts      Json?
+  productionPriceMultiplier Decimal               @default(2.2) @db.Decimal(6, 2)
+  sizeSet                   Json?
+  sizeRatio                 Json?
+  plannedQtyOverride        Int?
+  note                      String?
+  createdById               String?
+  createdByName             String?
+  createdAt                 DateTime              @default(now())
+  updatedAt                 DateTime              @updatedAt
 
   @@index([sourceType])
   @@index([designSampleId])
@@ -3769,10 +3766,10 @@ model ProductionOrderRoll {
   availableKg         Decimal? @db.Decimal(12, 3)
   allocatedM          Decimal? @db.Decimal(12, 3)
   allocatedKg         Decimal? @db.Decimal(12, 3)
-  imageUrl             String?
-  fabricRole           String   @default("MAIN")
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  imageUrl            String?
+  fabricRole          String   @default("MAIN")
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 
   @@unique([productionOrderId, fabricReceiptRollId])
   @@index([productionOrderId])
@@ -3872,16 +3869,16 @@ model ProductionNplIssue {
 }
 
 model ProductionNplIssueItem {
-  id                String   @id @default(cuid())
-  issueId           String
-  productionOrderId String
-  accessoryItemId   String
-  accessoryCode     String?
-  accessoryName     String
-  sizeLabel         String?
-  sizeKey           String   @default("")
-  unit              String
-  requiredQtyAtIssue Decimal @db.Decimal(14, 3)
+  id                 String   @id @default(cuid())
+  issueId            String
+  productionOrderId  String
+  accessoryItemId    String
+  accessoryCode      String?
+  accessoryName      String
+  sizeLabel          String?
+  sizeKey            String   @default("")
+  unit               String
+  requiredQtyAtIssue Decimal  @db.Decimal(14, 3)
   issuedBeforeQty    Decimal  @default(0) @db.Decimal(14, 3)
   issuedQty          Decimal  @db.Decimal(14, 3)
   remainingAfterQty  Decimal  @default(0) @db.Decimal(14, 3)
@@ -3912,3 +3909,118 @@ model ProductionNplIssueNote {
   @@index([accessoryItemId])
 }
 
+model CustomerAccount {
+  id              String    @id @default(cuid())
+  customerId      String    @unique
+  phone           String    @unique
+  email           String?   @unique
+  passwordHash    String?
+  isActive        Boolean   @default(true)
+  emailVerifiedAt DateTime?
+  phoneVerifiedAt DateTime?
+  sessionVersion  Int       @default(1)
+  lastLoginAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  customer Customer          @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  sessions CustomerSession[]
+  otps     CustomerOtp[]
+
+  @@index([customerId])
+  @@index([phone])
+  @@index([email])
+}
+
+model CustomerSession {
+  id               String    @id @default(cuid())
+  accountId        String
+  refreshTokenHash String
+  deviceInfo       String?
+  ipAddress        String?
+  sessionVersion   Int       @default(1)
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  account CustomerAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId])
+  @@index([expiresAt])
+  @@index([revokedAt])
+}
+
+model CustomerOtp {
+  id         String    @id @default(cuid())
+  accountId  String?
+  phone      String
+  purpose    String
+  codeHash   String
+  expiresAt  DateTime
+  verifiedAt DateTime?
+  attempts   Int       @default(0)
+  createdAt  DateTime  @default(now())
+
+  account CustomerAccount? @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([phone, purpose])
+  @@index([expiresAt])
+}
+
+enum WebsitePublishStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+model WebsiteProduct {
+  id                  String               @id @default(cuid())
+  productId           String               @unique
+  slug                String               @unique
+  status              WebsitePublishStatus @default(DRAFT)
+  marketVn            Boolean              @default(true)
+  marketInternational Boolean              @default(false)
+  featured            Boolean              @default(false)
+  sortOrder           Int                  @default(0)
+
+  titleVi            String
+  titleEn            String?
+  shortDescriptionVi String?
+  shortDescriptionEn String?
+  descriptionVi      String?
+  descriptionEn      String?
+
+  coverImageUrl    String?
+  seoTitleVi       String?
+  seoTitleEn       String?
+  seoDescriptionVi String?
+  seoDescriptionEn String?
+
+  publishedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  product Product               @relation(fields: [productId], references: [id], onDelete: Cascade)
+  images  WebsiteProductImage[]
+
+  @@index([status])
+  @@index([marketVn, status])
+  @@index([marketInternational, status])
+  @@index([featured, sortOrder])
+}
+
+model WebsiteProductImage {
+  id               String   @id @default(cuid())
+  websiteProductId String
+  url              String
+  altVi            String?
+  altEn            String?
+  sortOrder        Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  websiteProduct WebsiteProduct @relation(fields: [websiteProductId], references: [id], onDelete: Cascade)
+
+  @@index([websiteProductId, sortOrder])
+}
