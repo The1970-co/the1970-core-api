@@ -37,6 +37,7 @@ import { MobilePushModule } from "./mobile-push/mobile-push.module";
 import { FinancialReportModule } from "./reports/financial-report.module";
 import { SampleFabricModule } from "./sample-fabric/sample-fabric.module";
 import { StorefrontModule } from "./storefront/storefront.module";
+import { WebsiteCatalogModule } from "./website-catalog/website-catalog.module";
 @Module({
   imports: [
     PrismaModule,
@@ -77,6 +78,7 @@ import { StorefrontModule } from "./storefront/storefront.module";
     FinancialReportModule,
     SampleFabricModule,
     StorefrontModule,
+    WebsiteCatalogModule,
   ],
 })
 export class AppModule {}
