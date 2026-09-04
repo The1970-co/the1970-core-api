@@ -1,5 +1,5 @@
 export class PayrollAdjustmentDto {
-  type!: "BONUS" | "ALLOWANCE" | "ADVANCE" | "DEDUCTION";
+  type!: string;
   amount!: number;
   reason?: string;
 }

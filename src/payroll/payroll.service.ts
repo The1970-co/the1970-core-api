@@ -425,20 +425,8 @@ export class PayrollService {
     const staffIds = Array.from(new Set((period.lines || []).map((line: any) => String(line.staffId || "")).filter(Boolean)));
     if (!staffIds.length) return period;
 
-    const configWhere: Prisma.PayrollConfigWhereInput = {
-      staffId: { in: staffIds },
-      isActive: true,
-      effectiveFrom: { lte: period.toDate },
-      OR: [{ effectiveTo: null }, { effectiveTo: { gte: period.fromDate } }],
-    };
-    if (period.branchId) {
-      configWhere.AND = [{ OR: [{ branchId: period.branchId }, { branchId: null }] }];
-    }
-
-    const periodConfigs = await this.prisma.payrollConfig.findMany({
-      where: configWhere,
-      orderBy: [{ effectiveFrom: "desc" }, { updatedAt: "desc" }],
-    });
+    const periodConfigs = (await this.activeConfigsForPeriod(period))
+      .filter((config: any) => staffIds.includes(String(config.staffId || "")));
 
     const configByStaff = new Map<string, any>();
     for (const config of periodConfigs as any[]) {
@@ -470,6 +458,38 @@ export class PayrollService {
           sourceTemplateName: sourceTemplateId
             ? (templateNameById.get(sourceTemplateId) || "Mẫu đã xóa / không còn hoạt động")
             : "Cấu hình riêng",
+          calculationConfig: config ? {
+            salaryType: config.salaryType,
+            baseSalary: config.baseSalary,
+            dailyRate: config.dailyRate,
+            standardWorkingDays: config.standardWorkingDays,
+            orderAttributionMode: config.orderAttributionMode,
+            commissionPerOrderEnabled: config.commissionPerOrderEnabled,
+            commissionPerOrderAmount: config.commissionPerOrderAmount,
+            commissionPerItemEnabled: config.commissionPerItemEnabled,
+            commissionPerItemAmount: config.commissionPerItemAmount,
+            commissionPercentEnabled: config.commissionPercentEnabled,
+            commissionRate: config.commissionRate,
+            hourlyEnabled: config.hourlyEnabled,
+            hourlyRate: config.hourlyRate,
+            standardHoursPerDay: config.standardHoursPerDay,
+            overtimeConfigs: config.overtimeConfigs,
+            paidLeaveEnabled: config.paidLeaveEnabled,
+            paidLeaveHoursPerDay: config.paidLeaveHoursPerDay,
+            mealAllowanceEnabled: config.mealAllowanceEnabled,
+            mealHoursPerUnit: config.mealHoursPerUnit,
+            mealAmountPerUnit: config.mealAmountPerUnit,
+            insuranceDeductionAmount: config.insuranceDeductionAmount,
+            taggedProductEnabled: config.taggedProductEnabled,
+            taggedProductRate: config.taggedProductRate,
+            ghnCodBonusEnabled: config.ghnCodBonusEnabled,
+            ghnCodBonusPerOrder: config.ghnCodBonusPerOrder,
+            allowanceDefault: config.allowanceDefault,
+            applyPos: config.applyPos,
+            applyOnline: config.applyOnline,
+            applyFacebook: config.applyFacebook,
+            applyCod: config.applyCod,
+          } : null,
         };
       }),
     };
@@ -981,7 +1001,7 @@ export class PayrollService {
         const hourlyRate = this.toNumber((config as any).hourlyRate || 0);
         const overtimeConfigs = this.normalizeOvertimeConfigs((config as any).overtimeConfigs, hourlyRate, overtimeRate, holidayRate);
         const overtime = this.calculateOvertime(overtimeConfigs, [overtimeHours, holidayHours, overtime3Hours, overtime4Hours]);
-        const convertedWorkingHours = normalHours + overtime.breakdown.reduce((sum, row) => sum + this.toNumber(row.hours) * this.toNumber(row.multiplier), 0);
+        const convertedWorkingHours = normalHours + overtime.breakdown.reduce((sum, row) => sum + (row.enabled ? this.toNumber(row.hours) * this.toNumber(row.multiplier) : 0), 0);
         const normalHourlyAmount = (config as any).hourlyEnabled ? normalHours * hourlyRate : 0;
         const overtimeAmount = (config as any).hourlyEnabled ? overtime.amount : 0;
         const hourlyAmount = normalHourlyAmount + overtimeAmount;
@@ -1628,61 +1648,83 @@ export class PayrollService {
     this.scopedBranchId(user, line.branchId || line.period.branchId || null);
     if (["PAID"].includes(String(line.status || "").toUpperCase())) throw new BadRequestException("Dòng lương đã trả không thể sửa.");
 
+    const periodConfigs = await this.activeConfigsForPeriod(line.period);
+    const config = periodConfigs.find((item: any) => String(item.staffId) === String(line.staffId)) as any;
+    const workingDays = body.workingDays === undefined ? this.toNumber(line.workingDays) : this.toNumber(body.workingDays);
+    const standardDays = Math.max(1, this.toNumber(config?.standardWorkingDays ?? line.standardDays ?? 26));
+    const salaryType = String(config?.salaryType || line.salaryType || "MONTHLY").toUpperCase();
+    const baseSalary = this.toNumber(config?.baseSalary ?? line.baseSalary);
+    const dailyRate = this.toNumber(config?.dailyRate ?? line.dailyRate);
+    const proratedSalary =
+      salaryType === "NONE" ? 0 :
+      salaryType === "DAILY" || salaryType === "SHIFT" ? dailyRate * workingDays :
+      baseSalary * Math.min(workingDays, standardDays) / standardDays;
+
     const normalHours = body.normalHours === undefined ? this.toNumber((line as any).normalHours) : this.toNumber(body.normalHours);
     const overtimeHours = body.overtimeHours === undefined ? this.toNumber((line as any).overtimeHours) : this.toNumber(body.overtimeHours);
     const holidayHours = body.holidayHours === undefined ? this.toNumber((line as any).holidayHours) : this.toNumber(body.holidayHours);
     const overtime3Hours = body.overtime3Hours === undefined ? this.toNumber((line as any).overtime3Hours) : this.toNumber(body.overtime3Hours);
     const overtime4Hours = body.overtime4Hours === undefined ? this.toNumber((line as any).overtime4Hours) : this.toNumber(body.overtime4Hours);
-    const overtimeRate = body.overtimeRate === undefined ? this.toNumber((line as any).overtimeRate || 1) : this.toNumber(body.overtimeRate || 1);
-    const holidayRate = body.holidayRate === undefined ? this.toNumber((line as any).holidayRate || 2) : this.toNumber(body.holidayRate || 2);
-    const hourlyRate = body.hourlyRate === undefined ? this.toNumber((line as any).hourlyRate) : this.toNumber(body.hourlyRate);
+    const overtimeRate = body.overtimeRate === undefined ? this.toNumber((config?.overtimeRate ?? (line as any).overtimeRate) || 1) : this.toNumber(body.overtimeRate || 1);
+    const holidayRate = body.holidayRate === undefined ? this.toNumber((config?.holidayRate ?? (line as any).holidayRate) || 2) : this.toNumber(body.holidayRate || 2);
+    const hourlyRate = body.hourlyRate === undefined ? this.toNumber(config?.hourlyRate ?? (line as any).hourlyRate) : this.toNumber(body.hourlyRate);
+    const hourlyEnabled = config ? Boolean(config.hourlyEnabled) : this.toNumber((line as any).hourlyAmount) > 0;
     const existingBreakdown = Array.isArray((line as any).overtimeBreakdown) ? (line as any).overtimeBreakdown : [];
-    const overtimeConfigs = this.normalizeOvertimeConfigs(body.overtimeConfigs || existingBreakdown, hourlyRate, overtimeRate, holidayRate);
+    const overtimeConfigs = this.normalizeOvertimeConfigs(body.overtimeConfigs || config?.overtimeConfigs || existingBreakdown, hourlyRate, overtimeRate, holidayRate);
     const overtime = this.calculateOvertime(overtimeConfigs, [overtimeHours, holidayHours, overtime3Hours, overtime4Hours]);
-    const convertedWorkingHours = normalHours + overtime.breakdown.reduce((sum, row) => sum + this.toNumber(row.hours) * this.toNumber(row.multiplier), 0);
-    const overtimeAmount = overtime.amount;
-    const hourlyAmount = normalHours * hourlyRate + overtimeAmount;
+    const convertedWorkingHours = normalHours + overtime.breakdown.reduce((sum, row) => sum + (row.enabled ? this.toNumber(row.hours) * this.toNumber(row.multiplier) : 0), 0);
+    const overtimeAmount = hourlyEnabled ? overtime.amount : 0;
+    const hourlyAmount = hourlyEnabled ? normalHours * hourlyRate + overtimeAmount : 0;
 
     const paidLeaveDays = body.paidLeaveDays === undefined ? this.toNumber((line as any).paidLeaveDays) : this.toNumber(body.paidLeaveDays);
-    const paidLeaveHoursPerDay = body.paidLeaveHoursPerDay === undefined ? this.toNumber((line as any).paidLeaveHoursPerDay) : this.toNumber(body.paidLeaveHoursPerDay);
-    const paidLeaveAmount = paidLeaveDays * paidLeaveHoursPerDay * hourlyRate;
+    const paidLeaveHoursPerDay = body.paidLeaveHoursPerDay === undefined ? this.toNumber(config?.paidLeaveHoursPerDay ?? (line as any).paidLeaveHoursPerDay) : this.toNumber(body.paidLeaveHoursPerDay);
+    const paidLeaveEnabled = config ? Boolean(config.paidLeaveEnabled) : this.toNumber((line as any).paidLeaveAmount) > 0;
+    const paidLeaveAmount = paidLeaveEnabled ? paidLeaveDays * paidLeaveHoursPerDay * hourlyRate : 0;
 
-    const mealHoursPerUnit = Math.max(1, this.toNumber(body.mealHoursPerUnit || 9.5));
-    const mealAmountPerUnit = this.toNumber(body.mealAmountPerUnit || 0);
-    const mealAllowanceAmount = body.mealAllowanceAmount === undefined
-      ? this.toNumber((line as any).mealAllowanceAmount)
-      : this.toNumber(body.mealAllowanceAmount);
-    const autoMealAllowanceAmount = body.autoMealAllowance === true
-      ? ((normalHours + overtimeHours + holidayHours) / mealHoursPerUnit) * mealAmountPerUnit
-      : mealAllowanceAmount;
+    const mealHoursPerUnit = Math.max(1, this.toNumber(body.mealHoursPerUnit ?? config?.mealHoursPerUnit ?? 9.5));
+    const mealAmountPerUnit = this.toNumber(body.mealAmountPerUnit ?? config?.mealAmountPerUnit ?? 0);
+    const rawWorkingHours = normalHours + overtimeHours + holidayHours + overtime3Hours + overtime4Hours;
+    const autoMealAllowanceAmount = config
+      ? (config.mealAllowanceEnabled ? rawWorkingHours / mealHoursPerUnit * mealAmountPerUnit : 0)
+      : body.mealAllowanceAmount === undefined
+        ? this.toNumber((line as any).mealAllowanceAmount)
+        : this.toNumber(body.mealAllowanceAmount);
+    const insuranceDeduction = body.insuranceDeduction === undefined
+      ? this.toNumber(config?.insuranceDeductionAmount ?? (line as any).insuranceDeduction)
+      : this.toNumber(body.insuranceDeduction);
 
     const taggedProductQty = body.taggedProductQty === undefined ? Number((line as any).taggedProductQty || 0) : Number(body.taggedProductQty || 0);
-    const taggedProductRate = body.taggedProductRate === undefined ? this.toNumber((line as any).taggedProductRate) : this.toNumber(body.taggedProductRate);
-    const taggedProductAmount = taggedProductQty * taggedProductRate;
+    const taggedProductRate = body.taggedProductRate === undefined ? this.toNumber(config?.taggedProductRate ?? (line as any).taggedProductRate) : this.toNumber(body.taggedProductRate);
+    const taggedProductAmount = config && !config.taggedProductEnabled ? 0 : taggedProductQty * taggedProductRate;
 
     const ghnCodOrderCount = body.ghnCodOrderCount === undefined ? Number((line as any).ghnCodOrderCount || 0) : Number(body.ghnCodOrderCount || 0);
-    const ghnCodBonusPerOrder = body.ghnCodBonusPerOrder === undefined ? this.toNumber((line as any).ghnCodBonusPerOrder) : this.toNumber(body.ghnCodBonusPerOrder);
-    const ghnCodBonusAmount = ghnCodOrderCount * ghnCodBonusPerOrder;
+    const ghnCodBonusPerOrder = body.ghnCodBonusPerOrder === undefined ? this.toNumber(config?.ghnCodBonusPerOrder ?? (line as any).ghnCodBonusPerOrder) : this.toNumber(body.ghnCodBonusPerOrder);
+    const ghnCodBonusAmount = config && !config.ghnCodBonusEnabled ? 0 : ghnCodOrderCount * ghnCodBonusPerOrder;
 
     const next: any = {
-      workingDays: body.workingDays === undefined ? line.workingDays : this.decimal2(body.workingDays),
+      salaryType,
+      baseSalary: this.money(baseSalary),
+      dailyRate: this.money(dailyRate),
+      workingDays: this.decimal2(workingDays),
+      standardDays: this.decimal2(standardDays),
+      proratedSalary: this.money(proratedSalary),
       normalHours: this.decimal2(normalHours),
       overtimeHours: this.decimal2(overtimeHours),
       overtimeRate: this.decimal2(overtimeRate),
       holidayHours: this.decimal2(holidayHours),
-        overtime3Hours: this.decimal2(overtime3Hours),
-        overtime4Hours: this.decimal2(overtime4Hours),
+      overtime3Hours: this.decimal2(overtime3Hours),
+      overtime4Hours: this.decimal2(overtime4Hours),
       holidayRate: this.decimal2(holidayRate),
       convertedWorkingHours: this.decimal2(convertedWorkingHours),
       hourlyRate: this.money(hourlyRate),
       hourlyAmount: this.money(hourlyAmount),
-        overtimeAmount: this.money(overtimeAmount),
-        overtimeBreakdown: overtime.breakdown as any,
+      overtimeAmount: this.money(overtimeAmount),
+      overtimeBreakdown: overtime.breakdown as any,
       paidLeaveDays: this.decimal2(paidLeaveDays),
       paidLeaveHoursPerDay: this.decimal2(paidLeaveHoursPerDay),
       paidLeaveAmount: this.money(paidLeaveAmount),
       mealAllowanceAmount: this.money(autoMealAllowanceAmount),
-      insuranceDeduction: body.insuranceDeduction === undefined ? (line as any).insuranceDeduction : this.money(body.insuranceDeduction),
+      insuranceDeduction: this.money(insuranceDeduction),
       taggedProductQty,
       taggedProductRate: this.money(taggedProductRate),
       taggedProductAmount: this.money(taggedProductAmount),
@@ -1720,15 +1762,23 @@ export class PayrollService {
     const line = await this.prisma.payrollLine.findUnique({ where: { id }, include: { period: true } });
     if (!line) throw new NotFoundException("Không tìm thấy dòng lương.");
     this.scopedBranchId(user, line.branchId || line.period.branchId || null);
-    const type = String(body.type || "").toUpperCase();
-    if (!["BONUS", "ALLOWANCE", "ADVANCE", "DEDUCTION"].includes(type)) {
+    const rawType = String(body.type || "").trim();
+    const upperType = rawType.toUpperCase();
+    const isCustomAdd = upperType.startsWith("CUSTOM_ADD:");
+    const isCustomDeduct = upperType.startsWith("CUSTOM_DEDUCT:");
+    const isCustom = isCustomAdd || isCustomDeduct;
+    const customName = isCustom ? rawType.slice(rawType.indexOf(":") + 1).trim() : "";
+    if (!["BONUS", "ALLOWANCE", "ADVANCE", "DEDUCTION"].includes(upperType) && !isCustom) {
       throw new BadRequestException("Loại điều chỉnh không hợp lệ.");
     }
+    if (isCustom && !customName) throw new BadRequestException("Cần nhập tên loại điều chỉnh.");
+    if (customName.length > 60) throw new BadRequestException("Tên loại điều chỉnh tối đa 60 ký tự.");
+    const type = isCustomAdd ? `CUSTOM_ADD:${customName}` : isCustomDeduct ? `CUSTOM_DEDUCT:${customName}` : upperType;
     const amount = Math.max(0, this.toNumber(body.amount));
     if (amount <= 0) throw new BadRequestException("Số tiền điều chỉnh phải lớn hơn 0.");
     const reason = String(body.reason || "").trim();
-    if (["BONUS", "ALLOWANCE"].includes(type) && !reason) {
-      throw new BadRequestException("Cần nhập lý do thưởng hoặc phụ cấp.");
+    if ((["BONUS", "ALLOWANCE"].includes(type) || isCustom) && !reason) {
+      throw new BadRequestException("Cần nhập lý do cho khoản điều chỉnh này.");
     }
 
     await this.prisma.payrollAdjustment.create({
@@ -1743,10 +1793,10 @@ export class PayrollService {
     });
 
     const data: any = {};
-    if (type === "BONUS") data.bonus = this.money(this.toNumber(line.bonus) + amount);
+    if (type === "BONUS" || isCustomAdd) data.bonus = this.money(this.toNumber(line.bonus) + amount);
     if (type === "ALLOWANCE") data.allowance = this.money(this.toNumber(line.allowance) + amount);
     if (type === "ADVANCE") data.advance = this.money(this.toNumber(line.advance) + amount);
-    if (type === "DEDUCTION") data.deduction = this.money(this.toNumber(line.deduction) + amount);
+    if (type === "DEDUCTION" || isCustomDeduct) data.deduction = this.money(this.toNumber(line.deduction) + amount);
 
     const totals = this.calcLineTotals({ ...line, ...data });
     const updated = await this.prisma.payrollLine.update({
