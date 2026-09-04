@@ -140,7 +140,7 @@ export class WebsiteCatalogService {
         shortDescriptionEn: this.nullable(body?.shortDescriptionEn),
         descriptionVi: this.nullable(body?.descriptionVi),
         descriptionEn: this.nullable(body?.descriptionEn),
-        coverImageUrl: this.nullable(body?.coverImageUrl) || product.imageUrl || images[0]?.url || null,
+        coverImageUrl: this.nullable(body?.coverImageUrl) || images[0]?.url || product.imageUrl || null,
         seoTitleVi: this.nullable(body?.seoTitleVi),
         seoTitleEn: this.nullable(body?.seoTitleEn),
         seoDescriptionVi: this.nullable(body?.seoDescriptionVi),
@@ -198,9 +198,11 @@ export class WebsiteCatalogService {
               ? current.descriptionEn
               : this.nullable(body.descriptionEn),
           coverImageUrl:
-            body?.coverImageUrl === undefined
-              ? current.coverImageUrl
-              : this.nullable(body.coverImageUrl),
+            body?.coverImageUrl !== undefined
+              ? this.nullable(body.coverImageUrl)
+              : replaceImages && images.length
+                ? images[0].url
+                : current.coverImageUrl,
           seoTitleVi:
             body?.seoTitleVi === undefined ? current.seoTitleVi : this.nullable(body.seoTitleVi),
           seoTitleEn:

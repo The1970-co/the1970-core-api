@@ -234,14 +234,12 @@ export class PayrollService {
     return "ASSIGNED_OR_CREATOR";
   }
 
-  private buildPayrollOrderWhere(staffId: string, period: any, branchId?: string | null, modeValue?: unknown): Prisma.OrderWhereInput {
+  private buildPayrollOrderWhere(staffId: string, period: any, modeValue?: unknown): Prisma.OrderWhereInput {
     const mode = this.normalizeAttributionMode(modeValue);
     const where: Prisma.OrderWhereInput = {
       createdAt: { gte: period.fromDate, lte: period.toDate },
       status: { not: OrderStatus.CANCELLED },
     };
-    if (branchId) where.branchId = branchId;
-
     if (mode === "CREATED_BY") {
       where.createdByStaffId = staffId;
       return where;
@@ -892,7 +890,10 @@ export class PayrollService {
 
     // Giữ lại dữ liệu nhập tay theo kỳ lương (giờ thường, CT1, CT2, SP thưởng...)
     // khi admin bấm Tính lại. Nếu không giữ, hệ thống sẽ xóa line cũ rồi tính về 0 giờ/SP.
-    const existingLines = await this.prisma.payrollLine.findMany({ where: { periodId: id } });
+    const existingLines = await this.prisma.payrollLine.findMany({
+      where: { periodId: id },
+      include: { adjustments: { orderBy: { createdAt: "asc" } } },
+    });
     const existingInputByStaff = new Map<string, any>(
       existingLines.map((line: any) => [String(line.staffId), line]),
     );
@@ -955,7 +956,9 @@ export class PayrollService {
           baseSalary * Math.min(workingDays, standardDays) / standardDays;
 
         const orderAttributionMode = this.normalizeAttributionMode((config as any).orderAttributionMode);
-        const orderWhere = this.buildPayrollOrderWhere(config.staffId, period, lineBranchId, orderAttributionMode);
+        // Chi nhánh chỉ dùng để nhóm/hiển thị nhân viên. Đơn được tính theo
+        // nhân viên trên toàn hệ thống để không mất doanh số khi đổi nơi làm.
+        const orderWhere = this.buildPayrollOrderWhere(config.staffId, period, orderAttributionMode);
 
         const rawOrders = await tx.order.findMany({
           where: orderWhere,
@@ -1010,7 +1013,12 @@ export class PayrollService {
           ? revenueAmount * this.toNumber(config.commissionRate) / 100
           : 0;
         const commissionTotal = commissionByOrder + commissionByItem + commissionByPercent;
-        const allowance = this.toNumber(config.allowanceDefault);
+        const bonus = this.toNumber(input.bonus || 0);
+        const allowance = input.allowance === undefined
+          ? this.toNumber(config.allowanceDefault)
+          : this.toNumber(input.allowance);
+        const advance = this.toNumber(input.advance || 0);
+        const deduction = this.toNumber(input.deduction || 0);
         const totals = this.calcLineTotals({
           proratedSalary,
           hourlyAmount,
@@ -1018,8 +1026,11 @@ export class PayrollService {
           taggedProductAmount,
           ghnCodBonusAmount,
           commissionTotal,
+          bonus,
           allowance,
           mealAllowanceAmount,
+          advance,
+          deduction,
           insuranceDeduction,
         });
 
@@ -1079,12 +1090,31 @@ export class PayrollService {
             commissionByItem: this.money(commissionByItem),
             commissionByPercent: this.money(commissionByPercent),
             commissionTotal: this.money(commissionTotal),
+            bonus: this.money(bonus),
             allowance: this.money(allowance),
+            advance: this.money(advance),
+            deduction: this.money(deduction),
+            note: input.note || null,
             grossPay: this.money(totals.grossPay),
             netPay: this.money(totals.netPay),
             status: "CALCULATED",
           },
         });
+
+        const existingAdjustments = Array.isArray(input.adjustments) ? input.adjustments : [];
+        if (existingAdjustments.length) {
+          await tx.payrollAdjustment.createMany({
+            data: existingAdjustments.map((adjustment: any) => ({
+              payrollLineId: line.id,
+              type: adjustment.type,
+              amount: adjustment.amount,
+              reason: adjustment.reason || null,
+              createdById: adjustment.createdById || null,
+              createdByName: adjustment.createdByName || null,
+              createdAt: adjustment.createdAt,
+            })),
+          });
+        }
 
         if (validOrders.length) {
           await tx.payrollOrderLink.createMany({
@@ -1237,7 +1267,7 @@ export class PayrollService {
       acc.totalRows += 1;
       if (row.matched) acc.matchedRows += 1;
       else acc.unmatchedRows += 1;
-      acc.totalHours += this.toNumber(row.normalHours) + this.toNumber(row.overtimeHours) + this.toNumber(row.holidayHours);
+      acc.totalHours += this.toNumber(row.normalHours) + this.toNumber(row.overtimeHours) + this.toNumber(row.holidayHours) + this.toNumber(row.overtime3Hours) + this.toNumber(row.overtime4Hours);
       acc.totalLateMinutes += Number(row.lateMinutes || 0);
       acc.totalEarlyMinutes += Number(row.earlyMinutes || 0);
       if (["WARNING", "CRITICAL"].includes(String(row.warningLevel || "").toUpperCase())) acc.warningRows += 1;
@@ -1269,15 +1299,51 @@ export class PayrollService {
     let totalLateMinutes = 0;
     let totalEarlyMinutes = 0;
 
+    // Một nhân viên có thể xuất hiện nhiều dòng do chấm công ở nhiều chi nhánh.
+    // Cộng dồn theo staffId trước khi cập nhật để dòng sau không ghi đè dòng trước.
+    const rowsByStaff = new Map<string, any>();
     for (const row of rows) {
       const staffId = String(row.staffId || "").trim();
       const line = staffId ? lineByStaff.get(staffId) : null;
       if (!line) { unmatchedRows += 1; continue; }
-      const warning = this.attendanceWarning(row, settings);
       matchedRows += 1;
-      totalHours += this.toNumber(row.normalHours) + this.toNumber(row.overtimeHours) + this.toNumber(row.holidayHours);
+      totalHours += this.toNumber(row.normalHours) + this.toNumber(row.overtimeHours) + this.toNumber(row.holidayHours) + this.toNumber(row.overtime3Hours) + this.toNumber(row.overtime4Hours);
       totalLateMinutes += Number(row.lateMinutes || 0);
       totalEarlyMinutes += Number(row.earlyMinutes || 0);
+
+      const current = rowsByStaff.get(staffId) || {
+        ...row,
+        staffId,
+        normalHours: 0,
+        overtimeHours: 0,
+        holidayHours: 0,
+        overtime3Hours: 0,
+        overtime4Hours: 0,
+        lateCount: 0,
+        lateMinutes: 0,
+        earlyCount: 0,
+        earlyMinutes: 0,
+        staffNames: new Set<string>(),
+        branchNames: new Set<string>(),
+      };
+      current.normalHours += this.toNumber(row.normalHours);
+      current.overtimeHours += this.toNumber(row.overtimeHours);
+      current.holidayHours += this.toNumber(row.holidayHours);
+      current.overtime3Hours += this.toNumber(row.overtime3Hours);
+      current.overtime4Hours += this.toNumber(row.overtime4Hours);
+      current.lateCount += Number(row.lateCount || 0);
+      current.lateMinutes += Number(row.lateMinutes || 0);
+      current.earlyCount += Number(row.earlyCount || 0);
+      current.earlyMinutes += Number(row.earlyMinutes || 0);
+      if (row.staffName) current.staffNames.add(String(row.staffName));
+      if (row.branchName) current.branchNames.add(String(row.branchName));
+      rowsByStaff.set(staffId, current);
+    }
+
+    for (const [staffId, row] of rowsByStaff.entries()) {
+      const line = lineByStaff.get(staffId);
+      if (!line) continue;
+      const warning = this.attendanceWarning(row, settings);
       if (body?.saveMappings !== false && row.attendanceCode) {
         const existingConfig = await this.prisma.payrollConfig.findFirst({
           where: { staffId, isActive: true, OR: [{ branchId: line.branchId }, { branchId: null }] },
@@ -1293,11 +1359,13 @@ export class PayrollService {
         overtimeHours: row.overtimeHours,
         overtimeRate: row.overtimeRate || line.overtimeRate || 1,
         holidayHours: row.holidayHours,
+        overtime3Hours: row.overtime3Hours,
+        overtime4Hours: row.overtime4Hours,
         holidayRate: row.holidayRate || line.holidayRate || 2,
         hourlyRate: row.hourlyRate || line.hourlyRate || 0,
         attendanceCode: row.attendanceCode,
         attendanceMatchedBy: row.matchedBy || null,
-        attendanceRawName: row.staffName || row.attendanceRawName || null,
+        attendanceRawName: Array.from(row.staffNames || []).join(" / ") || row.staffName || row.attendanceRawName || null,
         attendanceSourceFile: body.fileName || row.fileName || null,
         attendanceImportedAt: now,
         lateCount: row.lateCount || 0,
@@ -1384,8 +1452,6 @@ export class PayrollService {
         NOT: { note: { contains: "[SALARY_13]" } },
       },
     };
-    if (period.branchId) historyWhere.branchId = period.branchId;
-
     const history = await this.prisma.payrollLine.findMany({
       where: historyWhere,
       include: { period: { select: { fromDate: true } } },
@@ -1660,13 +1726,17 @@ export class PayrollService {
     }
     const amount = Math.max(0, this.toNumber(body.amount));
     if (amount <= 0) throw new BadRequestException("Số tiền điều chỉnh phải lớn hơn 0.");
+    const reason = String(body.reason || "").trim();
+    if (["BONUS", "ALLOWANCE"].includes(type) && !reason) {
+      throw new BadRequestException("Cần nhập lý do thưởng hoặc phụ cấp.");
+    }
 
     await this.prisma.payrollAdjustment.create({
       data: {
         payrollLineId: id,
         type,
         amount: this.money(amount),
-        reason: body.reason || null,
+        reason: reason || null,
         createdById: user?.id || null,
         createdByName: this.userName(user),
       },
