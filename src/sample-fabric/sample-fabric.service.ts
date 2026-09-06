@@ -111,9 +111,22 @@ export class SampleFabricService {
 
   private async nextFabricSupplierCode(name: any) {
     const initial = this.supplierInitial(name);
-    for (let index = 1; index < 100000; index += 1) {
-      const code = `${String(index).padStart(3, "0")}-${initial}`;
-      const exists = await this.prisma.fabricSupplier.findUnique({ where: { code }, select: { id: true } });
+    const rows = await this.prisma.fabricSupplier.findMany({
+      select: { code: true },
+    });
+    const maxSequence = rows.reduce((max, row) => {
+      const match = String(row.code || "").trim().toUpperCase().match(/^(\d+)-[A-Z0-9]$/);
+      if (!match) return max;
+      const value = Number(match[1]);
+      return Number.isInteger(value) && value > max ? value : max;
+    }, 0);
+
+    for (let sequence = maxSequence + 1; sequence < 1000000; sequence += 1) {
+      const code = `${String(sequence).padStart(3, "0")}-${initial}`;
+      const exists = await this.prisma.fabricSupplier.findUnique({
+        where: { code },
+        select: { id: true },
+      });
       if (!exists) return code;
     }
     throw new BadRequestException("Không thể sinh mã nhà cung cấp vải.");
@@ -123,11 +136,20 @@ export class SampleFabricService {
     const rows = await this.prisma.fabricSupplier.findMany({
       where: { isActive: true },
       select: { id: true, code: true, name: true },
-      orderBy: { name: "asc" },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     });
+
+    const usedSequences = new Set<number>();
     for (const row of rows) {
-      if (/^\d{3}-[A-Z0-9]$/.test(String(row.code || ""))) continue;
+      const match = String(row.code || "").trim().toUpperCase().match(/^(\d+)-[A-Z0-9]$/);
+      const sequence = match ? Number(match[1]) : 0;
+      if (sequence > 0 && !usedSequences.has(sequence)) {
+        usedSequences.add(sequence);
+        continue;
+      }
       const code = await this.nextFabricSupplierCode(row.name);
+      const nextMatch = code.match(/^(\d+)-/);
+      if (nextMatch) usedSequences.add(Number(nextMatch[1]));
       await this.prisma.fabricSupplier.update({ where: { id: row.id }, data: { code } });
     }
   }
@@ -1088,8 +1110,10 @@ export class SampleFabricService {
           where: { id },
           select: { status: true, priorityLane: true },
         });
-        const lane = String(body?.priorityLane || current?.priorityLane || (String(current?.status || "IDEA")==="IDEA" ? "IDEA" : "DEPLOY"));
+        const expectedLane = String(current?.status || "IDEA") === "IDEA" ? "IDEA" : "DEPLOY";
+        const lane = String(body?.priorityLane || expectedLane);
         if (!["IDEA","DEPLOY"].includes(lane)) throw new BadRequestException("Nhóm STT không hợp lệ.");
+        if (lane !== expectedLane) throw new BadRequestException("STT không đúng nhóm Ý tưởng/Triển khai hiện tại của mẫu.");
         const occupied = await tx.designSample.findFirst({
           where: { priorityRank: rank, priorityLane: lane, id: { not: id } },
           select: { id: true, code: true, name: true },
@@ -1138,7 +1162,11 @@ export class SampleFabricService {
           ...(body?.fabricCode !== undefined || body?.fabricBoardId !== undefined ? { fabricCode: this.normalizeSampleCode(body?.fabricCode) || board?.fabricCode || null } : {}),
           ...(body?.fabricComposition !== undefined || body?.fabricBoardId !== undefined ? { fabricComposition: String(body?.fabricComposition || "").trim() || board?.composition || null } : {}),
           ...(body?.producedProductId !== undefined ? { producedProductId: body.producedProductId || null } : {}),
-          ...(body?.status !== undefined ? { status: nextStatus } : {}),
+          ...(body?.status !== undefined ? {
+            status: nextStatus,
+            priorityLane: nextStatus === "IDEA" ? "IDEA" : "DEPLOY",
+            ...(nextStatus !== current.status ? { priorityRank: null } : {}),
+          } : {}),
           ...(body?.assigneeStaffId !== undefined ? { assigneeStaffId: body.assigneeStaffId || null } : {}),
           ...(body?.assigneeName !== undefined ? { assigneeName: body.assigneeName || null } : {}),
           ...(body?.nextAction !== undefined ? { nextAction: body.nextAction || null } : {}),
