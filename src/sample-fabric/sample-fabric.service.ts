@@ -1439,7 +1439,7 @@ export class SampleFabricService {
         measurements: { orderBy: { createdAt: "desc" } },
         images: { orderBy: { createdAt: "desc" } },
       },
-      orderBy: { updatedAt: "desc" },
+      orderBy: { createdAt: "desc" },
     });
     return rows.map((row: any) => this.receiptForUser(row, user));
   }

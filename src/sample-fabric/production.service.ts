@@ -268,11 +268,13 @@ export class ProductionService {
       .map((r: any) => {
         const sum: any = used.get(r.id) || {};
         const own: any = current.get(r.id) || {};
-        const actualM = Number(r.actualM || 0);
-        const actualKg = Number(r.actualKg || 0);
+        const supplierDeclaredM = Number(r.supplierDeclaredM || 0);
+        const supplierDeclaredKg = Number(r.supplierDeclaredKg || 0);
+        const actualM = Number(r.actualM || 0); // chỉ dùng kiểm tra / quy đổi tương đối
+        const actualKg = Number(r.actualKg || 0); // kg cân thực tế
         const usedOtherM = Math.max(0, Number(sum.allocatedM || 0) - Number(own.allocatedM || 0));
         const usedOtherKg = Math.max(0, Number(sum.allocatedKg || 0) - Number(own.allocatedKg || 0));
-        const remainingM = Math.max(0, actualM - usedOtherM);
+        const remainingM = Math.max(0, supplierDeclaredM - usedOtherM);
         const remainingKg = Math.max(0, actualKg - usedOtherKg);
         const row = {
           id: r.id,
@@ -284,14 +286,17 @@ export class ProductionService {
           rollCode: r.rollCode,
           colorName: r.colorName || r.fabricReceipt?.colorName || null,
           colorCode: this.normalizeColorCode(r.colorCode || r.fabricReceipt?.colorCode),
+          supplierDeclaredM,
+          supplierDeclaredKg,
           actualM,
           actualKg,
+          inventoryM: supplierDeclaredM,
           usedOtherM,
           usedOtherKg,
           remainingM,
           remainingKg,
-          isDepleted: actualM > 0 && remainingM <= 0.0001,
-          missingActual: actualM <= 0,
+          isDepleted: supplierDeclaredM > 0 && remainingM <= 0.0001,
+          missingActual: supplierDeclaredM <= 0,
           imageUrl: r.images?.[0]?.url || null,
         };
         return row;
@@ -1051,14 +1056,14 @@ export class ProductionService {
             const r: any = src.find((y: any) => y.id === x.fabricReceiptRollId);
             if (!r) throw new BadRequestException("Cây vải không tồn tại.");
             const used: any = usedMap.get(r.id) || {};
-            const availableM = Math.max(0, Number(r.actualM || 0) - Number(used.allocatedM || 0));
+            const availableM = Math.max(0, Number(r.supplierDeclaredM || 0) - Number(used.allocatedM || 0));
             const availableKg = Math.max(0, Number(r.actualKg || 0) - Number(used.allocatedKg || 0));
             const allocatedM = Number(this.n(x.allocatedM) ?? availableM);
             const allocatedKg = Number(this.n(x.allocatedKg) ?? Math.min(Number(r.actualKg || 0), availableKg));
             if (allocatedM > availableM + 0.0001) {
               throw new BadRequestException(`Cây ${r.rollCode || r.id} chỉ còn ${availableM}m.`);
             }
-            if (allocatedM <= 0) throw new BadRequestException(`Cây ${r.rollCode || r.id} đã xuất hết hoặc chưa có mét thực nhận.`);
+            if (allocatedM <= 0) throw new BadRequestException(`Cây ${r.rollCode || r.id} đã xuất hết hoặc chưa có mét NCC để nhập kho.`);
             return {
               productionOrderId: id,
               fabricReceiptRollId: r.id,
@@ -1597,7 +1602,7 @@ export class ProductionService {
       const rate = Number(receipt.exchangeRateToVnd || 0);
       const code = String(roll.fabricCode || receipt.fabricCode || "").trim().toUpperCase();
       const priceUnit = String(roll.priceUnit || receipt.priceUnit || "METER").toUpperCase();
-      const fullM = Number(roll.actualM ?? roll.supplierDeclaredM ?? 0);
+      const fullM = Number(roll.supplierDeclaredM ?? roll.actualM ?? 0);
       const fullKg = Number(roll.actualKg ?? roll.supplierDeclaredKg ?? 0);
       const usedM = Number(allocation.allocatedM || 0);
       const usedKg = Number(allocation.allocatedKg || 0);
