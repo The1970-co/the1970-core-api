@@ -3050,6 +3050,7 @@ model DesignSample {
   producedProductId String?
   priorityRank      Int?
   priorityLane      String             @default("IDEA")
+  fabricSampleReceivedAt DateTime?
   status            DesignSampleStatus @default(IDEA)
   assigneeStaffId   String?
   assigneeName      String?
@@ -3081,6 +3082,8 @@ model DesignSample {
   fabricOrderItems     FabricOrderItem[]
 
   @@unique([priorityLane, priorityRank])
+  @@index([priorityLane])
+  @@index([fabricSampleReceivedAt])
   @@index([year])
   @@index([status])
   @@index([supplierId])

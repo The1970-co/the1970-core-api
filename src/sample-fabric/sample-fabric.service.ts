@@ -1178,6 +1178,7 @@ export class SampleFabricService {
         dueDate: body?.dueDate ? new Date(body.dueDate) : null,
         priorityRank: Number.isInteger(Number(body?.priorityRank)) && Number(body.priorityRank) > 0 ? Number(body.priorityRank) : null,
         priorityLane: String(body?.priorityLane || (String(body?.status || "IDEA")==="IDEA" ? "IDEA" : "DEPLOY")),
+        fabricSampleReceivedAt: body?.fabricSampleReceivedAt ? new Date(body.fabricSampleReceivedAt) : null,
         coverImageUrl: body?.coverImageUrl || images?.[0]?.url || null,
         note: body?.note || null,
         technicalNote: body?.technicalNote || null,
@@ -1243,10 +1244,10 @@ export class SampleFabricService {
           where: { id },
           select: { status: true, priorityLane: true },
         });
-        const expectedLane = String(current?.status || "IDEA") === "IDEA" ? "IDEA" : "DEPLOY";
+        const currentLane = String(current?.priorityLane || "");
+        const expectedLane = currentLane === "FABRIC_SAMPLE" ? "FABRIC_SAMPLE" : (String(current?.status || "IDEA") === "IDEA" ? "IDEA" : "DEPLOY");
         const lane = String(body?.priorityLane || expectedLane);
-        if (!["IDEA","DEPLOY"].includes(lane)) throw new BadRequestException("Nhóm STT không hợp lệ.");
-        if (lane !== expectedLane) throw new BadRequestException("STT không đúng nhóm Ý tưởng/Triển khai hiện tại của mẫu.");
+        if (!["IDEA","DEPLOY","FABRIC_SAMPLE"].includes(lane)) throw new BadRequestException("Nhóm STT không hợp lệ.");
         const occupied = await tx.designSample.findFirst({
           where: { priorityRank: rank, priorityLane: lane, id: { not: id } },
           select: { id: true, code: true, name: true },
@@ -1297,7 +1298,7 @@ export class SampleFabricService {
           ...(body?.producedProductId !== undefined ? { producedProductId: body.producedProductId || null } : {}),
           ...(body?.status !== undefined ? {
             status: nextStatus,
-            priorityLane: nextStatus === "IDEA" ? "IDEA" : "DEPLOY",
+            priorityLane: String(body?.priorityLane || current.priorityLane || "") === "FABRIC_SAMPLE" ? "FABRIC_SAMPLE" : (nextStatus === "IDEA" ? "IDEA" : "DEPLOY"),
             ...(nextStatus !== current.status ? { priorityRank: null } : {}),
           } : {}),
           ...(body?.assigneeStaffId !== undefined ? { assigneeStaffId: body.assigneeStaffId || null } : {}),
@@ -1308,6 +1309,7 @@ export class SampleFabricService {
             priorityRank: body.priorityRank === null || body.priorityRank === "" ? null : Number(body.priorityRank),
           } : {}),
           ...(body?.priorityLane !== undefined ? { priorityLane: String(body.priorityLane || "IDEA") } : {}),
+          ...(body?.fabricSampleReceivedAt !== undefined ? { fabricSampleReceivedAt: body.fabricSampleReceivedAt ? new Date(body.fabricSampleReceivedAt) : null } : {}),
           ...(body?.coverImageUrl !== undefined ? { coverImageUrl: body.coverImageUrl || null } : {}),
           ...(body?.note !== undefined ? { note: body.note || null } : {}),
           ...(body?.technicalNote !== undefined ? { technicalNote: body.technicalNote || null } : {}),
