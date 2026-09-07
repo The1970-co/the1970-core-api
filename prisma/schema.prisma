@@ -3077,6 +3077,7 @@ model DesignSample {
   sampleDispatches     FabricSampleDispatch[]
   measurementProfile   DesignSampleMeasurementProfile?
   ideaBoards           DesignSampleIdeaBoardItem[]
+  materialBoardItem    DesignSampleMaterialBoardItem?
   fabricOrderItems     FabricOrderItem[]
 
   @@unique([priorityLane, priorityRank])
@@ -3125,6 +3126,46 @@ model DesignSampleIdeaBoardItem {
   @@index([boardId, sortOrder])
   @@index([designSampleId])
 }
+
+// ============================================================
+// MATERIAL BOARDS / BẢNG CHẤT LIỆU TRIỂN KHAI MẪU
+// ============================================================
+// Mỗi mẫu chỉ nằm trong tối đa 1 bảng chất liệu.
+// priorityRank là STT ưu tiên SX riêng trong từng bảng,
+// độc lập với DesignSample.priorityRank / priorityLane.
+
+model DesignSampleMaterialBoard {
+  id            String   @id @default(cuid())
+  name          String   @unique
+  description   String?
+  sortOrder     Int      @default(0)
+  createdById   String?
+  createdByName String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  samples DesignSampleMaterialBoardItem[]
+
+  @@index([sortOrder, name])
+}
+
+model DesignSampleMaterialBoardItem {
+  id             String   @id @default(cuid())
+  boardId        String
+  designSampleId String   @unique
+  priorityRank   Int?
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  board        DesignSampleMaterialBoard @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  designSample DesignSample              @relation(fields: [designSampleId], references: [id], onDelete: Cascade)
+
+  @@unique([boardId, priorityRank])
+  @@index([boardId, sortOrder])
+  @@index([boardId, priorityRank])
+}
+
 
 // ============================================================
 // MEASUREMENT LIBRARY / BẢNG THÔNG SỐ MẪU

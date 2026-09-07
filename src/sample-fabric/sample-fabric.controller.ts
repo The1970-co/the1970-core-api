@@ -217,6 +217,36 @@ export class SampleFabricController {
     return this.service.setSampleIdeaBoards(id, body);
   }
 
+  @Get("samples/material-boards")
+  @RequirePermissions("design_sample.view")
+  listMaterialBoards() {
+    return this.service.listMaterialBoards();
+  }
+
+  @Post("samples/material-boards")
+  @RequirePermissions("design_sample.edit")
+  createMaterialBoard(@Body() body: any, @Req() req: any) {
+    return this.service.createMaterialBoard(body, req.user);
+  }
+
+  @Patch("samples/material-boards/:id")
+  @RequirePermissions("design_sample.edit")
+  updateMaterialBoard(@Param("id") id: string, @Body() body: any) {
+    return this.service.updateMaterialBoard(id, body);
+  }
+
+  @Delete("samples/material-boards/:id")
+  @RequirePermissions("design_sample.edit")
+  deleteMaterialBoard(@Param("id") id: string) {
+    return this.service.deleteMaterialBoard(id);
+  }
+
+  @Patch("samples/:id/material-board")
+  @RequirePermissions("design_sample.edit")
+  setSampleMaterialBoard(@Param("id") id: string, @Body() body: any) {
+    return this.service.setSampleMaterialBoard(id, body);
+  }
+
   @Get("samples/people")
   @RequirePermissions("design_sample.view")
   listSamplePeople() {

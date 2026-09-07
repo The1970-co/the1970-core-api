@@ -1,5 +1,35 @@
+-- CreateSchema
+CREATE SCHEMA IF NOT EXISTS "public";
+
+-- Enable pg_trgm for trigram indexes
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
 -- CreateEnum
-CREATE TYPE "PurchaseReceiptStatus" AS ENUM ('DRAFT', 'PAYMENT_REQUESTED', 'PARTIALLY_PAID', 'PAID', 'STOCK_IMPORTED', 'COMPLETED', 'CANCELLED');
+CREATE TYPE "ProductStatus" AS ENUM ('ACTIVE', 'INACTIVE', 'DRAFT');
+
+-- CreateEnum
+CREATE TYPE "VariantStatus" AS ENUM ('ACTIVE', 'INACTIVE');
+
+-- CreateEnum
+CREATE TYPE "UserRole" AS ENUM ('OWNER', 'MANAGER', 'STAFF', 'ADMIN');
+
+-- CreateEnum
+CREATE TYPE "InventoryMovementType" AS ENUM ('IMPORT', 'SALE', 'CANCEL', 'RETURN', 'ADJUSTMENT', 'RESERVE', 'RELEASE', 'TRANSFER_OUT', 'TRANSFER_IN', 'STOCKTAKE_ADJUST');
+
+-- CreateEnum
+CREATE TYPE "SalesChannel" AS ENUM ('VN_WEB', 'INTL_WEB', 'FACEBOOK_MANUAL', 'SHOWROOM', 'OTHER', 'POS');
+
+-- CreateEnum
+CREATE TYPE "OrderStatus" AS ENUM ('NEW', 'APPROVED', 'PACKING', 'SHIPPED', 'COMPLETED', 'CANCELLED');
+
+-- CreateEnum
+CREATE TYPE "PaymentStatus" AS ENUM ('UNPAID', 'PARTIAL', 'PAID', 'PENDING_COD', 'REFUNDED', 'FAILED');
+
+-- CreateEnum
+CREATE TYPE "FulfillmentStatus" AS ENUM ('UNFULFILLED', 'PROCESSING', 'PARTIAL', 'FULFILLED', 'RETURNED');
+
+-- CreateEnum
+CREATE TYPE "PurchaseReceiptStatus" AS ENUM ('DRAFT', 'STOCK_IMPORTED', 'COMPLETED', 'CANCELLED', 'PAYMENT_REQUESTED', 'PARTIALLY_PAID', 'PAID');
 
 -- CreateEnum
 CREATE TYPE "TransferStatus" AS ENUM ('DRAFT', 'COMPLETED', 'CANCELLED', 'PENDING', 'CONFIRMED', 'IN_TRANSIT');
@@ -73,177 +103,274 @@ CREATE TYPE "ProductionAccessoryUnit" AS ENUM ('PIECE', 'METER', 'ROLL', 'SET', 
 -- CreateEnum
 CREATE TYPE "WebsitePublishStatus" AS ENUM ('DRAFT', 'PUBLISHED', 'ARCHIVED');
 
--- AlterEnum
--- This migration adds more than one value to an enum.
--- With PostgreSQL versions 11 and earlier, this is not possible
--- in a single migration. This can be worked around by creating
--- multiple migrations, each migration adding only one value to
--- the enum.
+-- CreateTable
+CREATE TABLE "AdminUser" (
+    "id" TEXT NOT NULL,
+    "fullName" TEXT NOT NULL,
+    "email" TEXT NOT NULL,
+    "passwordHash" TEXT NOT NULL,
+    "role" "UserRole" NOT NULL DEFAULT 'STAFF',
+    "isActive" BOOLEAN NOT NULL DEFAULT true,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+    "totpEnabled" BOOLEAN NOT NULL DEFAULT false,
+    "totpSecret" TEXT,
 
+    CONSTRAINT "AdminUser_pkey" PRIMARY KEY ("id")
+);
 
-ALTER TYPE "InventoryMovementType" ADD VALUE 'TRANSFER_OUT';
-ALTER TYPE "InventoryMovementType" ADD VALUE 'TRANSFER_IN';
-ALTER TYPE "InventoryMovementType" ADD VALUE 'STOCKTAKE_ADJUST';
+-- CreateTable
+CREATE TABLE "Product" (
+    "id" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "slug" TEXT NOT NULL,
+    "category" TEXT,
+    "categoryId" TEXT,
+    "productType" TEXT,
+    "brand" TEXT,
+    "weight" DOUBLE PRECISION,
+    "imageUrl" TEXT,
+    "description" TEXT,
+    "status" "ProductStatus" NOT NULL DEFAULT 'DRAFT',
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
--- AlterEnum
-BEGIN;
-CREATE TYPE "OrderStatus_new" AS ENUM ('NEW', 'APPROVED', 'PACKING', 'SHIPPED', 'COMPLETED', 'CANCELLED');
-ALTER TABLE "public"."Order" ALTER COLUMN "orderStatus" DROP DEFAULT;
-ALTER TABLE "Order" ALTER COLUMN "status" TYPE "OrderStatus_new" USING ("status"::text::"OrderStatus_new");
-ALTER TYPE "OrderStatus" RENAME TO "OrderStatus_old";
-ALTER TYPE "OrderStatus_new" RENAME TO "OrderStatus";
-DROP TYPE "public"."OrderStatus_old";
-COMMIT;
+    CONSTRAINT "Product_pkey" PRIMARY KEY ("id")
+);
 
--- AlterEnum
-BEGIN;
-CREATE TYPE "PaymentStatus_new" AS ENUM ('UNPAID', 'PARTIAL', 'PAID', 'PENDING_COD', 'REFUNDED', 'FAILED');
-ALTER TABLE "public"."Order" ALTER COLUMN "paymentStatus" DROP DEFAULT;
-ALTER TABLE "public"."Payment" ALTER COLUMN "status" DROP DEFAULT;
-ALTER TABLE "Order" ALTER COLUMN "paymentStatus" TYPE "PaymentStatus_new" USING ("paymentStatus"::text::"PaymentStatus_new");
-ALTER TABLE "Payment" ALTER COLUMN "status" TYPE "PaymentStatus_new" USING ("status"::text::"PaymentStatus_new");
-ALTER TYPE "PaymentStatus" RENAME TO "PaymentStatus_old";
-ALTER TYPE "PaymentStatus_new" RENAME TO "PaymentStatus";
-DROP TYPE "public"."PaymentStatus_old";
-ALTER TABLE "Order" ALTER COLUMN "paymentStatus" SET DEFAULT 'UNPAID';
-ALTER TABLE "Payment" ALTER COLUMN "status" SET DEFAULT 'UNPAID';
-COMMIT;
+-- CreateTable
+CREATE TABLE "ProductVariant" (
+    "id" TEXT NOT NULL,
+    "productId" TEXT NOT NULL,
+    "sku" TEXT NOT NULL,
+    "color" TEXT,
+    "size" TEXT,
+    "price" DECIMAL(14,2) NOT NULL,
+    "compareAtPrice" DECIMAL(14,2),
+    "costPrice" DECIMAL(14,2),
+    "imageUrl" TEXT,
+    "status" "VariantStatus" NOT NULL DEFAULT 'ACTIVE',
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+    "variantName" TEXT,
 
--- AlterEnum
-ALTER TYPE "SalesChannel" ADD VALUE 'POS';
+    CONSTRAINT "ProductVariant_pkey" PRIMARY KEY ("id")
+);
 
--- AlterEnum
-ALTER TYPE "UserRole" ADD VALUE 'ADMIN';
+-- CreateTable
+CREATE TABLE "InventoryItem" (
+    "id" TEXT NOT NULL,
+    "variantId" TEXT NOT NULL,
+    "branchId" TEXT NOT NULL,
+    "availableQty" INTEGER NOT NULL DEFAULT 0,
+    "reservedQty" INTEGER NOT NULL DEFAULT 0,
+    "incomingQty" INTEGER NOT NULL DEFAULT 0,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
--- DropIndex
-DROP INDEX "InventoryItem_variantId_key";
+    CONSTRAINT "InventoryItem_pkey" PRIMARY KEY ("id")
+);
 
--- AlterTable
-ALTER TABLE "AdminUser" ADD COLUMN     "totpEnabled" BOOLEAN NOT NULL DEFAULT false,
-ADD COLUMN     "totpSecret" TEXT;
+-- CreateTable
+CREATE TABLE "InventoryMovement" (
+    "id" TEXT NOT NULL,
+    "variantId" TEXT NOT NULL,
+    "type" "InventoryMovementType" NOT NULL,
+    "qty" INTEGER NOT NULL,
+    "note" TEXT,
+    "refType" TEXT,
+    "refId" TEXT,
+    "createdById" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "branchId" TEXT NOT NULL,
+    "afterQty" INTEGER,
+    "beforeQty" INTEGER,
 
--- AlterTable
-ALTER TABLE "Customer" ADD COLUMN     "birthDate" TIMESTAMP(3),
-ADD COLUMN     "customerGroup" TEXT,
-ADD COLUMN     "customerNote" TEXT,
-ADD COLUMN     "defaultDiscountPercent" DECIMAL(5,2),
-ADD COLUMN     "gender" TEXT,
-ADD COLUMN     "lastImportedAt" TIMESTAMP(3),
-ADD COLUMN     "lastImportedSource" TEXT,
-ADD COLUMN     "legacyCode" TEXT,
-ADD COLUMN     "points" INTEGER NOT NULL DEFAULT 0,
-ADD COLUMN     "pricePolicyName" TEXT;
+    CONSTRAINT "InventoryMovement_pkey" PRIMARY KEY ("id")
+);
 
--- AlterTable
-ALTER TABLE "CustomerAddress" ADD COLUMN     "email" TEXT,
-ADD COLUMN     "ghnDistrictId" INTEGER,
-ADD COLUMN     "ghnWardCode" TEXT,
-ADD COLUMN     "ghnWardIdV2" TEXT;
+-- CreateTable
+CREATE TABLE "Customer" (
+    "id" TEXT NOT NULL,
+    "legacyCode" TEXT,
+    "fullName" TEXT NOT NULL,
+    "phone" TEXT,
+    "email" TEXT,
+    "source" TEXT,
+    "customerGroup" TEXT,
+    "gender" TEXT,
+    "birthDate" TIMESTAMP(3),
+    "points" INTEGER NOT NULL DEFAULT 0,
+    "totalOrders" INTEGER NOT NULL DEFAULT 0,
+    "totalSpent" DECIMAL(14,2) NOT NULL DEFAULT 0,
+    "lastOrderAt" TIMESTAMP(3),
+    "defaultDiscountPercent" DECIMAL(5,2),
+    "pricePolicyName" TEXT,
+    "customerNote" TEXT,
+    "lastImportedAt" TIMESTAMP(3),
+    "lastImportedSource" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
--- AlterTable
-ALTER TABLE "InventoryItem" ADD COLUMN     "branchId" TEXT NOT NULL;
+    CONSTRAINT "Customer_pkey" PRIMARY KEY ("id")
+);
 
--- AlterTable
-ALTER TABLE "InventoryMovement" ADD COLUMN     "afterQty" INTEGER,
-ADD COLUMN     "beforeQty" INTEGER,
-ADD COLUMN     "branchId" TEXT NOT NULL;
+-- CreateTable
+CREATE TABLE "CustomerAddress" (
+    "id" TEXT NOT NULL,
+    "customerId" TEXT NOT NULL,
+    "label" TEXT,
+    "recipientName" TEXT,
+    "phone" TEXT,
+    "email" TEXT,
+    "addressLine1" TEXT NOT NULL,
+    "addressLine2" TEXT,
+    "ward" TEXT,
+    "district" TEXT,
+    "city" TEXT,
+    "province" TEXT,
+    "country" TEXT DEFAULT 'Vietnam',
+    "postalCode" TEXT,
+    "isDefault" BOOLEAN NOT NULL DEFAULT false,
+    "ghnDistrictId" INTEGER,
+    "ghnWardCode" TEXT,
+    "ghnWardIdV2" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
--- AlterTable
-ALTER TABLE "Order" DROP COLUMN "discountTotal",
-DROP COLUMN "grandTotal",
-DROP COLUMN "orderStatus",
-DROP COLUMN "subtotal",
-ADD COLUMN     "assignedStaffId" TEXT,
-ADD COLUMN     "assignedStaffName" TEXT,
-ADD COLUMN     "billingAddressLabel" TEXT,
-ADD COLUMN     "billingAddressLine1" TEXT,
-ADD COLUMN     "billingAddressLine2" TEXT,
-ADD COLUMN     "billingCity" TEXT,
-ADD COLUMN     "billingCountry" TEXT,
-ADD COLUMN     "billingDistrict" TEXT,
-ADD COLUMN     "billingEmail" TEXT,
-ADD COLUMN     "billingPhone" TEXT,
-ADD COLUMN     "billingPostalCode" TEXT,
-ADD COLUMN     "billingProvince" TEXT,
-ADD COLUMN     "billingRecipientName" TEXT,
-ADD COLUMN     "billingWard" TEXT,
-ADD COLUMN     "branchId" TEXT,
-ADD COLUMN     "createdByStaffId" TEXT,
-ADD COLUMN     "createdByStaffName" TEXT,
-ADD COLUMN     "customerAddressId" TEXT,
-ADD COLUMN     "customerName" TEXT,
-ADD COLUMN     "customerPhone" TEXT,
-ADD COLUMN     "discountAmount" DECIMAL(14,2) NOT NULL DEFAULT 0,
-ADD COLUMN     "finalAmount" DECIMAL(14,2) NOT NULL DEFAULT 0,
-ADD COLUMN     "isPartialDelivery" BOOLEAN NOT NULL DEFAULT false,
-ADD COLUMN     "omniConversationId" TEXT,
-ADD COLUMN     "partialReason" TEXT,
-ADD COLUMN     "quickOrderRequestId" TEXT,
-ADD COLUMN     "shippingAddressLabel" TEXT,
-ADD COLUMN     "shippingAddressLine1" TEXT,
-ADD COLUMN     "shippingAddressLine2" TEXT,
-ADD COLUMN     "shippingCity" TEXT,
-ADD COLUMN     "shippingCountry" TEXT,
-ADD COLUMN     "shippingDistrict" TEXT,
-ADD COLUMN     "shippingEmail" TEXT,
-ADD COLUMN     "shippingGhnDistrictId" INTEGER,
-ADD COLUMN     "shippingGhnWardCode" TEXT,
-ADD COLUMN     "shippingGhnWardIdV2" TEXT,
-ADD COLUMN     "shippingPhone" TEXT,
-ADD COLUMN     "shippingPostalCode" TEXT,
-ADD COLUMN     "shippingProvince" TEXT,
-ADD COLUMN     "shippingRecipientName" TEXT,
-ADD COLUMN     "shippingWard" TEXT,
-ADD COLUMN     "soldAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-ADD COLUMN     "source" TEXT,
-ADD COLUMN     "status" "OrderStatus" NOT NULL DEFAULT 'NEW',
-ADD COLUMN     "totalAmount" DECIMAL(14,2) NOT NULL DEFAULT 0,
-ALTER COLUMN "paymentStatus" SET DEFAULT 'UNPAID';
+    CONSTRAINT "CustomerAddress_pkey" PRIMARY KEY ("id")
+);
 
--- AlterTable
-ALTER TABLE "Payment" ADD COLUMN     "paymentSourceId" TEXT,
-ALTER COLUMN "status" SET DEFAULT 'UNPAID';
+-- CreateTable
+CREATE TABLE "Order" (
+    "id" TEXT NOT NULL,
+    "orderCode" TEXT NOT NULL,
+    "salesChannel" "SalesChannel" NOT NULL,
+    "customerId" TEXT,
+    "customerName" TEXT,
+    "customerPhone" TEXT,
+    "branchId" TEXT,
+    "currency" TEXT NOT NULL DEFAULT 'VND',
+    "totalAmount" DECIMAL(14,2) NOT NULL DEFAULT 0,
+    "discountAmount" DECIMAL(14,2) NOT NULL DEFAULT 0,
+    "shippingFee" DECIMAL(14,2) NOT NULL DEFAULT 0,
+    "finalAmount" DECIMAL(14,2) NOT NULL DEFAULT 0,
+    "paymentStatus" "PaymentStatus" NOT NULL DEFAULT 'UNPAID',
+    "fulfillmentStatus" "FulfillmentStatus" NOT NULL DEFAULT 'UNFULFILLED',
+    "status" "OrderStatus" NOT NULL DEFAULT 'NEW',
+    "note" TEXT,
+    "source" TEXT,
+    "customerAddressId" TEXT,
+    "shippingRecipientName" TEXT,
+    "shippingPhone" TEXT,
+    "shippingEmail" TEXT,
+    "shippingAddressLabel" TEXT,
+    "shippingAddressLine1" TEXT,
+    "shippingAddressLine2" TEXT,
+    "shippingWard" TEXT,
+    "shippingDistrict" TEXT,
+    "shippingCity" TEXT,
+    "shippingProvince" TEXT,
+    "shippingCountry" TEXT,
+    "shippingPostalCode" TEXT,
+    "shippingGhnDistrictId" INTEGER,
+    "shippingGhnWardCode" TEXT,
+    "shippingGhnWardIdV2" TEXT,
+    "billingRecipientName" TEXT,
+    "billingPhone" TEXT,
+    "billingEmail" TEXT,
+    "billingAddressLabel" TEXT,
+    "billingAddressLine1" TEXT,
+    "billingAddressLine2" TEXT,
+    "billingWard" TEXT,
+    "billingDistrict" TEXT,
+    "billingCity" TEXT,
+    "billingProvince" TEXT,
+    "billingCountry" TEXT,
+    "billingPostalCode" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+    "isPartialDelivery" BOOLEAN NOT NULL DEFAULT false,
+    "partialReason" TEXT,
+    "createdByStaffId" TEXT,
+    "createdByStaffName" TEXT,
+    "soldAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "assignedStaffId" TEXT,
+    "assignedStaffName" TEXT,
+    "omniConversationId" TEXT,
+    "quickOrderRequestId" TEXT,
 
--- AlterTable
-ALTER TABLE "Product" ADD COLUMN     "categoryId" TEXT,
-ADD COLUMN     "imageUrl" TEXT,
-ADD COLUMN     "productType" TEXT,
-ADD COLUMN     "weight" DOUBLE PRECISION,
-ALTER COLUMN "brand" DROP DEFAULT;
+    CONSTRAINT "Order_pkey" PRIMARY KEY ("id")
+);
 
--- AlterTable
-ALTER TABLE "ProductVariant" DROP COLUMN "cost",
-DROP COLUMN "priceUsd",
-DROP COLUMN "priceVnd",
-DROP COLUMN "weightGram",
-ADD COLUMN     "compareAtPrice" DECIMAL(14,2),
-ADD COLUMN     "costPrice" DECIMAL(14,2),
-ADD COLUMN     "imageUrl" TEXT,
-ADD COLUMN     "price" DECIMAL(14,2) NOT NULL,
-ADD COLUMN     "variantName" TEXT;
+-- CreateTable
+CREATE TABLE "OrderItem" (
+    "id" TEXT NOT NULL,
+    "orderId" TEXT NOT NULL,
+    "variantId" TEXT,
+    "sku" TEXT NOT NULL,
+    "productName" TEXT NOT NULL,
+    "color" TEXT,
+    "size" TEXT,
+    "qty" INTEGER NOT NULL,
+    "unitPrice" DECIMAL(12,2) NOT NULL,
+    "lineTotal" DECIMAL(14,2) NOT NULL,
 
--- AlterTable
-ALTER TABLE "Shipment" ADD COLUMN     "ahamoveOrderId" TEXT,
-ADD COLUMN     "ahamoveRaw" JSONB,
-ADD COLUMN     "ahamoveStatus" TEXT,
-ADD COLUMN     "ahamoveSubStatus" TEXT,
-ADD COLUMN     "ahamoveTrackingUrl" TEXT,
-ADD COLUMN     "codReconciledAt" TIMESTAMP(3),
-ADD COLUMN     "codReconciliationAmount" INTEGER,
-ADD COLUMN     "codReconciliationBatchId" TEXT,
-ADD COLUMN     "codReconciliationIssue" TEXT,
-ADD COLUMN     "codReconciliationRowId" TEXT,
-ADD COLUMN     "codReconciliationStatus" TEXT DEFAULT 'NOT_RECONCILED',
-ADD COLUMN     "fromAddress" TEXT,
-ADD COLUMN     "fromName" TEXT,
-ADD COLUMN     "fromPhone" TEXT,
-ADD COLUMN     "lastSyncedAt" TIMESTAMP(3),
-ADD COLUMN     "metadata" JSONB,
-ADD COLUMN     "partnerStatus" TEXT,
-ADD COLUMN     "toAddress" TEXT,
-ADD COLUMN     "toName" TEXT,
-ADD COLUMN     "toPhone" TEXT,
-ADD COLUMN     "weight" INTEGER;
+    CONSTRAINT "OrderItem_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "Payment" (
+    "id" TEXT NOT NULL,
+    "orderId" TEXT NOT NULL,
+    "method" TEXT NOT NULL,
+    "amount" DECIMAL(14,2) NOT NULL,
+    "status" "PaymentStatus" NOT NULL DEFAULT 'UNPAID',
+    "paidAt" TIMESTAMP(3),
+    "transactionRef" TEXT,
+    "note" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+    "paymentSourceId" TEXT,
+
+    CONSTRAINT "Payment_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "Shipment" (
+    "id" TEXT NOT NULL,
+    "orderId" TEXT NOT NULL,
+    "carrier" TEXT NOT NULL,
+    "trackingCode" TEXT,
+    "shippingStatus" TEXT NOT NULL DEFAULT 'NOT_CREATED',
+    "codAmount" DECIMAL(14,2),
+    "shippingFee" DECIMAL(14,2),
+    "note" TEXT,
+    "metadata" JSONB,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+    "fromAddress" TEXT,
+    "fromName" TEXT,
+    "fromPhone" TEXT,
+    "lastSyncedAt" TIMESTAMP(3),
+    "partnerStatus" TEXT,
+    "toAddress" TEXT,
+    "toName" TEXT,
+    "toPhone" TEXT,
+    "weight" INTEGER,
+    "codReconciledAt" TIMESTAMP(3),
+    "codReconciliationAmount" INTEGER,
+    "codReconciliationBatchId" TEXT,
+    "codReconciliationIssue" TEXT,
+    "codReconciliationRowId" TEXT,
+    "codReconciliationStatus" TEXT DEFAULT 'NOT_RECONCILED',
+    "ahamoveOrderId" TEXT,
+    "ahamoveRaw" JSONB,
+    "ahamoveStatus" TEXT,
+    "ahamoveSubStatus" TEXT,
+    "ahamoveTrackingUrl" TEXT,
+
+    CONSTRAINT "Shipment_pkey" PRIMARY KEY ("id")
+);
 
 -- CreateTable
 CREATE TABLE "ShipmentTimelineEvent" (
@@ -298,26 +425,40 @@ CREATE TABLE "AhamoveShipment" (
 );
 
 -- CreateTable
+CREATE TABLE "AuditLog" (
+    "id" TEXT NOT NULL,
+    "userId" TEXT,
+    "action" TEXT NOT NULL,
+    "entity" TEXT NOT NULL,
+    "entityId" TEXT NOT NULL,
+    "oldValue" JSONB,
+    "newValue" JSONB,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "AuditLog_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
 CREATE TABLE "StaffUser" (
     "id" TEXT NOT NULL,
     "code" TEXT NOT NULL,
     "name" TEXT NOT NULL,
-    "username" TEXT,
-    "email" TEXT,
-    "phone" TEXT,
-    "address" TEXT,
-    "note" TEXT,
     "role" TEXT,
     "branchId" TEXT,
     "branchName" TEXT,
     "passwordHash" TEXT NOT NULL DEFAULT '',
-    "secondPasswordHash" TEXT,
-    "secondPasswordEnabled" BOOLEAN NOT NULL DEFAULT false,
     "isActive" BOOLEAN NOT NULL DEFAULT true,
-    "sessionVersion" INTEGER NOT NULL DEFAULT 1,
     "lastLoginAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "secondPasswordEnabled" BOOLEAN NOT NULL DEFAULT false,
+    "secondPasswordHash" TEXT,
+    "address" TEXT,
+    "email" TEXT,
+    "note" TEXT,
+    "phone" TEXT,
+    "username" TEXT,
+    "sessionVersion" INTEGER NOT NULL DEFAULT 1,
 
     CONSTRAINT "StaffUser_pkey" PRIMARY KEY ("id")
 );
@@ -370,8 +511,6 @@ CREATE TABLE "StaffBranchPermission" (
     "branchId" TEXT NOT NULL,
     "canView" BOOLEAN NOT NULL DEFAULT true,
     "canSell" BOOLEAN NOT NULL DEFAULT false,
-    "canViewOwnOrders" BOOLEAN NOT NULL DEFAULT false,
-    "canViewBranchOrders" BOOLEAN NOT NULL DEFAULT false,
     "canCreateOrder" BOOLEAN NOT NULL DEFAULT false,
     "canApproveOrder" BOOLEAN NOT NULL DEFAULT false,
     "canCancelOrder" BOOLEAN NOT NULL DEFAULT false,
@@ -383,19 +522,21 @@ CREATE TABLE "StaffBranchPermission" (
     "canReceiveStock" BOOLEAN NOT NULL DEFAULT false,
     "canViewCustomer" BOOLEAN NOT NULL DEFAULT false,
     "canEditCustomer" BOOLEAN NOT NULL DEFAULT false,
-    "canExportProductExcel" BOOLEAN NOT NULL DEFAULT false,
-    "canImportProductExcel" BOOLEAN NOT NULL DEFAULT false,
-    "canExportOrderExcel" BOOLEAN NOT NULL DEFAULT false,
-    "canExportInventoryExcel" BOOLEAN NOT NULL DEFAULT false,
-    "canExportCustomerExcel" BOOLEAN NOT NULL DEFAULT false,
-    "permissionKeys" TEXT[] DEFAULT ARRAY[]::TEXT[],
-    "extraPermissionKeys" TEXT[] DEFAULT ARRAY[]::TEXT[],
-    "deniedPermissionKeys" TEXT[] DEFAULT ARRAY[]::TEXT[],
     "canViewReport" BOOLEAN NOT NULL DEFAULT false,
     "canViewMoney" BOOLEAN NOT NULL DEFAULT false,
     "note" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "canViewBranchOrders" BOOLEAN NOT NULL DEFAULT false,
+    "canViewOwnOrders" BOOLEAN NOT NULL DEFAULT false,
+    "canExportCustomerExcel" BOOLEAN NOT NULL DEFAULT false,
+    "canExportInventoryExcel" BOOLEAN NOT NULL DEFAULT false,
+    "canExportOrderExcel" BOOLEAN NOT NULL DEFAULT false,
+    "canExportProductExcel" BOOLEAN NOT NULL DEFAULT false,
+    "canImportProductExcel" BOOLEAN NOT NULL DEFAULT false,
+    "permissionKeys" TEXT[] DEFAULT ARRAY[]::TEXT[],
+    "deniedPermissionKeys" TEXT[] DEFAULT ARRAY[]::TEXT[],
+    "extraPermissionKeys" TEXT[] DEFAULT ARRAY[]::TEXT[],
 
     CONSTRAINT "StaffBranchPermission_pkey" PRIMARY KEY ("id")
 );
@@ -405,11 +546,11 @@ CREATE TABLE "Branch" (
     "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "address" TEXT,
-    "phone" TEXT,
-    "email" TEXT,
     "isActive" BOOLEAN NOT NULL DEFAULT true,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "email" TEXT,
+    "phone" TEXT,
 
     CONSTRAINT "Branch_pkey" PRIMARY KEY ("id")
 );
@@ -639,28 +780,28 @@ CREATE TABLE "ShipmentCodAuthCode" (
 -- CreateTable
 CREATE TABLE "PartialDeliveryRecord" (
     "id" TEXT NOT NULL,
-    "code" TEXT,
     "orderId" TEXT NOT NULL,
     "orderCode" TEXT NOT NULL,
     "ghnTrackingCode" TEXT,
     "originalCod" DECIMAL(14,2) NOT NULL,
     "adjustedCod" DECIMAL(14,2) NOT NULL,
-    "shippingFee" DECIMAL(14,2) NOT NULL DEFAULT 0,
     "reason" TEXT,
     "approvedBy" TEXT,
     "approvedById" TEXT,
     "note" TEXT,
-    "handledAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
-    "returnOrderId" TEXT,
-    "returnOrderCode" TEXT,
-    "returnTrackingCode" TEXT,
-    "returnStatus" TEXT DEFAULT 'PENDING_RETURN',
     "returnReceivedAt" TIMESTAMP(3),
     "returnReceivedBy" TEXT,
-    "returnStockReceiptId" TEXT,
+    "returnStatus" TEXT DEFAULT 'PENDING_RETURN',
     "returnStockNote" TEXT,
+    "returnStockReceiptId" TEXT,
+    "code" TEXT,
+    "handledAt" TIMESTAMP(3),
+    "returnOrderCode" TEXT,
+    "returnOrderId" TEXT,
+    "returnTrackingCode" TEXT,
+    "shippingFee" DECIMAL(14,2) NOT NULL DEFAULT 0,
 
     CONSTRAINT "PartialDeliveryRecord_pkey" PRIMARY KEY ("id")
 );
@@ -670,18 +811,18 @@ CREATE TABLE "PartialDeliveryItem" (
     "id" TEXT NOT NULL,
     "recordId" TEXT NOT NULL,
     "orderItemId" TEXT,
-    "variantId" TEXT,
     "productName" TEXT NOT NULL,
     "sku" TEXT NOT NULL,
-    "color" TEXT,
-    "size" TEXT,
     "orderedQty" INTEGER NOT NULL,
     "deliveredQty" INTEGER NOT NULL,
-    "returnedQty" INTEGER NOT NULL DEFAULT 0,
-    "actionType" TEXT NOT NULL DEFAULT 'KEPT',
     "unitPrice" DECIMAL(14,2) NOT NULL,
     "lineTotal" DECIMAL(14,2) NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "actionType" TEXT NOT NULL DEFAULT 'KEPT',
+    "color" TEXT,
+    "returnedQty" INTEGER NOT NULL DEFAULT 0,
+    "size" TEXT,
+    "variantId" TEXT,
 
     CONSTRAINT "PartialDeliveryItem_pkey" PRIMARY KEY ("id")
 );
@@ -735,20 +876,20 @@ CREATE TABLE "GhnCodReconciliationBatch" (
     "transferFee" INTEGER NOT NULL DEFAULT 0,
     "netAmount" INTEGER NOT NULL DEFAULT 0,
     "parserMode" TEXT,
-    "sourceType" TEXT NOT NULL DEFAULT 'EXCEL',
-    "note" TEXT,
-    "status" TEXT NOT NULL DEFAULT 'DRAFT',
-    "savedAt" TIMESTAMP(3),
-    "savedById" TEXT,
-    "confirmedAt" TIMESTAMP(3),
-    "confirmedById" TEXT,
-    "paidAt" TIMESTAMP(3),
-    "paidById" TEXT,
-    "paymentSourceId" TEXT,
-    "paymentAmount" INTEGER NOT NULL DEFAULT 0,
-    "paymentNote" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "paymentAmount" INTEGER NOT NULL DEFAULT 0,
+    "sourceType" TEXT NOT NULL DEFAULT 'EXCEL',
+    "status" TEXT NOT NULL DEFAULT 'DRAFT',
+    "confirmedAt" TIMESTAMP(3),
+    "confirmedById" TEXT,
+    "note" TEXT,
+    "paidAt" TIMESTAMP(3),
+    "paidById" TEXT,
+    "paymentNote" TEXT,
+    "paymentSourceId" TEXT,
+    "savedAt" TIMESTAMP(3),
+    "savedById" TEXT,
 
     CONSTRAINT "GhnCodReconciliationBatch_pkey" PRIMARY KEY ("id")
 );
@@ -771,21 +912,21 @@ CREATE TABLE "GhnCodReconciliationRow" (
     "partialDeliveryRecordId" TEXT,
     "partialDeliveryAdjustedCod" INTEGER,
     "partialReturnReceived" BOOLEAN,
-    "inputCode" TEXT,
-    "sourceType" TEXT NOT NULL DEFAULT 'EXCEL',
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "actionStatus" TEXT NOT NULL DEFAULT 'DRAFT',
+    "paymentAmount" INTEGER NOT NULL DEFAULT 0,
+    "sourceType" TEXT NOT NULL DEFAULT 'EXCEL',
+    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "actionNote" TEXT,
-    "savedAt" TIMESTAMP(3),
-    "savedById" TEXT,
     "confirmedAt" TIMESTAMP(3),
     "confirmedById" TEXT,
+    "inputCode" TEXT,
     "paidAt" TIMESTAMP(3),
     "paidById" TEXT,
-    "paymentSourceId" TEXT,
-    "paymentAmount" INTEGER NOT NULL DEFAULT 0,
     "paymentNote" TEXT,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "paymentSourceId" TEXT,
+    "savedAt" TIMESTAMP(3),
+    "savedById" TEXT,
 
     CONSTRAINT "GhnCodReconciliationRow_pkey" PRIMARY KEY ("id")
 );
@@ -817,11 +958,11 @@ CREATE TABLE "StocktakeWorker" (
     "zone" TEXT,
     "deviceName" TEXT,
     "isActive" BOOLEAN NOT NULL DEFAULT true,
-    "status" TEXT NOT NULL DEFAULT 'IN_PROGRESS',
-    "startedAt" TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP,
-    "finishedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "finishedAt" TIMESTAMP(3),
+    "startedAt" TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP,
+    "status" TEXT NOT NULL DEFAULT 'IN_PROGRESS',
 
     CONSTRAINT "StocktakeWorker_pkey" PRIMARY KEY ("id")
 );
@@ -905,17 +1046,17 @@ CREATE TABLE "WarehouseShelf" (
 CREATE TABLE "ProductVariantLocation" (
     "id" TEXT NOT NULL,
     "variantId" TEXT NOT NULL,
-    "branchId" TEXT,
-    "areaId" TEXT,
     "rackId" TEXT,
     "shelfId" TEXT,
-    "minQty" INTEGER,
-    "maxQty" INTEGER,
+    "isPrimary" BOOLEAN NOT NULL DEFAULT false,
     "note" TEXT,
-    "isActive" BOOLEAN NOT NULL DEFAULT true,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
-    "isPrimary" BOOLEAN NOT NULL DEFAULT false,
+    "areaId" TEXT,
+    "branchId" TEXT,
+    "isActive" BOOLEAN NOT NULL DEFAULT true,
+    "maxQty" INTEGER,
+    "minQty" INTEGER,
 
     CONSTRAINT "ProductVariantLocation_pkey" PRIMARY KEY ("id")
 );
@@ -1088,31 +1229,31 @@ CREATE TABLE "ReturnExchange" (
     "originalOrderId" TEXT NOT NULL,
     "originalBranchId" TEXT,
     "originalStaffId" TEXT,
-    "originalStaffName" TEXT,
     "handledByStaffId" TEXT,
-    "handledByStaffName" TEXT,
     "handledAtBranchId" TEXT,
     "returnReceiveBranchId" TEXT,
-    "exchangeIssueBranchId" TEXT,
     "type" TEXT NOT NULL,
     "status" TEXT NOT NULL DEFAULT 'DRAFT',
-    "returnAmount" DECIMAL(14,2) NOT NULL DEFAULT 0,
-    "exchangeAmount" DECIMAL(14,2) NOT NULL DEFAULT 0,
-    "differenceAmount" DECIMAL(14,2) NOT NULL DEFAULT 0,
     "refundAmount" DECIMAL(14,2) NOT NULL DEFAULT 0,
     "extraChargeAmount" DECIMAL(14,2) NOT NULL DEFAULT 0,
     "refundPaymentSourceId" TEXT,
-    "extraChargePaymentSourceId" TEXT,
     "note" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
-    "shippingFee" DECIMAL(14,2) NOT NULL DEFAULT 0,
+    "differenceAmount" DECIMAL(14,2) NOT NULL DEFAULT 0,
+    "exchangeAmount" DECIMAL(14,2) NOT NULL DEFAULT 0,
+    "exchangeIssueBranchId" TEXT,
+    "extraChargePaymentSourceId" TEXT,
+    "handledByStaffName" TEXT,
+    "originalStaffName" TEXT,
+    "returnAmount" DECIMAL(14,2) NOT NULL DEFAULT 0,
     "customerPayableAmount" DECIMAL(14,2) NOT NULL DEFAULT 0,
-    "exchangeOrderId" TEXT,
+    "exchangeCarrier" TEXT,
     "exchangeOrderCode" TEXT,
+    "exchangeOrderId" TEXT,
     "exchangeShipmentId" TEXT,
     "exchangeTrackingCode" TEXT,
-    "exchangeCarrier" TEXT,
+    "shippingFee" DECIMAL(14,2) NOT NULL DEFAULT 0,
 
     CONSTRAINT "ReturnExchange_pkey" PRIMARY KEY ("id")
 );
@@ -1121,7 +1262,6 @@ CREATE TABLE "ReturnExchange" (
 CREATE TABLE "ReturnExchangeItem" (
     "id" TEXT NOT NULL,
     "returnExchangeId" TEXT NOT NULL,
-    "itemType" TEXT NOT NULL DEFAULT 'RETURN',
     "orderItemId" TEXT,
     "variantId" TEXT,
     "sku" TEXT,
@@ -1129,8 +1269,9 @@ CREATE TABLE "ReturnExchangeItem" (
     "qty" INTEGER NOT NULL,
     "unitPrice" DECIMAL(14,2) NOT NULL DEFAULT 0,
     "refundPrice" DECIMAL(14,2) NOT NULL DEFAULT 0,
-    "lineTotal" DECIMAL(14,2) NOT NULL DEFAULT 0,
     "reason" TEXT,
+    "itemType" TEXT NOT NULL DEFAULT 'RETURN',
+    "lineTotal" DECIMAL(14,2) NOT NULL DEFAULT 0,
 
     CONSTRAINT "ReturnExchangeItem_pkey" PRIMARY KEY ("id")
 );
@@ -1141,21 +1282,6 @@ CREATE TABLE "CashVoucher" (
     "code" TEXT NOT NULL,
     "direction" TEXT NOT NULL,
     "voucherType" TEXT NOT NULL,
-    "voucherCode" TEXT,
-    "type" TEXT,
-    "category" TEXT,
-    "title" TEXT,
-    "status" TEXT,
-    "partnerName" TEXT,
-    "partnerPhone" TEXT,
-    "createdById" TEXT,
-    "createdByName" TEXT,
-    "confirmedAt" TIMESTAMP(3),
-    "confirmedById" TEXT,
-    "confirmedByName" TEXT,
-    "cancelledAt" TIMESTAMP(3),
-    "cancelledById" TEXT,
-    "cancelledByName" TEXT,
     "amount" DECIMAL(14,2) NOT NULL DEFAULT 0,
     "paymentSourceId" TEXT,
     "branchId" TEXT,
@@ -1168,6 +1294,21 @@ CREATE TABLE "CashVoucher" (
     "note" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "voucherCode" TEXT,
+    "type" TEXT,
+    "status" TEXT,
+    "category" TEXT,
+    "title" TEXT,
+    "partnerName" TEXT,
+    "partnerPhone" TEXT,
+    "createdById" TEXT,
+    "createdByName" TEXT,
+    "confirmedById" TEXT,
+    "confirmedByName" TEXT,
+    "confirmedAt" TIMESTAMP(3),
+    "cancelledById" TEXT,
+    "cancelledByName" TEXT,
+    "cancelledAt" TIMESTAMP(3),
 
     CONSTRAINT "CashVoucher_pkey" PRIMARY KEY ("id")
 );
@@ -1310,16 +1451,6 @@ CREATE TABLE "PayrollPeriod" (
     "totalOrders" INTEGER NOT NULL DEFAULT 0,
     "totalItems" INTEGER NOT NULL DEFAULT 0,
     "totalRevenue" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "totalHourlyAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "totalTaggedProductAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "totalMealAllowance" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "totalInsuranceDeduction" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "totalGhnCodBonus" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "totalAttendanceWarnings" INTEGER NOT NULL DEFAULT 0,
-    "totalLateMinutes" INTEGER NOT NULL DEFAULT 0,
-    "totalEarlyMinutes" INTEGER NOT NULL DEFAULT 0,
-    "attendanceImportedAt" TIMESTAMP(3),
-    "attendanceImportFileName" TEXT,
     "totalGross" DECIMAL(18,2) NOT NULL DEFAULT 0,
     "totalNet" DECIMAL(18,2) NOT NULL DEFAULT 0,
     "totalPaid" DECIMAL(18,2) NOT NULL DEFAULT 0,
@@ -1334,6 +1465,16 @@ CREATE TABLE "PayrollPeriod" (
     "note" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "totalGhnCodBonus" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "totalHourlyAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "totalInsuranceDeduction" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "totalMealAllowance" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "totalTaggedProductAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "attendanceImportFileName" TEXT,
+    "attendanceImportedAt" TIMESTAMP(3),
+    "totalAttendanceWarnings" INTEGER NOT NULL DEFAULT 0,
+    "totalEarlyMinutes" INTEGER NOT NULL DEFAULT 0,
+    "totalLateMinutes" INTEGER NOT NULL DEFAULT 0,
 
     CONSTRAINT "PayrollPeriod_pkey" PRIMARY KEY ("id")
 );
@@ -1353,44 +1494,9 @@ CREATE TABLE "PayrollLine" (
     "workingDays" DECIMAL(8,2) NOT NULL DEFAULT 0,
     "standardDays" DECIMAL(8,2) NOT NULL DEFAULT 26,
     "proratedSalary" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "orderAttributionMode" TEXT NOT NULL DEFAULT 'ASSIGNED_OR_CREATOR',
     "successOrderCount" INTEGER NOT NULL DEFAULT 0,
     "successItemQty" INTEGER NOT NULL DEFAULT 0,
     "revenueAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "attendanceCode" TEXT,
-    "attendanceMatchedBy" TEXT,
-    "attendanceRawName" TEXT,
-    "attendanceSourceFile" TEXT,
-    "attendanceImportedAt" TIMESTAMP(3),
-    "lateCount" INTEGER NOT NULL DEFAULT 0,
-    "lateMinutes" INTEGER NOT NULL DEFAULT 0,
-    "earlyCount" INTEGER NOT NULL DEFAULT 0,
-    "earlyMinutes" INTEGER NOT NULL DEFAULT 0,
-    "attendanceWarningLevel" TEXT,
-    "attendanceWarningNote" TEXT,
-    "normalHours" DECIMAL(10,2) NOT NULL DEFAULT 0,
-    "overtimeHours" DECIMAL(10,2) NOT NULL DEFAULT 0,
-    "overtimeRate" DECIMAL(8,2) NOT NULL DEFAULT 1,
-    "holidayHours" DECIMAL(10,2) NOT NULL DEFAULT 0,
-    "overtime3Hours" DECIMAL(10,2) NOT NULL DEFAULT 0,
-    "overtime4Hours" DECIMAL(10,2) NOT NULL DEFAULT 0,
-    "holidayRate" DECIMAL(8,2) NOT NULL DEFAULT 2,
-    "convertedWorkingHours" DECIMAL(10,2) NOT NULL DEFAULT 0,
-    "hourlyRate" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "hourlyAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "overtimeAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "overtimeBreakdown" JSONB,
-    "paidLeaveDays" DECIMAL(8,2) NOT NULL DEFAULT 0,
-    "paidLeaveHoursPerDay" DECIMAL(8,2) NOT NULL DEFAULT 0,
-    "paidLeaveAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "mealAllowanceAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "insuranceDeduction" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "taggedProductQty" INTEGER NOT NULL DEFAULT 0,
-    "taggedProductRate" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "taggedProductAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "ghnCodOrderCount" INTEGER NOT NULL DEFAULT 0,
-    "ghnCodBonusPerOrder" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "ghnCodBonusAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
     "commissionByOrder" DECIMAL(18,2) NOT NULL DEFAULT 0,
     "commissionByItem" DECIMAL(18,2) NOT NULL DEFAULT 0,
     "commissionByPercent" DECIMAL(18,2) NOT NULL DEFAULT 0,
@@ -1411,6 +1517,41 @@ CREATE TABLE "PayrollLine" (
     "paymentVoucherId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "convertedWorkingHours" DECIMAL(10,2) NOT NULL DEFAULT 0,
+    "ghnCodBonusAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "ghnCodBonusPerOrder" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "ghnCodOrderCount" INTEGER NOT NULL DEFAULT 0,
+    "holidayHours" DECIMAL(10,2) NOT NULL DEFAULT 0,
+    "holidayRate" DECIMAL(8,2) NOT NULL DEFAULT 2,
+    "hourlyAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "hourlyRate" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "insuranceDeduction" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "mealAllowanceAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "normalHours" DECIMAL(10,2) NOT NULL DEFAULT 0,
+    "orderAttributionMode" TEXT NOT NULL DEFAULT 'ASSIGNED_OR_CREATOR',
+    "overtimeHours" DECIMAL(10,2) NOT NULL DEFAULT 0,
+    "overtimeRate" DECIMAL(8,2) NOT NULL DEFAULT 1,
+    "paidLeaveAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "paidLeaveDays" DECIMAL(8,2) NOT NULL DEFAULT 0,
+    "paidLeaveHoursPerDay" DECIMAL(8,2) NOT NULL DEFAULT 0,
+    "taggedProductAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "taggedProductQty" INTEGER NOT NULL DEFAULT 0,
+    "taggedProductRate" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "attendanceCode" TEXT,
+    "attendanceImportedAt" TIMESTAMP(3),
+    "attendanceMatchedBy" TEXT,
+    "attendanceRawName" TEXT,
+    "attendanceSourceFile" TEXT,
+    "attendanceWarningLevel" TEXT,
+    "attendanceWarningNote" TEXT,
+    "earlyCount" INTEGER NOT NULL DEFAULT 0,
+    "earlyMinutes" INTEGER NOT NULL DEFAULT 0,
+    "lateCount" INTEGER NOT NULL DEFAULT 0,
+    "lateMinutes" INTEGER NOT NULL DEFAULT 0,
+    "overtime3Hours" DECIMAL(10,2) NOT NULL DEFAULT 0,
+    "overtime4Hours" DECIMAL(10,2) NOT NULL DEFAULT 0,
+    "overtimeAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "overtimeBreakdown" JSONB,
 
     CONSTRAINT "PayrollLine_pkey" PRIMARY KEY ("id")
 );
@@ -1431,11 +1572,11 @@ CREATE TABLE "PayrollOrderLink" (
     "commissionByItem" DECIMAL(18,2) NOT NULL DEFAULT 0,
     "commissionByPercent" DECIMAL(18,2) NOT NULL DEFAULT 0,
     "commissionTotal" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "reason" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "attributedStaffId" TEXT,
     "attributedStaffName" TEXT,
     "attributionSource" TEXT,
-    "reason" TEXT,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "PayrollOrderLink_pkey" PRIMARY KEY ("id")
 );
@@ -1448,35 +1589,16 @@ CREATE TABLE "PayrollConfig" (
     "staffName" TEXT,
     "branchId" TEXT,
     "branchName" TEXT,
-    "attendanceCode" TEXT,
-    "sourceTemplateId" TEXT,
     "salaryType" TEXT NOT NULL DEFAULT 'MONTHLY',
     "baseSalary" DECIMAL(18,2) NOT NULL DEFAULT 0,
     "dailyRate" DECIMAL(18,2) NOT NULL DEFAULT 0,
     "standardWorkingDays" DECIMAL(8,2) NOT NULL DEFAULT 26,
-    "orderAttributionMode" TEXT NOT NULL DEFAULT 'ASSIGNED_OR_CREATOR',
     "commissionPerOrderEnabled" BOOLEAN NOT NULL DEFAULT false,
     "commissionPerOrderAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
     "commissionPerItemEnabled" BOOLEAN NOT NULL DEFAULT false,
     "commissionPerItemAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
     "commissionPercentEnabled" BOOLEAN NOT NULL DEFAULT false,
     "commissionRate" DECIMAL(8,4) NOT NULL DEFAULT 0,
-    "hourlyEnabled" BOOLEAN NOT NULL DEFAULT false,
-    "hourlyRate" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "standardHoursPerDay" DECIMAL(8,2) NOT NULL DEFAULT 9.5,
-    "overtimeRate" DECIMAL(8,2) NOT NULL DEFAULT 1,
-    "holidayRate" DECIMAL(8,2) NOT NULL DEFAULT 2,
-    "overtimeConfigs" JSONB,
-    "paidLeaveEnabled" BOOLEAN NOT NULL DEFAULT false,
-    "paidLeaveHoursPerDay" DECIMAL(8,2) NOT NULL DEFAULT 9.5,
-    "mealAllowanceEnabled" BOOLEAN NOT NULL DEFAULT false,
-    "mealHoursPerUnit" DECIMAL(8,2) NOT NULL DEFAULT 9.5,
-    "mealAmountPerUnit" DECIMAL(18,2) NOT NULL DEFAULT 30000,
-    "insuranceDeductionAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "taggedProductEnabled" BOOLEAN NOT NULL DEFAULT false,
-    "taggedProductRate" DECIMAL(18,2) NOT NULL DEFAULT 0,
-    "ghnCodBonusEnabled" BOOLEAN NOT NULL DEFAULT false,
-    "ghnCodBonusPerOrder" DECIMAL(18,2) NOT NULL DEFAULT 0,
     "applyPos" BOOLEAN NOT NULL DEFAULT true,
     "applyOnline" BOOLEAN NOT NULL DEFAULT true,
     "applyFacebook" BOOLEAN NOT NULL DEFAULT true,
@@ -1488,6 +1610,25 @@ CREATE TABLE "PayrollConfig" (
     "isActive" BOOLEAN NOT NULL DEFAULT true,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "ghnCodBonusEnabled" BOOLEAN NOT NULL DEFAULT false,
+    "ghnCodBonusPerOrder" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "holidayRate" DECIMAL(8,2) NOT NULL DEFAULT 2,
+    "hourlyEnabled" BOOLEAN NOT NULL DEFAULT false,
+    "hourlyRate" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "insuranceDeductionAmount" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "mealAllowanceEnabled" BOOLEAN NOT NULL DEFAULT false,
+    "mealAmountPerUnit" DECIMAL(18,2) NOT NULL DEFAULT 30000,
+    "mealHoursPerUnit" DECIMAL(8,2) NOT NULL DEFAULT 9.5,
+    "orderAttributionMode" TEXT NOT NULL DEFAULT 'ASSIGNED_OR_CREATOR',
+    "overtimeRate" DECIMAL(8,2) NOT NULL DEFAULT 1,
+    "paidLeaveEnabled" BOOLEAN NOT NULL DEFAULT false,
+    "paidLeaveHoursPerDay" DECIMAL(8,2) NOT NULL DEFAULT 9.5,
+    "standardHoursPerDay" DECIMAL(8,2) NOT NULL DEFAULT 9.5,
+    "taggedProductEnabled" BOOLEAN NOT NULL DEFAULT false,
+    "taggedProductRate" DECIMAL(18,2) NOT NULL DEFAULT 0,
+    "attendanceCode" TEXT,
+    "overtimeConfigs" JSONB,
+    "sourceTemplateId" TEXT,
 
     CONSTRAINT "PayrollConfig_pkey" PRIMARY KEY ("id")
 );
@@ -1572,7 +1713,6 @@ CREATE TABLE "PayrollBranchConfigTemplate" (
     "standardHoursPerDay" DECIMAL(8,2) NOT NULL DEFAULT 9.5,
     "overtimeRate" DECIMAL(8,2) NOT NULL DEFAULT 1,
     "holidayRate" DECIMAL(8,2) NOT NULL DEFAULT 2,
-    "overtimeConfigs" JSONB,
     "paidLeaveEnabled" BOOLEAN NOT NULL DEFAULT false,
     "paidLeaveHoursPerDay" DECIMAL(8,2) NOT NULL DEFAULT 9.5,
     "mealAllowanceEnabled" BOOLEAN NOT NULL DEFAULT false,
@@ -1591,6 +1731,7 @@ CREATE TABLE "PayrollBranchConfigTemplate" (
     "note" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "overtimeConfigs" JSONB,
 
     CONSTRAINT "PayrollBranchConfigTemplate_pkey" PRIMARY KEY ("id")
 );
@@ -1807,19 +1948,19 @@ CREATE TABLE "OmniAssignmentSetting" (
     "shuffleEachRound" BOOLEAN NOT NULL DEFAULT true,
     "reassignUnreadEnabled" BOOLEAN NOT NULL DEFAULT false,
     "reassignAfterMinutes" INTEGER NOT NULL DEFAULT 10,
-    "morningQueueEnabled" BOOLEAN NOT NULL DEFAULT true,
-    "morningQueueInitialBatchSize" INTEGER NOT NULL DEFAULT 20,
-    "morningQueueRepeatIntervalMinutes" INTEGER NOT NULL DEFAULT 2,
-    "morningQueueRepeatBatchSize" INTEGER NOT NULL DEFAULT 3,
-    "morningQueueRunDate" TEXT,
-    "morningQueueInitialDone" BOOLEAN NOT NULL DEFAULT false,
-    "morningQueueLastRunAt" TIMESTAMP(3),
-    "morningQueueLastOnlineCount" INTEGER NOT NULL DEFAULT 0,
     "lastAssignedStaffId" TEXT,
     "updatedById" TEXT,
     "updatedByName" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "morningQueueEnabled" BOOLEAN NOT NULL DEFAULT true,
+    "morningQueueInitialBatchSize" INTEGER NOT NULL DEFAULT 20,
+    "morningQueueInitialDone" BOOLEAN NOT NULL DEFAULT false,
+    "morningQueueLastOnlineCount" INTEGER NOT NULL DEFAULT 0,
+    "morningQueueLastRunAt" TIMESTAMP(3),
+    "morningQueueRepeatBatchSize" INTEGER NOT NULL DEFAULT 3,
+    "morningQueueRepeatIntervalMinutes" INTEGER NOT NULL DEFAULT 2,
+    "morningQueueRunDate" TEXT,
 
     CONSTRAINT "OmniAssignmentSetting_pkey" PRIMARY KEY ("id")
 );
@@ -1912,25 +2053,25 @@ CREATE TABLE "OmniConversation" (
     "lastMessageText" TEXT,
     "lastMessageAt" TIMESTAMP(3),
     "unreadCount" INTEGER NOT NULL DEFAULT 0,
-    "referralSource" TEXT,
-    "referralType" TEXT,
-    "referralRef" TEXT,
-    "referralIdentifier" TEXT,
-    "adId" TEXT,
-    "adPostId" TEXT,
-    "adProductId" TEXT,
-    "adTitle" TEXT,
-    "adBody" TEXT,
-    "adImageUrl" TEXT,
-    "adVideoUrl" TEXT,
-    "adUrl" TEXT,
-    "adReferral" JSONB,
-    "adFirstSeenAt" TIMESTAMP(3),
     "lockedById" TEXT,
     "lockedAt" TIMESTAMP(3),
     "closedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "adBody" TEXT,
+    "adFirstSeenAt" TIMESTAMP(3),
+    "adId" TEXT,
+    "adImageUrl" TEXT,
+    "adPostId" TEXT,
+    "adProductId" TEXT,
+    "adReferral" JSONB,
+    "adTitle" TEXT,
+    "adUrl" TEXT,
+    "adVideoUrl" TEXT,
+    "referralIdentifier" TEXT,
+    "referralRef" TEXT,
+    "referralSource" TEXT,
+    "referralType" TEXT,
 
     CONSTRAINT "OmniConversation_pkey" PRIMARY KEY ("id")
 );
@@ -1997,11 +2138,11 @@ CREATE TABLE "OmniNoteTemplate" (
 CREATE TABLE "OmniConversationNote" (
     "id" TEXT NOT NULL,
     "conversationId" TEXT NOT NULL,
-    "templateId" TEXT,
     "staffId" TEXT,
     "staffName" TEXT,
     "note" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "templateId" TEXT,
 
     CONSTRAINT "OmniConversationNote_pkey" PRIMARY KEY ("id")
 );
@@ -2077,8 +2218,6 @@ CREATE TABLE "FabricBoard" (
     "name" TEXT,
     "composition" TEXT,
     "expectedGsm" DECIMAL(10,2),
-    "referencePriceVnd" DECIMAL(14,0),
-    "referencePriceUnit" TEXT NOT NULL DEFAULT 'METER',
     "seasons" TEXT[] DEFAULT ARRAY[]::TEXT[],
     "productGroups" TEXT[] DEFAULT ARRAY[]::TEXT[],
     "coverImageUrl" TEXT,
@@ -2088,6 +2227,8 @@ CREATE TABLE "FabricBoard" (
     "createdByName" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "referencePriceUnit" TEXT NOT NULL DEFAULT 'METER',
+    "referencePriceVnd" DECIMAL(14,0),
 
     CONSTRAINT "FabricBoard_pkey" PRIMARY KEY ("id")
 );
@@ -2169,8 +2310,6 @@ CREATE TABLE "FabricSampleDispatch" (
     "designSampleId" TEXT NOT NULL,
     "fabricBoardId" TEXT NOT NULL,
     "fabricColorId" TEXT,
-    "colorName" TEXT,
-    "colorCode" TEXT,
     "recipientName" TEXT NOT NULL,
     "recipientType" TEXT,
     "recipientContact" TEXT,
@@ -2183,6 +2322,8 @@ CREATE TABLE "FabricSampleDispatch" (
     "note" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "colorCode" TEXT,
+    "colorName" TEXT,
 
     CONSTRAINT "FabricSampleDispatch_pkey" PRIMARY KEY ("id")
 );
@@ -2212,20 +2353,6 @@ CREATE TABLE "DesignSample" (
     "supplierId" TEXT,
     "fabricBoardCode" TEXT,
     "fabricCode" TEXT,
-    "fabricComposition" TEXT,
-    "fabricBoardId" TEXT,
-    "fabricColorId" TEXT,
-    "fabricColorName" TEXT,
-    "fabricColorCode" TEXT,
-    "sampleFactoryId" TEXT,
-    "sampleFactoryName" TEXT,
-    "sampleMakerId" TEXT,
-    "sampleMakerName" TEXT,
-    "patternMakerId" TEXT,
-    "patternMakerName" TEXT,
-    "producedProductId" TEXT,
-    "priorityRank" INTEGER,
-    "priorityLane" TEXT NOT NULL DEFAULT 'IDEA',
     "status" "DesignSampleStatus" NOT NULL DEFAULT 'IDEA',
     "assigneeStaffId" TEXT,
     "assigneeName" TEXT,
@@ -2238,6 +2365,20 @@ CREATE TABLE "DesignSample" (
     "createdByName" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "fabricComposition" TEXT,
+    "fabricBoardId" TEXT,
+    "fabricColorId" TEXT,
+    "producedProductId" TEXT,
+    "fabricColorCode" TEXT,
+    "fabricColorName" TEXT,
+    "sampleFactoryId" TEXT,
+    "sampleFactoryName" TEXT,
+    "patternMakerId" TEXT,
+    "patternMakerName" TEXT,
+    "sampleMakerId" TEXT,
+    "sampleMakerName" TEXT,
+    "priorityRank" INTEGER,
+    "priorityLane" TEXT NOT NULL DEFAULT 'IDEA',
 
     CONSTRAINT "DesignSample_pkey" PRIMARY KEY ("id")
 );
@@ -2398,10 +2539,10 @@ CREATE TABLE "DesignSampleColor" (
 CREATE TABLE "DesignSampleImage" (
     "id" TEXT NOT NULL,
     "designSampleId" TEXT NOT NULL,
-    "type" "DesignSampleImageType" NOT NULL DEFAULT 'SAMPLE',
     "url" TEXT NOT NULL,
     "caption" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "type" "DesignSampleImageType" NOT NULL DEFAULT 'SAMPLE',
 
     CONSTRAINT "DesignSampleImage_pkey" PRIMARY KEY ("id")
 );
@@ -2425,9 +2566,6 @@ CREATE TABLE "FabricReceipt" (
     "id" TEXT NOT NULL,
     "receiptCode" TEXT NOT NULL,
     "designSampleId" TEXT,
-    "productId" TEXT,
-    "fabricBoardId" TEXT,
-    "fabricColorId" TEXT,
     "supplierId" TEXT,
     "branchId" TEXT,
     "fabricBoardCode" TEXT,
@@ -2443,9 +2581,6 @@ CREATE TABLE "FabricReceipt" (
     "rollCount" INTEGER NOT NULL DEFAULT 0,
     "unitPrice" DECIMAL(14,2),
     "priceUnit" "FabricPriceUnit" NOT NULL DEFAULT 'METER',
-    "priceCurrency" TEXT NOT NULL DEFAULT 'VND',
-    "exchangeRateToVnd" DECIMAL(14,4),
-    "unitPriceVnd" DECIMAL(14,2),
     "expectedGsm" DECIMAL(10,2),
     "measuredGsm" DECIMAL(10,2),
     "varianceApproved" BOOLEAN NOT NULL DEFAULT false,
@@ -2454,13 +2589,19 @@ CREATE TABLE "FabricReceipt" (
     "status" "FabricReceiptStatus" NOT NULL DEFAULT 'DRAFT',
     "receivedAt" TIMESTAMP(3),
     "completedAt" TIMESTAMP(3),
-    "receivedByStaffId" TEXT,
-    "receivedByName" TEXT,
     "note" TEXT,
     "createdById" TEXT,
     "createdByName" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "fabricBoardId" TEXT,
+    "fabricColorId" TEXT,
+    "exchangeRateToVnd" DECIMAL(14,4),
+    "priceCurrency" TEXT NOT NULL DEFAULT 'VND',
+    "unitPriceVnd" DECIMAL(14,2),
+    "receivedByName" TEXT,
+    "receivedByStaffId" TEXT,
+    "productId" TEXT,
 
     CONSTRAINT "FabricReceipt_pkey" PRIMARY KEY ("id")
 );
@@ -2469,22 +2610,22 @@ CREATE TABLE "FabricReceipt" (
 CREATE TABLE "FabricReceiptRoll" (
     "id" TEXT NOT NULL,
     "fabricReceiptId" TEXT NOT NULL,
-    "sortOrder" INTEGER NOT NULL DEFAULT 0,
-    "fabricCode" TEXT,
     "rollCode" TEXT,
-    "colorName" TEXT,
-    "colorCode" TEXT,
     "supplierDeclaredM" DECIMAL(12,3),
     "supplierDeclaredKg" DECIMAL(12,3),
     "actualM" DECIMAL(12,3),
     "actualKg" DECIMAL(12,3),
-    "measuredGsm" DECIMAL(10,2),
-    "unitPriceCny" DECIMAL(14,4),
-    "priceUnit" "FabricPriceUnit" NOT NULL DEFAULT 'METER',
     "defectNote" TEXT,
     "passed" BOOLEAN NOT NULL DEFAULT true,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "colorCode" TEXT,
+    "colorName" TEXT,
+    "fabricCode" TEXT,
+    "priceUnit" "FabricPriceUnit" NOT NULL DEFAULT 'METER',
+    "sortOrder" INTEGER NOT NULL DEFAULT 0,
+    "unitPriceCny" DECIMAL(14,4),
+    "measuredGsm" DECIMAL(10,2),
 
     CONSTRAINT "FabricReceiptRoll_pkey" PRIMARY KEY ("id")
 );
@@ -2495,13 +2636,13 @@ CREATE TABLE "FabricReceiptFabricConfig" (
     "fabricReceiptId" TEXT NOT NULL,
     "fabricCode" TEXT NOT NULL,
     "materialName" TEXT,
-    "supplierId" TEXT,
-    "fabricBoardCode" TEXT,
-    "fabricWidthCm" DECIMAL(10,2),
     "productId" TEXT,
     "designSampleId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "fabricBoardCode" TEXT,
+    "fabricWidthCm" DECIMAL(10,2),
+    "supplierId" TEXT,
 
     CONSTRAINT "FabricReceiptFabricConfig_pkey" PRIMARY KEY ("id")
 );
@@ -2512,11 +2653,11 @@ CREATE TABLE "FabricReceiptFabricCost" (
     "fabricReceiptId" TEXT NOT NULL,
     "fabricCode" TEXT NOT NULL,
     "chinaShippingCny" DECIMAL(14,2),
-    "vietnamShippingRateVndPerKg" DECIMAL(14,2),
     "vietnamShippingVnd" DECIMAL(14,2),
     "note" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "vietnamShippingRateVndPerKg" DECIMAL(14,2),
 
     CONSTRAINT "FabricReceiptFabricCost_pkey" PRIMARY KEY ("id")
 );
@@ -2609,11 +2750,11 @@ CREATE TABLE "ProductionAccessoryItem" (
     "stockQty" DECIMAL(14,3) NOT NULL DEFAULT 0,
     "unitPrice" DECIMAL(14,2),
     "supplierId" TEXT,
-    "specifications" JSONB,
     "note" TEXT,
     "isActive" BOOLEAN NOT NULL DEFAULT true,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "specifications" JSONB,
 
     CONSTRAINT "ProductionAccessoryItem_pkey" PRIMARY KEY ("id")
 );
@@ -2627,14 +2768,14 @@ CREATE TABLE "ProductionAccessoryReceipt" (
     "receivedById" TEXT,
     "receivedByName" TEXT,
     "note" TEXT,
-    "status" TEXT NOT NULL DEFAULT 'DRAFT',
-    "postedAt" TIMESTAMP(3),
-    "postedById" TEXT,
-    "postedByName" TEXT,
     "createdById" TEXT,
     "createdByName" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "postedAt" TIMESTAMP(3),
+    "postedById" TEXT,
+    "postedByName" TEXT,
+    "status" TEXT NOT NULL DEFAULT 'DRAFT',
 
     CONSTRAINT "ProductionAccessoryReceipt_pkey" PRIMARY KEY ("id")
 );
@@ -2726,27 +2867,15 @@ CREATE TABLE "SampleAccessorySpec" (
 CREATE TABLE "ProductionOrder" (
     "id" TEXT NOT NULL,
     "code" TEXT NOT NULL,
-    "sourceType" TEXT NOT NULL DEFAULT 'SAMPLE',
     "designSampleId" TEXT,
-    "productId" TEXT,
-    "sourceCode" TEXT NOT NULL DEFAULT '',
-    "sourceName" TEXT,
-    "sourceImageUrl" TEXT,
     "productionPartnerId" TEXT NOT NULL,
     "status" "ProductionOrderStatus" NOT NULL DEFAULT 'DRAFT',
     "plannedStartAt" TIMESTAMP(3),
     "dueDate" TIMESTAMP(3),
-    "sentAt" TIMESTAMP(3),
     "productKind" "ProductionProductKind" NOT NULL DEFAULT 'OTHER',
     "fabricWidthCm" DECIMAL(10,2),
     "fabricConsumptionM" DECIMAL(10,4),
     "fabricWastePercent" DECIMAL(7,3) NOT NULL DEFAULT 0,
-    "liningFabricConsumptionM" DECIMAL(10,4),
-    "liningFabricWastePercent" DECIMAL(7,3) NOT NULL DEFAULT 0,
-    "liningFabricComponents" JSONB,
-    "liningFabricAssignments" JSONB,
-    "productionExtraCosts" JSONB,
-    "productionPriceMultiplier" DECIMAL(6,2) NOT NULL DEFAULT 2.2,
     "sizeSet" JSONB,
     "sizeRatio" JSONB,
     "plannedQtyOverride" INTEGER,
@@ -2755,6 +2884,18 @@ CREATE TABLE "ProductionOrder" (
     "createdByName" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "productId" TEXT,
+    "sentAt" TIMESTAMP(3),
+    "sourceCode" TEXT NOT NULL DEFAULT '',
+    "sourceImageUrl" TEXT,
+    "sourceName" TEXT,
+    "sourceType" TEXT NOT NULL DEFAULT 'SAMPLE',
+    "liningFabricConsumptionM" DECIMAL(10,4),
+    "liningFabricWastePercent" DECIMAL(7,3) NOT NULL DEFAULT 0,
+    "liningFabricAssignments" JSONB,
+    "liningFabricComponents" JSONB,
+    "productionExtraCosts" JSONB,
+    "productionPriceMultiplier" DECIMAL(6,2) NOT NULL DEFAULT 2.2,
 
     CONSTRAINT "ProductionOrder_pkey" PRIMARY KEY ("id")
 );
@@ -2773,9 +2914,9 @@ CREATE TABLE "ProductionOrderRoll" (
     "allocatedM" DECIMAL(12,3),
     "allocatedKg" DECIMAL(12,3),
     "imageUrl" TEXT,
-    "fabricRole" TEXT NOT NULL DEFAULT 'MAIN',
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "fabricRole" TEXT NOT NULL DEFAULT 'MAIN',
 
     CONSTRAINT "ProductionOrderRoll_pkey" PRIMARY KEY ("id")
 );
@@ -2789,9 +2930,9 @@ CREATE TABLE "ProductionSizePlan" (
     "size" TEXT NOT NULL,
     "ratio" INTEGER NOT NULL DEFAULT 0,
     "plannedQty" INTEGER NOT NULL DEFAULT 0,
-    "actualQty" INTEGER,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "actualQty" INTEGER,
 
     CONSTRAINT "ProductionSizePlan_pkey" PRIMARY KEY ("id")
 );
@@ -2993,6 +3134,186 @@ CREATE TABLE "WebsiteProductImage" (
 );
 
 -- CreateIndex
+CREATE UNIQUE INDEX "AdminUser_email_key" ON "AdminUser"("email");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Product_slug_key" ON "Product"("slug");
+
+-- CreateIndex
+CREATE INDEX "Product_categoryId_idx" ON "Product"("categoryId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "ProductVariant_sku_key" ON "ProductVariant"("sku");
+
+-- CreateIndex
+CREATE INDEX "InventoryItem_branchId_idx" ON "InventoryItem"("branchId");
+
+-- CreateIndex
+CREATE INDEX "InventoryItem_variantId_idx" ON "InventoryItem"("variantId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "InventoryItem_variantId_branchId_key" ON "InventoryItem"("variantId", "branchId");
+
+-- CreateIndex
+CREATE INDEX "InventoryMovement_variantId_idx" ON "InventoryMovement"("variantId");
+
+-- CreateIndex
+CREATE INDEX "InventoryMovement_branchId_idx" ON "InventoryMovement"("branchId");
+
+-- CreateIndex
+CREATE INDEX "InventoryMovement_type_idx" ON "InventoryMovement"("type");
+
+-- CreateIndex
+CREATE INDEX "InventoryMovement_refType_refId_idx" ON "InventoryMovement"("refType", "refId");
+
+-- CreateIndex
+CREATE INDEX "InventoryMovement_createdAt_idx" ON "InventoryMovement"("createdAt");
+
+-- CreateIndex
+CREATE INDEX "Customer_phone_idx" ON "Customer"("phone");
+
+-- CreateIndex
+CREATE INDEX "Customer_email_idx" ON "Customer"("email");
+
+-- CreateIndex
+CREATE INDEX "Customer_legacyCode_idx" ON "Customer"("legacyCode");
+
+-- CreateIndex
+CREATE INDEX "Customer_customerGroup_idx" ON "Customer"("customerGroup");
+
+-- CreateIndex
+CREATE INDEX "CustomerAddress_customerId_idx" ON "CustomerAddress"("customerId");
+
+-- CreateIndex
+CREATE INDEX "CustomerAddress_province_idx" ON "CustomerAddress"("province");
+
+-- CreateIndex
+CREATE INDEX "CustomerAddress_ward_idx" ON "CustomerAddress"("ward");
+
+-- CreateIndex
+CREATE INDEX "CustomerAddress_ghnDistrictId_idx" ON "CustomerAddress"("ghnDistrictId");
+
+-- CreateIndex
+CREATE INDEX "CustomerAddress_ghnWardCode_idx" ON "CustomerAddress"("ghnWardCode");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Order_orderCode_key" ON "Order"("orderCode");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Order_quickOrderRequestId_key" ON "Order"("quickOrderRequestId");
+
+-- CreateIndex
+CREATE INDEX "Order_omniConversationId_idx" ON "Order"("omniConversationId");
+
+-- CreateIndex
+CREATE INDEX "Order_customerPhone_idx" ON "Order"("customerPhone");
+
+-- CreateIndex
+CREATE INDEX "Order_branchId_idx" ON "Order"("branchId");
+
+-- CreateIndex
+CREATE INDEX "Order_customerId_idx" ON "Order"("customerId");
+
+-- CreateIndex
+CREATE INDEX "Order_customerAddressId_idx" ON "Order"("customerAddressId");
+
+-- CreateIndex
+CREATE INDEX "Order_shippingProvince_idx" ON "Order"("shippingProvince");
+
+-- CreateIndex
+CREATE INDEX "Order_shippingWard_idx" ON "Order"("shippingWard");
+
+-- CreateIndex
+CREATE INDEX "Order_shippingGhnDistrictId_idx" ON "Order"("shippingGhnDistrictId");
+
+-- CreateIndex
+CREATE INDEX "Order_shippingGhnWardCode_idx" ON "Order"("shippingGhnWardCode");
+
+-- CreateIndex
+CREATE INDEX "Order_status_idx" ON "Order"("status");
+
+-- CreateIndex
+CREATE INDEX "Order_createdByStaffId_idx" ON "Order"("createdByStaffId");
+
+-- CreateIndex
+CREATE INDEX "Order_soldAt_idx" ON "Order"("soldAt");
+
+-- CreateIndex
+CREATE INDEX "Order_branchId_createdAt_desc_idx" ON "Order"("branchId", "createdAt" DESC);
+
+-- CreateIndex
+CREATE INDEX "Order_createdAt_desc_idx" ON "Order"("createdAt" DESC);
+
+-- CreateIndex
+CREATE INDEX "Order_createdByStaffName_trgm_idx" ON "Order" USING GIN ("createdByStaffName" gin_trgm_ops);
+
+-- CreateIndex
+CREATE INDEX "Order_customerName_trgm_idx" ON "Order" USING GIN ("customerName" gin_trgm_ops);
+
+-- CreateIndex
+CREATE INDEX "Order_orderCode_idx" ON "Order"("orderCode");
+
+-- CreateIndex
+CREATE INDEX "Order_paymentStatus_createdAt_desc_idx" ON "Order"("paymentStatus", "createdAt" DESC);
+
+-- CreateIndex
+CREATE INDEX "Order_shippingAddressLine1_trgm_idx" ON "Order" USING GIN ("shippingAddressLine1" gin_trgm_ops);
+
+-- CreateIndex
+CREATE INDEX "Order_shippingPhone_idx" ON "Order"("shippingPhone");
+
+-- CreateIndex
+CREATE INDEX "Order_status_createdAt_desc_idx" ON "Order"("status", "createdAt" DESC);
+
+-- CreateIndex
+CREATE INDEX "OrderItem_orderId_idx" ON "OrderItem"("orderId");
+
+-- CreateIndex
+CREATE INDEX "OrderItem_variantId_idx" ON "OrderItem"("variantId");
+
+-- CreateIndex
+CREATE INDEX "OrderItem_productName_trgm_idx" ON "OrderItem" USING GIN ("productName" gin_trgm_ops);
+
+-- CreateIndex
+CREATE INDEX "OrderItem_sku_idx" ON "OrderItem"("sku");
+
+-- CreateIndex
+CREATE INDEX "OrderItem_sku_trgm_idx" ON "OrderItem" USING GIN ("sku" gin_trgm_ops);
+
+-- CreateIndex
+CREATE INDEX "Payment_orderId_idx" ON "Payment"("orderId");
+
+-- CreateIndex
+CREATE INDEX "Payment_status_idx" ON "Payment"("status");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Shipment_orderId_key" ON "Shipment"("orderId");
+
+-- CreateIndex
+CREATE INDEX "Shipment_trackingCode_idx" ON "Shipment"("trackingCode");
+
+-- CreateIndex
+CREATE INDEX "Shipment_shippingStatus_idx" ON "Shipment"("shippingStatus");
+
+-- CreateIndex
+CREATE INDEX "Shipment_partnerStatus_idx" ON "Shipment"("partnerStatus");
+
+-- CreateIndex
+CREATE INDEX "Shipment_lastSyncedAt_idx" ON "Shipment"("lastSyncedAt");
+
+-- CreateIndex
+CREATE INDEX "Shipment_ahamoveOrderId_idx" ON "Shipment"("ahamoveOrderId");
+
+-- CreateIndex
+CREATE INDEX "Shipment_ahamoveStatus_idx" ON "Shipment"("ahamoveStatus");
+
+-- CreateIndex
+CREATE INDEX "Shipment_carrier_idx" ON "Shipment"("carrier");
+
+-- CreateIndex
+CREATE INDEX "Shipment_trackingCode_trgm_idx" ON "Shipment" USING GIN ("trackingCode" gin_trgm_ops);
+
+-- CreateIndex
 CREATE INDEX "ShipmentTimelineEvent_shipmentId_idx" ON "ShipmentTimelineEvent"("shipmentId");
 
 -- CreateIndex
@@ -3026,13 +3347,22 @@ CREATE INDEX "AhamoveShipment_serviceId_idx" ON "AhamoveShipment"("serviceId");
 CREATE INDEX "AhamoveShipment_lastSyncedAt_idx" ON "AhamoveShipment"("lastSyncedAt");
 
 -- CreateIndex
+CREATE INDEX "AuditLog_userId_idx" ON "AuditLog"("userId");
+
+-- CreateIndex
+CREATE INDEX "AuditLog_entity_idx" ON "AuditLog"("entity");
+
+-- CreateIndex
+CREATE INDEX "AuditLog_entityId_idx" ON "AuditLog"("entityId");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "StaffUser_code_key" ON "StaffUser"("code");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "StaffUser_username_key" ON "StaffUser"("username");
+CREATE UNIQUE INDEX "StaffUser_email_key" ON "StaffUser"("email");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "StaffUser_email_key" ON "StaffUser"("email");
+CREATE UNIQUE INDEX "StaffUser_username_key" ON "StaffUser"("username");
 
 -- CreateIndex
 CREATE INDEX "StaffUser_branchId_idx" ON "StaffUser"("branchId");
@@ -3479,6 +3809,9 @@ CREATE INDEX "ReturnExchangeItem_variantId_idx" ON "ReturnExchangeItem"("variant
 CREATE UNIQUE INDEX "CashVoucher_code_key" ON "CashVoucher"("code");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "CashVoucher_voucherCode_key" ON "CashVoucher"("voucherCode") WHERE ("voucherCode" IS NOT NULL);
+
+-- CreateIndex
 CREATE INDEX "CashVoucher_direction_idx" ON "CashVoucher"("direction");
 
 -- CreateIndex
@@ -3507,6 +3840,15 @@ CREATE INDEX "CashVoucher_refType_refId_idx" ON "CashVoucher"("refType", "refId"
 
 -- CreateIndex
 CREATE INDEX "CashVoucher_createdAt_idx" ON "CashVoucher"("createdAt");
+
+-- CreateIndex
+CREATE INDEX "CashVoucher_branchId_createdAt_idx" ON "CashVoucher"("branchId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "CashVoucher_paymentSourceId_createdAt_idx" ON "CashVoucher"("paymentSourceId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "CashVoucher_type_status_createdAt_idx" ON "CashVoucher"("type", "status", "createdAt");
 
 -- CreateIndex
 CREATE INDEX "DailyCashBalance_date_idx" ON "DailyCashBalance"("date");
@@ -4459,155 +4801,59 @@ CREATE INDEX "WebsiteProduct_featured_sortOrder_idx" ON "WebsiteProduct"("featur
 -- CreateIndex
 CREATE INDEX "WebsiteProductImage_websiteProductId_sortOrder_idx" ON "WebsiteProductImage"("websiteProductId", "sortOrder");
 
--- CreateIndex
-CREATE INDEX "AuditLog_userId_idx" ON "AuditLog"("userId");
-
--- CreateIndex
-CREATE INDEX "AuditLog_entity_idx" ON "AuditLog"("entity");
-
--- CreateIndex
-CREATE INDEX "AuditLog_entityId_idx" ON "AuditLog"("entityId");
-
--- CreateIndex
-CREATE INDEX "Customer_legacyCode_idx" ON "Customer"("legacyCode");
-
--- CreateIndex
-CREATE INDEX "Customer_customerGroup_idx" ON "Customer"("customerGroup");
-
--- CreateIndex
-CREATE INDEX "CustomerAddress_customerId_idx" ON "CustomerAddress"("customerId");
-
--- CreateIndex
-CREATE INDEX "CustomerAddress_province_idx" ON "CustomerAddress"("province");
-
--- CreateIndex
-CREATE INDEX "CustomerAddress_ward_idx" ON "CustomerAddress"("ward");
-
--- CreateIndex
-CREATE INDEX "CustomerAddress_ghnDistrictId_idx" ON "CustomerAddress"("ghnDistrictId");
-
--- CreateIndex
-CREATE INDEX "CustomerAddress_ghnWardCode_idx" ON "CustomerAddress"("ghnWardCode");
-
--- CreateIndex
-CREATE INDEX "InventoryItem_branchId_idx" ON "InventoryItem"("branchId");
-
--- CreateIndex
-CREATE INDEX "InventoryItem_variantId_idx" ON "InventoryItem"("variantId");
-
--- CreateIndex
-CREATE UNIQUE INDEX "InventoryItem_variantId_branchId_key" ON "InventoryItem"("variantId", "branchId");
-
--- CreateIndex
-CREATE INDEX "InventoryMovement_variantId_idx" ON "InventoryMovement"("variantId");
-
--- CreateIndex
-CREATE INDEX "InventoryMovement_branchId_idx" ON "InventoryMovement"("branchId");
-
--- CreateIndex
-CREATE INDEX "InventoryMovement_type_idx" ON "InventoryMovement"("type");
-
--- CreateIndex
-CREATE INDEX "InventoryMovement_refType_refId_idx" ON "InventoryMovement"("refType", "refId");
-
--- CreateIndex
-CREATE INDEX "InventoryMovement_createdAt_idx" ON "InventoryMovement"("createdAt");
-
--- CreateIndex
-CREATE UNIQUE INDEX "Order_quickOrderRequestId_key" ON "Order"("quickOrderRequestId");
-
--- CreateIndex
-CREATE INDEX "Order_omniConversationId_idx" ON "Order"("omniConversationId");
-
--- CreateIndex
-CREATE INDEX "Order_customerPhone_idx" ON "Order"("customerPhone");
-
--- CreateIndex
-CREATE INDEX "Order_branchId_idx" ON "Order"("branchId");
-
--- CreateIndex
-CREATE INDEX "Order_customerId_idx" ON "Order"("customerId");
-
--- CreateIndex
-CREATE INDEX "Order_customerAddressId_idx" ON "Order"("customerAddressId");
-
--- CreateIndex
-CREATE INDEX "Order_shippingProvince_idx" ON "Order"("shippingProvince");
-
--- CreateIndex
-CREATE INDEX "Order_shippingWard_idx" ON "Order"("shippingWard");
-
--- CreateIndex
-CREATE INDEX "Order_shippingGhnDistrictId_idx" ON "Order"("shippingGhnDistrictId");
-
--- CreateIndex
-CREATE INDEX "Order_shippingGhnWardCode_idx" ON "Order"("shippingGhnWardCode");
-
--- CreateIndex
-CREATE INDEX "Order_status_idx" ON "Order"("status");
-
--- CreateIndex
-CREATE INDEX "Order_createdByStaffId_idx" ON "Order"("createdByStaffId");
-
--- CreateIndex
-CREATE INDEX "Order_soldAt_idx" ON "Order"("soldAt");
-
--- CreateIndex
-CREATE INDEX "OrderItem_orderId_idx" ON "OrderItem"("orderId");
-
--- CreateIndex
-CREATE INDEX "OrderItem_variantId_idx" ON "OrderItem"("variantId");
-
--- CreateIndex
-CREATE INDEX "Payment_orderId_idx" ON "Payment"("orderId");
-
--- CreateIndex
-CREATE INDEX "Payment_status_idx" ON "Payment"("status");
-
--- CreateIndex
-CREATE INDEX "Product_categoryId_idx" ON "Product"("categoryId");
-
--- CreateIndex
-CREATE UNIQUE INDEX "Shipment_orderId_key" ON "Shipment"("orderId");
-
--- CreateIndex
-CREATE INDEX "Shipment_trackingCode_idx" ON "Shipment"("trackingCode");
-
--- CreateIndex
-CREATE INDEX "Shipment_shippingStatus_idx" ON "Shipment"("shippingStatus");
-
--- CreateIndex
-CREATE INDEX "Shipment_partnerStatus_idx" ON "Shipment"("partnerStatus");
-
--- CreateIndex
-CREATE INDEX "Shipment_lastSyncedAt_idx" ON "Shipment"("lastSyncedAt");
-
--- CreateIndex
-CREATE INDEX "Shipment_ahamoveOrderId_idx" ON "Shipment"("ahamoveOrderId");
-
--- CreateIndex
-CREATE INDEX "Shipment_ahamoveStatus_idx" ON "Shipment"("ahamoveStatus");
-
 -- AddForeignKey
 ALTER TABLE "Product" ADD CONSTRAINT "Product_categoryId_fkey" FOREIGN KEY ("categoryId") REFERENCES "Category"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "ProductVariant" ADD CONSTRAINT "ProductVariant_productId_fkey" FOREIGN KEY ("productId") REFERENCES "Product"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "InventoryItem" ADD CONSTRAINT "InventoryItem_variantId_fkey" FOREIGN KEY ("variantId") REFERENCES "ProductVariant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "InventoryMovement" ADD CONSTRAINT "InventoryMovement_branchId_fkey" FOREIGN KEY ("branchId") REFERENCES "Branch"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "InventoryMovement" ADD CONSTRAINT "InventoryMovement_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "AdminUser"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "InventoryMovement" ADD CONSTRAINT "InventoryMovement_variantId_fkey" FOREIGN KEY ("variantId") REFERENCES "ProductVariant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "CustomerAddress" ADD CONSTRAINT "CustomerAddress_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "Customer"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "Order" ADD CONSTRAINT "Order_customerAddressId_fkey" FOREIGN KEY ("customerAddressId") REFERENCES "CustomerAddress"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Order" ADD CONSTRAINT "Order_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "Customer"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "Order" ADD CONSTRAINT "Order_omniConversationId_fkey" FOREIGN KEY ("omniConversationId") REFERENCES "OmniConversation"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "OrderItem" ADD CONSTRAINT "OrderItem_orderId_fkey" FOREIGN KEY ("orderId") REFERENCES "Order"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "OrderItem" ADD CONSTRAINT "OrderItem_variantId_fkey" FOREIGN KEY ("variantId") REFERENCES "ProductVariant"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Payment" ADD CONSTRAINT "Payment_orderId_fkey" FOREIGN KEY ("orderId") REFERENCES "Order"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "Payment" ADD CONSTRAINT "Payment_paymentSourceId_fkey" FOREIGN KEY ("paymentSourceId") REFERENCES "PaymentSource"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Shipment" ADD CONSTRAINT "Shipment_orderId_fkey" FOREIGN KEY ("orderId") REFERENCES "Order"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "ShipmentTimelineEvent" ADD CONSTRAINT "ShipmentTimelineEvent_shipmentId_fkey" FOREIGN KEY ("shipmentId") REFERENCES "Shipment"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "AhamoveShipment" ADD CONSTRAINT "AhamoveShipment_shipmentId_fkey" FOREIGN KEY ("shipmentId") REFERENCES "Shipment"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "AuditLog" ADD CONSTRAINT "AuditLog_userId_fkey" FOREIGN KEY ("userId") REFERENCES "AdminUser"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "StaffUser" ADD CONSTRAINT "StaffUser_branchId_fkey" FOREIGN KEY ("branchId") REFERENCES "Branch"("id") ON DELETE SET NULL ON UPDATE CASCADE;
@@ -4619,10 +4865,10 @@ ALTER TABLE "StaffSession" ADD CONSTRAINT "StaffSession_staffId_fkey" FOREIGN KE
 ALTER TABLE "StaffUserRole" ADD CONSTRAINT "StaffUserRole_staffId_fkey" FOREIGN KEY ("staffId") REFERENCES "StaffUser"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "StaffBranchPermission" ADD CONSTRAINT "StaffBranchPermission_staffId_fkey" FOREIGN KEY ("staffId") REFERENCES "StaffUser"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "StaffBranchPermission" ADD CONSTRAINT "StaffBranchPermission_branchId_fkey" FOREIGN KEY ("branchId") REFERENCES "Branch"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "StaffBranchPermission" ADD CONSTRAINT "StaffBranchPermission_branchId_fkey" FOREIGN KEY ("branchId") REFERENCES "Branch"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "StaffBranchPermission" ADD CONSTRAINT "StaffBranchPermission_staffId_fkey" FOREIGN KEY ("staffId") REFERENCES "StaffUser"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "ImportJob" ADD CONSTRAINT "ImportJob_defaultBranchId_fkey" FOREIGN KEY ("defaultBranchId") REFERENCES "Branch"("id") ON DELETE SET NULL ON UPDATE CASCADE;
@@ -4700,13 +4946,10 @@ ALTER TABLE "WarehouseRack" ADD CONSTRAINT "WarehouseRack_mapId_fkey" FOREIGN KE
 ALTER TABLE "WarehouseShelf" ADD CONSTRAINT "WarehouseShelf_rackId_fkey" FOREIGN KEY ("rackId") REFERENCES "WarehouseRack"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ProductVariantLocation" ADD CONSTRAINT "ProductVariantLocation_variantId_fkey" FOREIGN KEY ("variantId") REFERENCES "ProductVariant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "ProductVariantLocation" ADD CONSTRAINT "ProductVariantLocation_areaId_fkey" FOREIGN KEY ("areaId") REFERENCES "StocktakeArea"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "ProductVariantLocation" ADD CONSTRAINT "ProductVariantLocation_branchId_fkey" FOREIGN KEY ("branchId") REFERENCES "Branch"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "ProductVariantLocation" ADD CONSTRAINT "ProductVariantLocation_areaId_fkey" FOREIGN KEY ("areaId") REFERENCES "StocktakeArea"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "ProductVariantLocation" ADD CONSTRAINT "ProductVariantLocation_rackId_fkey" FOREIGN KEY ("rackId") REFERENCES "WarehouseRack"("id") ON DELETE SET NULL ON UPDATE CASCADE;
@@ -4715,22 +4958,25 @@ ALTER TABLE "ProductVariantLocation" ADD CONSTRAINT "ProductVariantLocation_rack
 ALTER TABLE "ProductVariantLocation" ADD CONSTRAINT "ProductVariantLocation_shelfId_fkey" FOREIGN KEY ("shelfId") REFERENCES "WarehouseShelf"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "ProductVariantLocation" ADD CONSTRAINT "ProductVariantLocation_variantId_fkey" FOREIGN KEY ("variantId") REFERENCES "ProductVariant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "StocktakeArea" ADD CONSTRAINT "StocktakeArea_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "StocktakeSession"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "WarehouseFloor" ADD CONSTRAINT "WarehouseFloor_mapId_fkey" FOREIGN KEY ("mapId") REFERENCES "WarehouseMap"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "WarehouseZone" ADD CONSTRAINT "WarehouseZone_mapId_fkey" FOREIGN KEY ("mapId") REFERENCES "WarehouseMap"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
 ALTER TABLE "WarehouseZone" ADD CONSTRAINT "WarehouseZone_floorId_fkey" FOREIGN KEY ("floorId") REFERENCES "WarehouseFloor"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "WarehouseDoor" ADD CONSTRAINT "WarehouseDoor_mapId_fkey" FOREIGN KEY ("mapId") REFERENCES "WarehouseMap"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "WarehouseZone" ADD CONSTRAINT "WarehouseZone_mapId_fkey" FOREIGN KEY ("mapId") REFERENCES "WarehouseMap"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "WarehouseDoor" ADD CONSTRAINT "WarehouseDoor_floorId_fkey" FOREIGN KEY ("floorId") REFERENCES "WarehouseFloor"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "WarehouseDoor" ADD CONSTRAINT "WarehouseDoor_mapId_fkey" FOREIGN KEY ("mapId") REFERENCES "WarehouseMap"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "StocktakeResult" ADD CONSTRAINT "StocktakeResult_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "StocktakeSession"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -4748,31 +4994,31 @@ ALTER TABLE "CashVoucher" ADD CONSTRAINT "CashVoucher_refId_fkey" FOREIGN KEY ("
 ALTER TABLE "Promotion" ADD CONSTRAINT "Promotion_branchId_fkey" FOREIGN KEY ("branchId") REFERENCES "Branch"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "PromotionProduct" ADD CONSTRAINT "PromotionProduct_promotionId_fkey" FOREIGN KEY ("promotionId") REFERENCES "Promotion"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "PromotionProduct" ADD CONSTRAINT "PromotionProduct_productId_fkey" FOREIGN KEY ("productId") REFERENCES "Product"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "PromotionProduct" ADD CONSTRAINT "PromotionProduct_productId_fkey" FOREIGN KEY ("productId") REFERENCES "Product"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "PromotionProduct" ADD CONSTRAINT "PromotionProduct_promotionId_fkey" FOREIGN KEY ("promotionId") REFERENCES "Promotion"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "PromotionProduct" ADD CONSTRAINT "PromotionProduct_variantId_fkey" FOREIGN KEY ("variantId") REFERENCES "ProductVariant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "PurchaseReceiptPayment" ADD CONSTRAINT "PurchaseReceiptPayment_receiptId_fkey" FOREIGN KEY ("receiptId") REFERENCES "PurchaseReceipt"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
 ALTER TABLE "PurchaseReceiptPayment" ADD CONSTRAINT "PurchaseReceiptPayment_paymentSourceId_fkey" FOREIGN KEY ("paymentSourceId") REFERENCES "PaymentSource"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "StaffBranchRole" ADD CONSTRAINT "StaffBranchRole_staffId_fkey" FOREIGN KEY ("staffId") REFERENCES "StaffUser"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "PurchaseReceiptPayment" ADD CONSTRAINT "PurchaseReceiptPayment_receiptId_fkey" FOREIGN KEY ("receiptId") REFERENCES "PurchaseReceipt"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "StaffBranchRole" ADD CONSTRAINT "StaffBranchRole_branchId_fkey" FOREIGN KEY ("branchId") REFERENCES "Branch"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "StaffDepartment" ADD CONSTRAINT "StaffDepartment_staffId_fkey" FOREIGN KEY ("staffId") REFERENCES "StaffUser"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "StaffBranchRole" ADD CONSTRAINT "StaffBranchRole_staffId_fkey" FOREIGN KEY ("staffId") REFERENCES "StaffUser"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "StaffDepartment" ADD CONSTRAINT "StaffDepartment_departmentId_fkey" FOREIGN KEY ("departmentId") REFERENCES "Department"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "StaffDepartment" ADD CONSTRAINT "StaffDepartment_staffId_fkey" FOREIGN KEY ("staffId") REFERENCES "StaffUser"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "PayrollLine" ADD CONSTRAINT "PayrollLine_periodId_fkey" FOREIGN KEY ("periodId") REFERENCES "PayrollPeriod"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -4799,31 +5045,31 @@ ALTER TABLE "MetaAdSet" ADD CONSTRAINT "MetaAdSet_metaCampaignId_fkey" FOREIGN K
 ALTER TABLE "MetaAd" ADD CONSTRAINT "MetaAd_metaAccountId_fkey" FOREIGN KEY ("metaAccountId") REFERENCES "MetaAdAccount"("metaAccountId") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "MetaAd" ADD CONSTRAINT "MetaAd_metaCampaignId_fkey" FOREIGN KEY ("metaCampaignId") REFERENCES "MetaCampaign"("metaCampaignId") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "MetaAd" ADD CONSTRAINT "MetaAd_metaAdSetId_fkey" FOREIGN KEY ("metaAdSetId") REFERENCES "MetaAdSet"("metaAdSetId") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "MetaAd" ADD CONSTRAINT "MetaAd_metaAdSetId_fkey" FOREIGN KEY ("metaAdSetId") REFERENCES "MetaAdSet"("metaAdSetId") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "MetaAd" ADD CONSTRAINT "MetaAd_metaCampaignId_fkey" FOREIGN KEY ("metaCampaignId") REFERENCES "MetaCampaign"("metaCampaignId") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "MetaAdInsightDaily" ADD CONSTRAINT "MetaAdInsightDaily_metaAccountId_fkey" FOREIGN KEY ("metaAccountId") REFERENCES "MetaAdAccount"("metaAccountId") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "MetaAdInsightDaily" ADD CONSTRAINT "MetaAdInsightDaily_metaCampaignId_fkey" FOREIGN KEY ("metaCampaignId") REFERENCES "MetaCampaign"("metaCampaignId") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "MetaAdInsightDaily" ADD CONSTRAINT "MetaAdInsightDaily_metaAdId_fkey" FOREIGN KEY ("metaAdId") REFERENCES "MetaAd"("metaAdId") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "MetaAdInsightDaily" ADD CONSTRAINT "MetaAdInsightDaily_metaAdSetId_fkey" FOREIGN KEY ("metaAdSetId") REFERENCES "MetaAdSet"("metaAdSetId") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "MetaAdInsightDaily" ADD CONSTRAINT "MetaAdInsightDaily_metaAdId_fkey" FOREIGN KEY ("metaAdId") REFERENCES "MetaAd"("metaAdId") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "MetaAdInsightDaily" ADD CONSTRAINT "MetaAdInsightDaily_metaCampaignId_fkey" FOREIGN KEY ("metaCampaignId") REFERENCES "MetaCampaign"("metaCampaignId") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "OmniAssignmentMember" ADD CONSTRAINT "OmniAssignmentMember_settingId_fkey" FOREIGN KEY ("settingId") REFERENCES "OmniAssignmentSetting"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "OmniConversation" ADD CONSTRAINT "OmniConversation_pageId_fkey" FOREIGN KEY ("pageId") REFERENCES "OmniInboxPage"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "OmniConversation" ADD CONSTRAINT "OmniConversation_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "OmniCustomer"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "OmniConversation" ADD CONSTRAINT "OmniConversation_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "OmniCustomer"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "OmniConversation" ADD CONSTRAINT "OmniConversation_pageId_fkey" FOREIGN KEY ("pageId") REFERENCES "OmniInboxPage"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "OmniMessage" ADD CONSTRAINT "OmniMessage_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "OmniConversation"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -4850,7 +5096,7 @@ ALTER TABLE "FabricBoardImage" ADD CONSTRAINT "FabricBoardImage_fabricBoardId_fk
 ALTER TABLE "FabricOrder" ADD CONSTRAINT "FabricOrder_supplierId_fkey" FOREIGN KEY ("supplierId") REFERENCES "FabricSupplier"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "FabricOrderItem" ADD CONSTRAINT "FabricOrderItem_fabricOrderId_fkey" FOREIGN KEY ("fabricOrderId") REFERENCES "FabricOrder"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "FabricOrderItem" ADD CONSTRAINT "FabricOrderItem_designSampleId_fkey" FOREIGN KEY ("designSampleId") REFERENCES "DesignSample"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "FabricOrderItem" ADD CONSTRAINT "FabricOrderItem_fabricBoardId_fkey" FOREIGN KEY ("fabricBoardId") REFERENCES "FabricBoard"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
@@ -4859,7 +5105,7 @@ ALTER TABLE "FabricOrderItem" ADD CONSTRAINT "FabricOrderItem_fabricBoardId_fkey
 ALTER TABLE "FabricOrderItem" ADD CONSTRAINT "FabricOrderItem_fabricColorId_fkey" FOREIGN KEY ("fabricColorId") REFERENCES "FabricBoardColor"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "FabricOrderItem" ADD CONSTRAINT "FabricOrderItem_designSampleId_fkey" FOREIGN KEY ("designSampleId") REFERENCES "DesignSample"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "FabricOrderItem" ADD CONSTRAINT "FabricOrderItem_fabricOrderId_fkey" FOREIGN KEY ("fabricOrderId") REFERENCES "FabricOrder"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "FabricSampleDispatch" ADD CONSTRAINT "FabricSampleDispatch_designSampleId_fkey" FOREIGN KEY ("designSampleId") REFERENCES "DesignSample"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -4871,13 +5117,13 @@ ALTER TABLE "FabricSampleDispatch" ADD CONSTRAINT "FabricSampleDispatch_fabricBo
 ALTER TABLE "FabricSampleDispatch" ADD CONSTRAINT "FabricSampleDispatch_fabricColorId_fkey" FOREIGN KEY ("fabricColorId") REFERENCES "FabricBoardColor"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "DesignSample" ADD CONSTRAINT "DesignSample_supplierId_fkey" FOREIGN KEY ("supplierId") REFERENCES "FabricSupplier"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
 ALTER TABLE "DesignSample" ADD CONSTRAINT "DesignSample_fabricBoardId_fkey" FOREIGN KEY ("fabricBoardId") REFERENCES "FabricBoard"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "DesignSample" ADD CONSTRAINT "DesignSample_fabricColorId_fkey" FOREIGN KEY ("fabricColorId") REFERENCES "FabricBoardColor"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "DesignSample" ADD CONSTRAINT "DesignSample_patternMakerId_fkey" FOREIGN KEY ("patternMakerId") REFERENCES "SampleTechnicalPerson"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "DesignSample" ADD CONSTRAINT "DesignSample_producedProductId_fkey" FOREIGN KEY ("producedProductId") REFERENCES "Product"("id") ON DELETE SET NULL ON UPDATE CASCADE;
@@ -4886,7 +5132,7 @@ ALTER TABLE "DesignSample" ADD CONSTRAINT "DesignSample_producedProductId_fkey" 
 ALTER TABLE "DesignSample" ADD CONSTRAINT "DesignSample_sampleMakerId_fkey" FOREIGN KEY ("sampleMakerId") REFERENCES "SampleTechnicalPerson"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "DesignSample" ADD CONSTRAINT "DesignSample_patternMakerId_fkey" FOREIGN KEY ("patternMakerId") REFERENCES "SampleTechnicalPerson"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "DesignSample" ADD CONSTRAINT "DesignSample_supplierId_fkey" FOREIGN KEY ("supplierId") REFERENCES "FabricSupplier"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "DesignSampleIdeaBoardItem" ADD CONSTRAINT "DesignSampleIdeaBoardItem_boardId_fkey" FOREIGN KEY ("boardId") REFERENCES "DesignSampleIdeaBoard"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -4934,10 +5180,10 @@ ALTER TABLE "DesignSampleImage" ADD CONSTRAINT "DesignSampleImage_designSampleId
 ALTER TABLE "DesignSampleProgressLog" ADD CONSTRAINT "DesignSampleProgressLog_designSampleId_fkey" FOREIGN KEY ("designSampleId") REFERENCES "DesignSample"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "FabricReceipt" ADD CONSTRAINT "FabricReceipt_designSampleId_fkey" FOREIGN KEY ("designSampleId") REFERENCES "DesignSample"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "FabricReceipt" ADD CONSTRAINT "FabricReceipt_branchId_fkey" FOREIGN KEY ("branchId") REFERENCES "Branch"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "FabricReceipt" ADD CONSTRAINT "FabricReceipt_productId_fkey" FOREIGN KEY ("productId") REFERENCES "Product"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "FabricReceipt" ADD CONSTRAINT "FabricReceipt_designSampleId_fkey" FOREIGN KEY ("designSampleId") REFERENCES "DesignSample"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "FabricReceipt" ADD CONSTRAINT "FabricReceipt_fabricBoardId_fkey" FOREIGN KEY ("fabricBoardId") REFERENCES "FabricBoard"("id") ON DELETE SET NULL ON UPDATE CASCADE;
@@ -4946,25 +5192,25 @@ ALTER TABLE "FabricReceipt" ADD CONSTRAINT "FabricReceipt_fabricBoardId_fkey" FO
 ALTER TABLE "FabricReceipt" ADD CONSTRAINT "FabricReceipt_fabricColorId_fkey" FOREIGN KEY ("fabricColorId") REFERENCES "FabricBoardColor"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "FabricReceipt" ADD CONSTRAINT "FabricReceipt_supplierId_fkey" FOREIGN KEY ("supplierId") REFERENCES "FabricSupplier"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "FabricReceipt" ADD CONSTRAINT "FabricReceipt_productId_fkey" FOREIGN KEY ("productId") REFERENCES "Product"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "FabricReceipt" ADD CONSTRAINT "FabricReceipt_branchId_fkey" FOREIGN KEY ("branchId") REFERENCES "Branch"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "FabricReceipt" ADD CONSTRAINT "FabricReceipt_supplierId_fkey" FOREIGN KEY ("supplierId") REFERENCES "FabricSupplier"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "FabricReceiptRoll" ADD CONSTRAINT "FabricReceiptRoll_fabricReceiptId_fkey" FOREIGN KEY ("fabricReceiptId") REFERENCES "FabricReceipt"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "FabricReceiptFabricConfig" ADD CONSTRAINT "FabricReceiptFabricConfig_fabricReceiptId_fkey" FOREIGN KEY ("fabricReceiptId") REFERENCES "FabricReceipt"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "FabricReceiptFabricConfig" ADD CONSTRAINT "FabricReceiptFabricConfig_designSampleId_fkey" FOREIGN KEY ("designSampleId") REFERENCES "DesignSample"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "FabricReceiptFabricConfig" ADD CONSTRAINT "FabricReceiptFabricConfig_supplierId_fkey" FOREIGN KEY ("supplierId") REFERENCES "FabricSupplier"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "FabricReceiptFabricConfig" ADD CONSTRAINT "FabricReceiptFabricConfig_fabricReceiptId_fkey" FOREIGN KEY ("fabricReceiptId") REFERENCES "FabricReceipt"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "FabricReceiptFabricConfig" ADD CONSTRAINT "FabricReceiptFabricConfig_productId_fkey" FOREIGN KEY ("productId") REFERENCES "Product"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "FabricReceiptFabricConfig" ADD CONSTRAINT "FabricReceiptFabricConfig_designSampleId_fkey" FOREIGN KEY ("designSampleId") REFERENCES "DesignSample"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "FabricReceiptFabricConfig" ADD CONSTRAINT "FabricReceiptFabricConfig_supplierId_fkey" FOREIGN KEY ("supplierId") REFERENCES "FabricSupplier"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "FabricReceiptFabricCost" ADD CONSTRAINT "FabricReceiptFabricCost_fabricReceiptId_fkey" FOREIGN KEY ("fabricReceiptId") REFERENCES "FabricReceipt"("id") ON DELETE CASCADE ON UPDATE CASCADE;
