@@ -459,6 +459,8 @@ export class PayrollService {
             ? (templateNameById.get(sourceTemplateId) || "Mẫu đã xóa / không còn hoạt động")
             : "Cấu hình riêng",
           calculationConfig: config ? {
+            id: config.id,
+            sourceTemplateId: config.sourceTemplateId,
             salaryType: config.salaryType,
             baseSalary: config.baseSalary,
             dailyRate: config.dailyRate,
@@ -771,7 +773,9 @@ export class PayrollService {
     let synced = 0;
     if (body?.syncApplied !== false) {
       const configs = await this.prisma.payrollConfig.findMany({
-        where: { isActive: true, OR: [{ sourceTemplateId: id }, { sourceTemplateId: null, branchId }] } as any,
+        // Chỉ đồng bộ các cấu hình đã được tạo từ đúng mẫu này. Không ghi đè
+        // cấu hình riêng của nhân viên hoặc mẫu khác trong cùng chi nhánh.
+        where: { isActive: true, sourceTemplateId: id } as any,
       });
       for (const config of configs) {
         const staff = { id: config.staffId, code: config.staffCode, name: config.staffName, branchId: config.branchId, branchName: config.branchName };
@@ -1643,13 +1647,36 @@ export class PayrollService {
   }
 
   async updateLine(id: string, body: any, user?: AnyUser) {
-    const line = await this.prisma.payrollLine.findUnique({ where: { id }, include: { period: true } });
+    const line = await this.prisma.payrollLine.findUnique({
+      where: { id },
+      include: { period: true, adjustments: true },
+    });
     if (!line) throw new NotFoundException("Không tìm thấy dòng lương.");
     this.scopedBranchId(user, line.branchId || line.period.branchId || null);
     if (["PAID"].includes(String(line.status || "").toUpperCase())) throw new BadRequestException("Dòng lương đã trả không thể sửa.");
 
-    const periodConfigs = await this.activeConfigsForPeriod(line.period);
-    const config = periodConfigs.find((item: any) => String(item.staffId) === String(line.staffId)) as any;
+    const requestedConfigId = String(body.payrollConfigId || "").trim();
+    const periodConfigs = requestedConfigId ? [] : await this.activeConfigsForPeriod(line.period);
+    let config: any = requestedConfigId
+      ? await this.prisma.payrollConfig.findUnique({ where: { id: requestedConfigId } })
+      : periodConfigs.find((item: any) => String(item.staffId) === String(line.staffId));
+    if (requestedConfigId && (!config || String(config.staffId) !== String(line.staffId))) {
+      throw new BadRequestException("Cấu hình lương không thuộc nhân viên này.");
+    }
+    if (config?.sourceTemplateId) {
+      const template = await (this.prisma as any).payrollBranchConfigTemplate.findUnique({
+        where: { id: config.sourceTemplateId },
+      });
+      if (template?.isActive !== false) {
+        config = {
+          ...config,
+          ...template,
+          id: config.id,
+          staffId: config.staffId,
+          sourceTemplateId: config.sourceTemplateId,
+        };
+      }
+    }
     const workingDays = body.workingDays === undefined ? this.toNumber(line.workingDays) : this.toNumber(body.workingDays);
     const standardDays = Math.max(1, this.toNumber(config?.standardWorkingDays ?? line.standardDays ?? 26));
     const salaryType = String(config?.salaryType || line.salaryType || "MONTHLY").toUpperCase();
@@ -1700,6 +1727,12 @@ export class PayrollService {
     const ghnCodOrderCount = body.ghnCodOrderCount === undefined ? Number((line as any).ghnCodOrderCount || 0) : Number(body.ghnCodOrderCount || 0);
     const ghnCodBonusPerOrder = body.ghnCodBonusPerOrder === undefined ? this.toNumber(config?.ghnCodBonusPerOrder ?? (line as any).ghnCodBonusPerOrder) : this.toNumber(body.ghnCodBonusPerOrder);
     const ghnCodBonusAmount = config && !config.ghnCodBonusEnabled ? 0 : ghnCodOrderCount * ghnCodBonusPerOrder;
+    const allowanceAdjustmentTotal = (Array.isArray((line as any).adjustments) ? (line as any).adjustments : [])
+      .filter((item: any) => String(item.type || "").toUpperCase() === "ALLOWANCE")
+      .reduce((sum: number, item: any) => sum + this.toNumber(item.amount), 0);
+    const configuredAllowance = config
+      ? this.toNumber(config.allowanceDefault) + allowanceAdjustmentTotal
+      : this.toNumber((line as any).allowance);
 
     const next: any = {
       salaryType,
@@ -1732,7 +1765,7 @@ export class PayrollService {
       ghnCodBonusPerOrder: this.money(ghnCodBonusPerOrder),
       ghnCodBonusAmount: this.money(ghnCodBonusAmount),
       bonus: body.bonus === undefined ? line.bonus : this.money(body.bonus),
-      allowance: body.allowance === undefined ? line.allowance : this.money(body.allowance),
+      allowance: body.allowance === undefined ? this.money(configuredAllowance) : this.money(body.allowance),
       advance: body.advance === undefined ? line.advance : this.money(body.advance),
       deduction: body.deduction === undefined ? line.deduction : this.money(body.deduction),
       attendanceCode: body.attendanceCode === undefined ? (line as any).attendanceCode : body.attendanceCode || null,
@@ -1762,6 +1795,16 @@ export class PayrollService {
     const line = await this.prisma.payrollLine.findUnique({ where: { id }, include: { period: true } });
     if (!line) throw new NotFoundException("Không tìm thấy dòng lương.");
     this.scopedBranchId(user, line.branchId || line.period.branchId || null);
+    const periodStatus = String(line.period.status || "").toUpperCase();
+    const lineStatus = String(line.status || "").toUpperCase();
+    if ([periodStatus, lineStatus].some((status) => ["LOCKED", "PAID", "PARTIALLY_PAID"].includes(status))) {
+      throw new BadRequestException("Kỳ lương đã khóa hoặc đã trả, không thể sửa điều chỉnh.");
+    }
+    const adjustmentId = String(body.adjustmentId || "").trim();
+    const existingAdjustment = adjustmentId
+      ? await this.prisma.payrollAdjustment.findFirst({ where: { id: adjustmentId, payrollLineId: id } })
+      : null;
+    if (adjustmentId && !existingAdjustment) throw new NotFoundException("Không tìm thấy khoản điều chỉnh cần sửa.");
     const rawType = String(body.type || "").trim();
     const upperType = rawType.toUpperCase();
     const isCustomAdd = upperType.startsWith("CUSTOM_ADD:");
@@ -1777,32 +1820,59 @@ export class PayrollService {
     const amount = Math.max(0, this.toNumber(body.amount));
     if (amount <= 0) throw new BadRequestException("Số tiền điều chỉnh phải lớn hơn 0.");
     const reason = String(body.reason || "").trim();
-    if ((["BONUS", "ALLOWANCE"].includes(type) || isCustom) && !reason) {
+    if (["BONUS", "ALLOWANCE"].includes(type) && !reason) {
       throw new BadRequestException("Cần nhập lý do cho khoản điều chỉnh này.");
     }
 
-    await this.prisma.payrollAdjustment.create({
-      data: {
-        payrollLineId: id,
-        type,
-        amount: this.money(amount),
-        reason: reason || null,
-        createdById: user?.id || null,
-        createdByName: this.userName(user),
-      },
-    });
-
-    const data: any = {};
-    if (type === "BONUS" || isCustomAdd) data.bonus = this.money(this.toNumber(line.bonus) + amount);
-    if (type === "ALLOWANCE") data.allowance = this.money(this.toNumber(line.allowance) + amount);
-    if (type === "ADVANCE") data.advance = this.money(this.toNumber(line.advance) + amount);
-    if (type === "DEDUCTION" || isCustomDeduct) data.deduction = this.money(this.toNumber(line.deduction) + amount);
-
+    const bucketForType = (value: unknown): "bonus" | "allowance" | "advance" | "deduction" => {
+      const normalized = String(value || "").toUpperCase();
+      if (normalized === "ALLOWANCE") return "allowance";
+      if (normalized === "ADVANCE") return "advance";
+      if (normalized === "DEDUCTION" || normalized.startsWith("CUSTOM_DEDUCT:")) return "deduction";
+      return "bonus";
+    };
+    const values = {
+      bonus: this.toNumber(line.bonus),
+      allowance: this.toNumber(line.allowance),
+      advance: this.toNumber(line.advance),
+      deduction: this.toNumber(line.deduction),
+    };
+    if (existingAdjustment) {
+      const oldBucket = bucketForType(existingAdjustment.type);
+      values[oldBucket] = Math.max(0, values[oldBucket] - this.toNumber(existingAdjustment.amount));
+    }
+    const newBucket = bucketForType(type);
+    values[newBucket] += amount;
+    const data = {
+      bonus: this.money(values.bonus),
+      allowance: this.money(values.allowance),
+      advance: this.money(values.advance),
+      deduction: this.money(values.deduction),
+    };
     const totals = this.calcLineTotals({ ...line, ...data });
-    const updated = await this.prisma.payrollLine.update({
-      where: { id },
-      data: { ...data, grossPay: this.money(totals.grossPay), netPay: this.money(totals.netPay) },
-      include: { adjustments: { orderBy: { createdAt: "desc" } } },
+    const updated = await this.prisma.$transaction(async (tx) => {
+      if (existingAdjustment) {
+        await tx.payrollAdjustment.update({
+          where: { id: existingAdjustment.id },
+          data: { type, amount: this.money(amount), reason: reason || null },
+        });
+      } else {
+        await tx.payrollAdjustment.create({
+          data: {
+            payrollLineId: id,
+            type,
+            amount: this.money(amount),
+            reason: reason || null,
+            createdById: user?.id || null,
+            createdByName: this.userName(user),
+          },
+        });
+      }
+      return tx.payrollLine.update({
+        where: { id },
+        data: { ...data, grossPay: this.money(totals.grossPay), netPay: this.money(totals.netPay) },
+        include: { adjustments: { orderBy: { createdAt: "desc" } } },
+      });
     });
     await this.recalculatePeriodTotals(line.periodId);
     return updated;
