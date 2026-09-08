@@ -257,6 +257,16 @@ model Order {
   @@index([status])
   @@index([createdByStaffId])
   @@index([soldAt])
+
+  @@index([branchId, createdAt(sort: Desc)], map: "Order_branchId_createdAt_desc_idx")
+  @@index([createdAt(sort: Desc)], map: "Order_createdAt_desc_idx")
+  @@index([createdByStaffName(ops: raw("gin_trgm_ops"))], type: Gin, map: "Order_createdByStaffName_trgm_idx")
+  @@index([customerName(ops: raw("gin_trgm_ops"))], type: Gin, map: "Order_customerName_trgm_idx")
+  @@index([orderCode], map: "Order_orderCode_idx")
+  @@index([paymentStatus, createdAt(sort: Desc)], map: "Order_paymentStatus_createdAt_desc_idx")
+  @@index([shippingAddressLine1(ops: raw("gin_trgm_ops"))], type: Gin, map: "Order_shippingAddressLine1_trgm_idx")
+  @@index([shippingPhone], map: "Order_shippingPhone_idx")
+  @@index([status, createdAt(sort: Desc)], map: "Order_status_createdAt_desc_idx")
 }
 
 model OrderItem {
@@ -275,6 +285,10 @@ model OrderItem {
 
   @@index([orderId])
   @@index([variantId])
+
+  @@index([productName(ops: raw("gin_trgm_ops"))], type: Gin, map: "OrderItem_productName_trgm_idx")
+  @@index([sku], map: "OrderItem_sku_idx")
+  @@index([sku(ops: raw("gin_trgm_ops"))], type: Gin, map: "OrderItem_sku_trgm_idx")
 }
 
 model Payment {
@@ -339,6 +353,9 @@ model Shipment {
   @@index([lastSyncedAt])
   @@index([ahamoveOrderId])
   @@index([ahamoveStatus])
+
+  @@index([carrier], map: "Shipment_carrier_idx")
+  @@index([trackingCode(ops: raw("gin_trgm_ops"))], type: Gin, map: "Shipment_trackingCode_trgm_idx")
 }
 
 model ShipmentTimelineEvent {
@@ -1634,6 +1651,10 @@ model CashVoucher {
   @@index([branchId])
   @@index([refType, refId])
   @@index([createdAt])
+
+  @@index([branchId, createdAt], map: "CashVoucher_branchId_createdAt_idx")
+  @@index([paymentSourceId, createdAt], map: "CashVoucher_paymentSourceId_createdAt_idx")
+  @@index([type, status, createdAt], map: "CashVoucher_type_status_createdAt_idx")
 }
 
 model DailyCashBalance {
@@ -3080,6 +3101,8 @@ model DesignSample {
   ideaBoards           DesignSampleIdeaBoardItem[]
   materialBoardItem    DesignSampleMaterialBoardItem?
   fabricOrderItems     FabricOrderItem[]
+  fabricSampleColors   DesignSampleFabricColor[]      @relation("FabricSampleColors")
+  fabricSampleAllocations DesignSampleFabricAllocation[] @relation("DesignSampleFabricAllocations")
 
   @@unique([priorityLane, priorityRank])
   @@index([priorityLane])
@@ -3120,6 +3143,7 @@ model DesignSampleIdeaBoardItem {
   boardId        String
   designSampleId String
   sortOrder      Int      @default(0)
+  isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
 
   board        DesignSampleIdeaBoard @relation(fields: [boardId], references: [id], onDelete: Cascade)
@@ -3158,6 +3182,7 @@ model DesignSampleMaterialBoardItem {
   designSampleId String   @unique
   priorityRank   Int?
   sortOrder      Int      @default(0)
+  isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -3167,6 +3192,49 @@ model DesignSampleMaterialBoardItem {
   @@unique([boardId, priorityRank])
   @@index([boardId, sortOrder])
   @@index([boardId, priorityRank])
+}
+
+
+// ============================================================
+// FABRIC SAMPLE STOCK / VẢI MẪU THEO MÀU + PHÂN BỔ CHO MẪU
+// ============================================================
+model DesignSampleFabricColor {
+  id             String   @id @default(cuid())
+  fabricSampleId String
+  colorName      String
+  colorCode      String?
+  receivedMeters Decimal  @default(0) @db.Decimal(12, 3)
+  sortOrder      Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  fabricSample DesignSample                  @relation("FabricSampleColors", fields: [fabricSampleId], references: [id], onDelete: Cascade)
+  allocations  DesignSampleFabricAllocation[]
+
+  @@index([fabricSampleId, sortOrder])
+  @@index([colorCode])
+}
+
+model DesignSampleFabricAllocation {
+  id                  String   @id @default(cuid())
+  designSampleId      String
+  fabricSampleColorId String
+  meters              Decimal  @db.Decimal(12, 3)
+  assignedAt          DateTime @default(now())
+  releasedAt          DateTime?
+  createdById         String?
+  createdByName       String?
+  note                String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  designSample      DesignSample            @relation("DesignSampleFabricAllocations", fields: [designSampleId], references: [id], onDelete: Cascade)
+  fabricSampleColor DesignSampleFabricColor @relation(fields: [fabricSampleColorId], references: [id], onDelete: Restrict)
+
+  @@index([designSampleId, releasedAt])
+  @@index([fabricSampleColorId, releasedAt])
+  @@index([assignedAt])
 }
 
 

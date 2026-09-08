@@ -265,6 +265,12 @@ export class SampleFabricController {
     return this.service.checkSampleCode(code, excludeId);
   }
 
+  @Get("samples/fabric-sample-options")
+  @RequirePermissions("design_sample.view")
+  listFabricSampleOptions() {
+    return this.service.listFabricSampleOptions();
+  }
+
   @Get("samples")
   @RequirePermissions("design_sample.view")
   listSamples(@Query() query: any) {
@@ -283,6 +289,12 @@ export class SampleFabricController {
     return this.service.createQuickSample(body, req.user);
   }
 
+
+  @Patch("samples/:id/fabric-sample")
+  @RequirePermissions("design_sample.edit")
+  setDesignSampleFabric(@Param("id") id: string, @Body() body: any, @Req() req: any) {
+    return this.service.setDesignSampleFabric(id, body, req.user);
+  }
 
   @Patch("samples/:id")
   @RequirePermissions("design_sample.edit")

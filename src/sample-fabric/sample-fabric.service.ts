@@ -1113,6 +1113,17 @@ export class SampleFabricService {
         sampleDispatches: { include: { fabricColor: true }, orderBy: { sentAt: "desc" } },
         ideaBoards: { include: { board: true }, orderBy: { createdAt: "asc" } },
         materialBoardItem: { include: { board: true } },
+        fabricSampleColors: {
+          where: { isActive: true },
+          include: { allocations: { orderBy: { assignedAt: "desc" } } },
+          orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+        },
+        fabricSampleAllocations: {
+          include: {
+            fabricSampleColor: { include: { fabricSample: { select: { id: true, code: true, name: true, fabricSampleReceivedAt: true, coverImageUrl: true } } } },
+          },
+          orderBy: { assignedAt: "desc" },
+        },
         _count: { select: { fabricReceipts: true } },
       },
       orderBy: [{ year: "desc" }, { updatedAt: "desc" }],
@@ -1189,9 +1200,20 @@ export class SampleFabricService {
           url: x.url,
           caption: x.caption || null,
         })) },
+        ...(String(body?.priorityLane || "") === "FABRIC_SAMPLE" && Array.isArray(body?.fabricSampleColors) ? {
+          fabricSampleColors: { create: body.fabricSampleColors
+            .map((x:any,index:number)=>({
+              colorName: this.titleCase(x?.colorName) || `Màu ${index+1}`,
+              colorCode: this.normalizeColorCode(x?.colorCode),
+              receivedMeters: new Prisma.Decimal(Math.max(0, Number(x?.receivedMeters || 0))),
+              sortOrder: index,
+              isActive: true,
+            }))
+            .filter((x:any)=>x.colorName) },
+        } : {}),
         progressLogs: { create: { toStatus: status, note: "Tạo mẫu", actorId: actor.id, actorName: actor.name } },
       },
-      include: { fabricBoard: true, fabricColor: true, images: true, progressLogs: true, sampleDispatches: true, ideaBoards: { include: { board: true } } },
+      include: { fabricBoard: true, fabricColor: true, images: true, progressLogs: true, sampleDispatches: true, ideaBoards: { include: { board: true } }, fabricSampleColors: { where: { isActive: true }, orderBy: { sortOrder: "asc" } }, fabricSampleAllocations: { include: { fabricSampleColor: { include: { fabricSample: true } } }, orderBy: { assignedAt: "desc" } } },
     });
   }
 
@@ -1256,6 +1278,33 @@ export class SampleFabricService {
           throw new BadRequestException(`STT #${rank} đã được dùng cho ${occupied.code} · ${occupied.name}.`);
         }
       }
+      if (Array.isArray(body?.fabricSampleColors)) {
+        if (String(body?.priorityLane || current.priorityLane) !== "FABRIC_SAMPLE") throw new BadRequestException("Chỉ Vải mẫu mới có danh sách màu và số mét.");
+        const existingColors = await tx.designSampleFabricColor.findMany({
+          where: { fabricSampleId: id },
+          include: { allocations: { select: { meters: true, releasedAt: true } } },
+        });
+        const keepIds = new Set<string>();
+        for (let index=0; index<body.fabricSampleColors.length; index++) {
+          const row=body.fabricSampleColors[index] || {};
+          const colorName=this.titleCase(row.colorName) || `Màu ${index+1}`;
+          const received=Math.max(0,Number(row.receivedMeters||0));
+          if (!Number.isFinite(received)) throw new BadRequestException("Số mét vải mẫu không hợp lệ.");
+          if (row.id) {
+            const found=existingColors.find((x:any)=>x.id===String(row.id));
+            if (!found) throw new BadRequestException("Màu vải mẫu không còn tồn tại.");
+            const activeUsed=(found.allocations||[]).filter((a:any)=>!a.releasedAt).reduce((sum:number,a:any)=>sum+Number(a.meters||0),0);
+            if (received+0.000001<activeUsed) throw new BadRequestException(`${colorName} đang cấp ${activeUsed}m, không thể giảm số mét nhận xuống ${received}m.`);
+            keepIds.add(found.id);
+            await tx.designSampleFabricColor.update({ where:{id:found.id}, data:{ colorName, colorCode:this.normalizeColorCode(row.colorCode), receivedMeters:new Prisma.Decimal(received), sortOrder:index, isActive:true } });
+          } else {
+            const created=await tx.designSampleFabricColor.create({ data:{ fabricSampleId:id, colorName, colorCode:this.normalizeColorCode(row.colorCode), receivedMeters:new Prisma.Decimal(received), sortOrder:index, isActive:true } });
+            keepIds.add(created.id);
+          }
+        }
+        await tx.designSampleFabricColor.updateMany({ where:{ fabricSampleId:id, id:{ notIn:Array.from(keepIds) } }, data:{ isActive:false } });
+      }
+
       if (Array.isArray(body?.images)) {
         await tx.designSampleImage.deleteMany({ where: { designSampleId: id } });
         if (body.images.length) await tx.designSampleImage.createMany({
@@ -1314,7 +1363,7 @@ export class SampleFabricService {
           ...(body?.note !== undefined ? { note: body.note || null } : {}),
           ...(body?.technicalNote !== undefined ? { technicalNote: body.technicalNote || null } : {}),
         },
-        include: { fabricBoard: true, fabricColor: true, images: true, progressLogs: true, sampleDispatches: true, ideaBoards: { include: { board: true } } },
+        include: { fabricBoard: true, fabricColor: true, images: true, progressLogs: true, sampleDispatches: true, ideaBoards: { include: { board: true } }, fabricSampleColors: { where: { isActive: true }, include: { allocations: true }, orderBy: { sortOrder: "asc" } }, fabricSampleAllocations: { include: { fabricSampleColor: { include: { fabricSample: true } } }, orderBy: { assignedAt: "desc" } } },
       });
       if (nextStatus !== current.status) {
         await tx.designSampleProgressLog.create({
@@ -1322,6 +1371,56 @@ export class SampleFabricService {
         });
       }
       return updated;
+    });
+  }
+
+  async listFabricSampleOptions() {
+    const rows = await this.prisma.designSample.findMany({
+      where: { priorityLane: "FABRIC_SAMPLE" },
+      select: {
+        id: true, code: true, name: true, fabricSampleReceivedAt: true, coverImageUrl: true,
+        fabricBoard: { select: { id: true, boardCode: true, name: true, fabricCode: true } },
+        images: { select: { id: true, url: true, type: true, caption: true }, orderBy: { createdAt: "desc" }, take: 4 },
+        fabricSampleColors: {
+          where: { isActive: true },
+          include: { allocations: { where: { releasedAt: null }, select: { id: true, designSampleId: true, meters: true, assignedAt: true, designSample: { select: { code: true, name: true } } } } },
+          orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+        },
+      },
+      orderBy: [{ fabricSampleReceivedAt: "desc" }, { createdAt: "desc" }],
+    });
+    return rows.map((row:any)=>({
+      ...row,
+      fabricSampleColors: row.fabricSampleColors.map((color:any)=>{
+        const usedMeters=(color.allocations||[]).reduce((sum:number,a:any)=>sum+Number(a.meters||0),0);
+        const receivedMeters=Number(color.receivedMeters||0);
+        return { ...color, receivedMeters, usedMeters, availableMeters: Math.max(0, receivedMeters-usedMeters) };
+      }),
+    }));
+  }
+
+  async setDesignSampleFabric(sampleId: string, body: any, user?: Actor) {
+    const sample = await this.prisma.designSample.findUnique({ where:{id:sampleId}, select:{id:true,priorityLane:true} });
+    if (!sample) throw new NotFoundException("Không tìm thấy mẫu.");
+    if (sample.priorityLane === "FABRIC_SAMPLE") throw new BadRequestException("Không thể gán Vải mẫu cho chính một bản ghi Vải mẫu.");
+    const actor=this.actor(user);
+    const colorId=String(body?.fabricSampleColorId||"").trim();
+    const metersRaw=Number(body?.meters||0);
+    return this.prisma.$transaction(async(tx:any)=>{
+      const active=await tx.designSampleFabricAllocation.findFirst({ where:{designSampleId:sampleId,releasedAt:null}, orderBy:{assignedAt:"desc"} });
+      if (!colorId) {
+        if (active) await tx.designSampleFabricAllocation.update({ where:{id:active.id}, data:{releasedAt:new Date()} });
+        return tx.designSample.findUnique({ where:{id:sampleId}, include:{ fabricSampleAllocations:{ include:{fabricSampleColor:{include:{fabricSample:true}}}, orderBy:{assignedAt:"desc"} } } });
+      }
+      if (!Number.isFinite(metersRaw)||metersRaw<=0) throw new BadRequestException("Số mét dùng cho mẫu phải lớn hơn 0.");
+      const color=await tx.designSampleFabricColor.findUnique({ where:{id:colorId}, include:{fabricSample:{select:{id:true,code:true,name:true,priorityLane:true}}, allocations:{where:{releasedAt:null},select:{id:true,designSampleId:true,meters:true}}} });
+      if (!color||!color.isActive||color.fabricSample.priorityLane!=="FABRIC_SAMPLE") throw new BadRequestException("Màu Vải mẫu không còn khả dụng.");
+      const usedByOthers=(color.allocations||[]).filter((a:any)=>a.designSampleId!==sampleId).reduce((sum:number,a:any)=>sum+Number(a.meters||0),0);
+      const available=Number(color.receivedMeters||0)-usedByOthers;
+      if (metersRaw>available+0.000001) throw new BadRequestException(`Màu ${color.colorName}${color.colorCode?` ${color.colorCode}`:""} chỉ còn ${Math.max(0,available).toFixed(3)}m.`);
+      if (active) await tx.designSampleFabricAllocation.update({ where:{id:active.id}, data:{releasedAt:new Date()} });
+      await tx.designSampleFabricAllocation.create({ data:{ designSampleId:sampleId, fabricSampleColorId:color.id, meters:new Prisma.Decimal(metersRaw), createdById:actor.id, createdByName:actor.name } });
+      return tx.designSample.findUnique({ where:{id:sampleId}, include:{ fabricSampleAllocations:{ include:{fabricSampleColor:{include:{fabricSample:true}}}, orderBy:{assignedAt:"desc"} } } });
     });
   }
 
