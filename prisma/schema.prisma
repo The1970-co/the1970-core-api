@@ -3070,6 +3070,7 @@ model DesignSample {
   patternMakerName  String?
   producedProductId String?
   priorityRank      Int?
+  factoryPriorityRank Int?
   priorityLane      String             @default("IDEA")
   fabricSampleReceivedAt DateTime?
   status            DesignSampleStatus @default(IDEA)
@@ -3105,6 +3106,8 @@ model DesignSample {
   fabricSampleAllocations DesignSampleFabricAllocation[] @relation("DesignSampleFabricAllocations")
 
   @@unique([priorityLane, priorityRank])
+  @@unique([sampleFactoryId, factoryPriorityRank])
+  @@index([sampleFactoryId])
   @@index([priorityLane])
   @@index([fabricSampleReceivedAt])
   @@index([year])

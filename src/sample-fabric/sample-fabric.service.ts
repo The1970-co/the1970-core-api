@@ -93,10 +93,21 @@ export class SampleFabricService {
   private async nextCode(prefix: string, model: "sample" | "receipt") {
     const day = new Date().toISOString().slice(2, 10).replace(/-/g, "");
     const base = `${prefix}${day}`;
-    const rows = model === "sample"
-      ? await this.prisma.designSample.count({ where: { code: { startsWith: base } } })
-      : await this.prisma.fabricReceipt.count({ where: { receiptCode: { startsWith: base } } });
-    return `${base}-${String(rows + 1).padStart(3, "0")}`;
+    const codes = model === "sample"
+      ? (await this.prisma.designSample.findMany({ where: { code: { startsWith: `${base}-` } }, select: { code: true } })).map((x:any)=>String(x.code||""))
+      : (await this.prisma.fabricReceipt.findMany({ where: { receiptCode: { startsWith: `${base}-` } }, select: { receiptCode: true } })).map((x:any)=>String(x.receiptCode||""));
+
+    const used = new Set<number>();
+    for (const code of codes) {
+      const match = code.match(new RegExp(`^${base}-(\\d+)$`, "i"));
+      const n = match ? Number(match[1]) : 0;
+      if (Number.isInteger(n) && n > 0) used.add(n);
+    }
+    const max = Math.max(0, ...Array.from(used));
+    for (let n = max + 1; n < 1000000; n += 1) {
+      if (!used.has(n)) return `${base}-${String(n).padStart(3, "0")}`;
+    }
+    throw new BadRequestException("Không thể tự sinh mã mới.");
   }
 
   private supplierInitial(name: any) {
@@ -1188,6 +1199,7 @@ export class SampleFabricService {
         nextAction: body?.nextAction || null,
         dueDate: body?.dueDate ? new Date(body.dueDate) : null,
         priorityRank: Number.isInteger(Number(body?.priorityRank)) && Number(body.priorityRank) > 0 ? Number(body.priorityRank) : null,
+        factoryPriorityRank: Number.isInteger(Number(body?.factoryPriorityRank)) && Number(body.factoryPriorityRank) > 0 ? Number(body.factoryPriorityRank) : null,
         priorityLane: String(body?.priorityLane || (String(body?.status || "IDEA")==="IDEA" ? "IDEA" : "DEPLOY")),
         fabricSampleReceivedAt: body?.fabricSampleReceivedAt ? new Date(body.fabricSampleReceivedAt) : null,
         coverImageUrl: body?.coverImageUrl || images?.[0]?.url || null,
@@ -1278,6 +1290,18 @@ export class SampleFabricService {
           throw new BadRequestException(`STT #${rank} đã được dùng cho ${occupied.code} · ${occupied.name}.`);
         }
       }
+      if (body?.factoryPriorityRank !== undefined && body?.factoryPriorityRank !== null && body?.factoryPriorityRank !== "") {
+        const rank = Number(body.factoryPriorityRank);
+        if (!Number.isInteger(rank) || rank <= 0) throw new BadRequestException("STT nhà may phải là số nguyên từ 1 trở lên.");
+        const targetFactoryId = body?.sampleFactoryId !== undefined ? (sampleFactory?.id || null) : current.sampleFactoryId;
+        if (!targetFactoryId) throw new BadRequestException("Phải chọn nhà may trước khi xếp STT theo nhà may.");
+        const occupied = await tx.designSample.findFirst({
+          where: { sampleFactoryId: targetFactoryId, factoryPriorityRank: rank, id: { not: id } },
+          select: { code: true, name: true },
+        });
+        if (occupied) throw new BadRequestException(`STT nhà may #${rank} đã được dùng cho ${occupied.code} · ${occupied.name}.`);
+      }
+
       if (Array.isArray(body?.fabricSampleColors)) {
         if (String(body?.priorityLane || current.priorityLane) !== "FABRIC_SAMPLE") throw new BadRequestException("Chỉ Vải mẫu mới có danh sách màu và số mét.");
         const existingColors = await tx.designSampleFabricColor.findMany({
@@ -1331,6 +1355,7 @@ export class SampleFabricService {
           ...(body?.sampleFactoryId !== undefined ? {
             sampleFactoryId: sampleFactory?.id || null,
             sampleFactoryName: sampleFactory?.name || null,
+            ...(body?.factoryPriorityRank === undefined ? { factoryPriorityRank: null } : {}),
           } : {}),
           ...(body?.sampleMakerId !== undefined ? {
             sampleMakerId: sampleMaker?.id || null,
@@ -1356,6 +1381,9 @@ export class SampleFabricService {
           ...(body?.dueDate !== undefined ? { dueDate: body.dueDate ? new Date(body.dueDate) : null } : {}),
           ...(body?.priorityRank !== undefined ? {
             priorityRank: body.priorityRank === null || body.priorityRank === "" ? null : Number(body.priorityRank),
+          } : {}),
+          ...(body?.factoryPriorityRank !== undefined ? {
+            factoryPriorityRank: body.factoryPriorityRank === null || body.factoryPriorityRank === "" ? null : Number(body.factoryPriorityRank),
           } : {}),
           ...(body?.priorityLane !== undefined ? { priorityLane: String(body.priorityLane || "IDEA") } : {}),
           ...(body?.fabricSampleReceivedAt !== undefined ? { fabricSampleReceivedAt: body.fabricSampleReceivedAt ? new Date(body.fabricSampleReceivedAt) : null } : {}),
