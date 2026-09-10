@@ -61,6 +61,26 @@ export class PurchaseReceiptsController {
     return this.purchaseReceiptsService.updateDraft(id, body, req.user);
   }
 
+  @Patch(":id/item-costs-sync")
+  @RequirePermissions("purchase_receipt.pay")
+  updateItemCostsAndSyncProduct(
+    @Param("id") id: string,
+    @Req() req: any,
+    @Body()
+    body: {
+      items: {
+        itemId: string;
+        unitCost: number;
+      }[];
+    },
+  ) {
+    return this.purchaseReceiptsService.updateItemCostsAndSyncProduct(
+      id,
+      body?.items || [],
+      req.user,
+    );
+  }
+
   @Patch(":id/request-payment")
   @RequirePermissions("purchase_receipt.request_payment")
   requestPayment(@Param("id") id: string, @Req() req: any) {

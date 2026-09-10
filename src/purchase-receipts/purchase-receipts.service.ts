@@ -127,6 +127,14 @@ export class PurchaseReceiptsService {
       branch: true,
       createdBy: true,
       items: {
+        include: {
+          variant: {
+            select: {
+              id: true,
+              costPrice: true,
+            },
+          },
+        },
         orderBy: { createdAt: "asc" as const },
       },
       purchaseReceiptPayments: {
@@ -224,12 +232,78 @@ export class PurchaseReceiptsService {
     );
   }
 
+  private getEffectiveUnitCost(item: any) {
+    const receiptCost = this.toNumber(item?.unitCost);
+    if (receiptCost > 0) return receiptCost;
+
+    const productCost = this.toNumber(item?.variant?.costPrice);
+    return productCost > 0 ? productCost : 0;
+  }
+
+  /**
+   * Với phiếu cũ có unitCost = 0, trả về giá nhập hiện tại của variant nếu sản phẩm đã có giá nhập.
+   * Chỉ hydrate response, không tự ghi DB trong GET.
+   */
+  private hydrateReceiptCosts<T>(receipt: T): T {
+    const raw = receipt as any;
+    if (!raw || !Array.isArray(raw.items)) return receipt;
+
+    return {
+      ...raw,
+      items: raw.items.map((item: any) => {
+        const unitCost = this.getEffectiveUnitCost(item);
+        const qty = this.toNumber(item?.qty);
+
+        return {
+          ...item,
+          unitCost,
+          lineTotal: qty * unitCost,
+        };
+      }),
+    } as T;
+  }
+
+  /**
+   * Trước các thao tác tài chính, lấp giá nhập còn thiếu từ ProductVariant.costPrice.
+   * Giá đã nhập trực tiếp trên phiếu luôn được giữ nguyên.
+   */
+  private async fillMissingItemCostsFromProduct(
+    receiptId: string,
+    prisma: Prisma.TransactionClient | PrismaService = this.prisma,
+  ) {
+    const items = await prisma.purchaseReceiptItem.findMany({
+      where: { receiptId },
+      include: {
+        variant: {
+          select: { costPrice: true },
+        },
+      },
+    });
+
+    for (const item of items) {
+      const currentCost = this.toNumber(item.unitCost);
+      const productCost = this.toNumber(item.variant?.costPrice);
+
+      if (currentCost > 0 || productCost <= 0) continue;
+
+      await prisma.purchaseReceiptItem.update({
+        where: { id: item.id },
+        data: {
+          unitCost: new Prisma.Decimal(productCost),
+          lineTotal: new Prisma.Decimal(this.toNumber(item.qty) * productCost),
+        },
+      });
+    }
+  }
+
   async findAll(user?: any) {
-    return this.prisma.purchaseReceipt.findMany({
+    const receipts = await this.prisma.purchaseReceipt.findMany({
       where: this.scopeWhereByUser(user),
       orderBy: { createdAt: "desc" },
       include: this.getReceiptInclude(),
     });
+
+    return receipts.map((receipt) => this.hydrateReceiptCosts(receipt));
   }
 
   async getById(id: string, user?: any) {
@@ -261,7 +335,7 @@ export class PurchaseReceiptsService {
 
     this.ensureBranchAccess(user, receipt.branchId);
 
-    return receipt;
+    return this.hydrateReceiptCosts(receipt);
   }
 
   async create(data: CreateReceiptInput, user?: any) {
@@ -326,6 +400,9 @@ export class PurchaseReceiptsService {
               throw new BadRequestException("Có variant không tồn tại");
             }
 
+            const productCost = this.toNumber(variant.costPrice);
+            const unitCost = item.unitCost > 0 ? item.unitCost : productCost > 0 ? productCost : 0;
+
             return {
               receiptId: receipt.id,
               productId: variant.productId,
@@ -335,8 +412,8 @@ export class PurchaseReceiptsService {
               color: variant.color,
               size: variant.size,
               qty: item.qty,
-              unitCost: new Prisma.Decimal(item.unitCost),
-              lineTotal: new Prisma.Decimal(item.qty * item.unitCost),
+              unitCost: new Prisma.Decimal(unitCost),
+              lineTotal: new Prisma.Decimal(item.qty * unitCost),
             };
           }),
         });
@@ -438,6 +515,9 @@ export class PurchaseReceiptsService {
                 throw new BadRequestException("Có variant không tồn tại");
               }
 
+              const productCost = this.toNumber(variant.costPrice);
+              const unitCost = item.unitCost > 0 ? item.unitCost : productCost > 0 ? productCost : 0;
+
               return {
                 receiptId: id,
                 productId: variant.productId,
@@ -447,8 +527,8 @@ export class PurchaseReceiptsService {
                 color: variant.color,
                 size: variant.size,
                 qty: item.qty,
-                unitCost: new Prisma.Decimal(item.unitCost),
-                lineTotal: new Prisma.Decimal(item.qty * item.unitCost),
+                unitCost: new Prisma.Decimal(unitCost),
+                lineTotal: new Prisma.Decimal(item.qty * unitCost),
               };
             }),
           });
@@ -464,6 +544,159 @@ export class PurchaseReceiptsService {
         maxWait: 10000,
       },
     );
+  }
+
+
+  /**
+   * Cập nhật giá nhập tại màn thanh toán NCC theo "SKU chính".
+   * Một nhóm = cùng productId + cùng color, nên nhập giá ở 1 size sẽ áp dụng
+   * cho mọi size cùng màu trên phiếu và đồng thời cập nhật ProductVariant.costPrice
+   * của toàn bộ size cùng màu trong chi tiết sản phẩm.
+   */
+  async updateItemCostsAndSyncProduct(
+    id: string,
+    items: { itemId: string; unitCost: number }[],
+    user?: any,
+  ) {
+    const receipt = await this.prisma.purchaseReceipt.findUnique({
+      where: { id },
+      include: {
+        items: {
+          include: {
+            variant: {
+              select: {
+                productId: true,
+                color: true,
+              },
+            },
+          },
+        },
+        purchaseReceiptPayments: true,
+      },
+    });
+
+    if (!receipt) {
+      throw new NotFoundException("Không tìm thấy phiếu nhập");
+    }
+
+    this.ensureBranchAccess(user, receipt.branchId);
+
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new BadRequestException("Chưa có giá nhập cần cập nhật");
+    }
+
+    // Giá vốn của phiếu chỉ được chốt/sửa trước lần thanh toán đầu tiên.
+    if (this.getPaidTotal(receipt) > 0) {
+      throw new BadRequestException(
+        "Phiếu đã phát sinh thanh toán, không được sửa lại giá nhập",
+      );
+    }
+
+    if (
+      receipt.status === PurchaseReceiptStatus.CANCELLED ||
+      receipt.status === PurchaseReceiptStatus.COMPLETED
+    ) {
+      throw new BadRequestException("Phiếu không còn cho phép sửa giá nhập");
+    }
+
+    const receiptItemById = new Map(
+      receipt.items.map((item) => [String(item.id), item]),
+    );
+
+    const groupCosts = new Map<
+      string,
+      { productId: string; color: string | null; unitCost: number }
+    >();
+
+    for (const input of items) {
+      const receiptItem = receiptItemById.get(String(input.itemId));
+      if (!receiptItem) {
+        throw new BadRequestException(
+          `Có dòng giá nhập không thuộc phiếu ${receipt.receiptCode}`,
+        );
+      }
+
+      const unitCost = this.toNumber(input.unitCost);
+      if (!Number.isFinite(unitCost) || unitCost < 0) {
+        throw new BadRequestException(
+          `Giá nhập SKU ${receiptItem.sku} không hợp lệ`,
+        );
+      }
+
+      // PurchaseReceiptItem.productId là nullable trong schema (phiếu cũ có thể bị null).
+      // Variant luôn bắt buộc, nên dùng variant.productId làm fallback an toàn.
+      const productId = receiptItem.productId ?? receiptItem.variant?.productId;
+      if (!productId) {
+        throw new BadRequestException(
+          `Không xác định được sản phẩm cha của SKU ${receiptItem.sku}`,
+        );
+      }
+
+      const color = receiptItem.color ?? receiptItem.variant?.color ?? null;
+      const groupKey = `${productId}::${String(color ?? "").trim().toUpperCase()}`;
+      groupCosts.set(groupKey, {
+        productId,
+        color,
+        unitCost,
+      });
+    }
+
+    const result = await this.prisma.$transaction(
+      async (tx) => {
+        for (const group of groupCosts.values()) {
+          const groupedReceiptItems = receipt.items.filter((item) => {
+            const itemProductId = item.productId ?? item.variant?.productId;
+            const itemColor = item.color ?? item.variant?.color ?? null;
+
+            return (
+              String(itemProductId ?? "") === String(group.productId) &&
+              String(itemColor ?? "").trim().toUpperCase() ===
+                String(group.color ?? "").trim().toUpperCase()
+            );
+          });
+
+          for (const item of groupedReceiptItems) {
+            await tx.purchaseReceiptItem.update({
+              where: { id: item.id },
+              data: {
+                unitCost: new Prisma.Decimal(group.unitCost),
+                lineTotal: new Prisma.Decimal(
+                  this.toNumber(item.qty) * group.unitCost,
+                ),
+              },
+            });
+          }
+
+          // Chỉ ghi giá dương vào chi tiết sản phẩm để không vô tình xóa giá vốn cũ.
+          if (group.unitCost > 0) {
+            await tx.productVariant.updateMany({
+              where: {
+                productId: group.productId,
+                color: group.color,
+              },
+              data: {
+                costPrice: new Prisma.Decimal(group.unitCost),
+              },
+            });
+          }
+        }
+
+        return tx.purchaseReceipt.findUnique({
+          where: { id },
+          include: this.getReceiptInclude(),
+        });
+      },
+      {
+        timeout: 30000,
+        maxWait: 10000,
+      },
+    );
+
+    if (!result) {
+      throw new NotFoundException("Không tìm thấy phiếu nhập sau khi cập nhật giá");
+    }
+
+    return this.hydrateReceiptCosts(result);
   }
 
 
@@ -490,17 +723,22 @@ export class PurchaseReceiptsService {
       throw new BadRequestException("Phiếu nhập chưa có dòng hàng");
     }
 
-    return this.prisma.purchaseReceipt.update({
+    // Phiếu cũ chưa ghi giá nhập: lấy từ chi tiết sản phẩm nếu variant đã có costPrice.
+    await this.fillMissingItemCostsFromProduct(id);
+
+    const updated = await this.prisma.purchaseReceipt.update({
       where: { id },
       data: {
         status: PurchaseReceiptStatus.PAYMENT_REQUESTED,
       },
       include: this.getReceiptInclude(),
     });
+
+    return this.hydrateReceiptCosts(updated);
   }
 
   async pay(id: string, data: PayReceiptInput = {}, user?: any) {
-    const receipt = await this.prisma.purchaseReceipt.findUnique({
+    let receipt = await this.prisma.purchaseReceipt.findUnique({
       where: { id },
       include: {
         supplier: true,
@@ -517,23 +755,44 @@ export class PurchaseReceiptsService {
 
     if (
       receipt.status !== PurchaseReceiptStatus.PAYMENT_REQUESTED &&
-      receipt.status !== PurchaseReceiptStatus.PARTIALLY_PAID
+      receipt.status !== PurchaseReceiptStatus.PARTIALLY_PAID &&
+      receipt.status !== PurchaseReceiptStatus.STOCK_IMPORTED
     ) {
       throw new BadRequestException("Phiếu chưa ở trạng thái chờ thanh toán");
     }
 
-    if (!receipt.items.length) {
+    // Khi thanh toán, ưu tiên giá trên phiếu; nếu phiếu còn 0 thì lấy giá nhập trong chi tiết sản phẩm.
+    await this.fillMissingItemCostsFromProduct(id);
+
+    receipt = await this.prisma.purchaseReceipt.findUnique({
+      where: { id },
+      include: {
+        supplier: true,
+        items: true,
+        purchaseReceiptPayments: true,
+      },
+    });
+
+    if (!receipt) {
+      throw new NotFoundException("Không tìm thấy phiếu nhập");
+    }
+
+    const paymentReceipt = receipt;
+
+    if (!paymentReceipt.items.length) {
       throw new BadRequestException("Phiếu nhập chưa có dòng hàng");
     }
 
-    for (const item of receipt.items) {
+    for (const item of paymentReceipt.items) {
       if (this.toNumber(item.unitCost) <= 0) {
-        throw new BadRequestException(`SKU ${item.sku} chưa có giá nhập. Phải nhập giá trước khi thanh toán/nhập kho`);
+        throw new BadRequestException(
+          `SKU ${item.sku} chưa có giá nhập. Hãy nhập giá trước khi thanh toán`,
+        );
       }
     }
 
-    const totalAmount = this.getReceiptTotal(receipt);
-    const paidBefore = this.getPaidTotal(receipt);
+    const totalAmount = this.getReceiptTotal(paymentReceipt);
+    const paidBefore = this.getPaidTotal(paymentReceipt);
     const remainingAmount = Math.max(totalAmount - paidBefore, 0);
     const amount =
       data.amount === undefined || data.amount === null
@@ -560,7 +819,7 @@ export class PurchaseReceiptsService {
       throw new BadRequestException("Nguồn tiền không tồn tại hoặc đã ngừng hoạt động");
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       await tx.purchaseReceiptPayment.create({
         data: {
           receiptId: id,
@@ -568,7 +827,7 @@ export class PurchaseReceiptsService {
           amount: new Prisma.Decimal(amount),
           note:
             data.note?.trim() ||
-            `Thanh toán nhà cung cấp ${receipt.supplier?.name || ""} cho phiếu ${receipt.receiptCode}`.trim(),
+            `Thanh toán nhà cung cấp ${paymentReceipt.supplier?.name || ""} cho phiếu ${paymentReceipt.receiptCode}`.trim(),
           paidById: data.paidById || null,
           paidByName: data.paidByName || null,
           paidAt: new Date(),
@@ -589,10 +848,12 @@ export class PurchaseReceiptsService {
         include: this.getReceiptInclude(),
       });
     });
+
+    return this.hydrateReceiptCosts(result);
   }
 
   async importStock(id: string, createdById?: string, user?: any) {
-    const receipt = await this.prisma.purchaseReceipt.findUnique({
+    let receipt = await this.prisma.purchaseReceipt.findUnique({
       where: { id },
       include: {
         items: true,
@@ -606,79 +867,100 @@ export class PurchaseReceiptsService {
 
     this.ensureBranchAccess(user, receipt.branchId);
 
-    if (receipt.status !== PurchaseReceiptStatus.PAID) {
-      throw new BadRequestException("Phiếu chưa thanh toán đủ, không được nhập kho");
+    if (
+      receipt.confirmedAt ||
+      receipt.status === PurchaseReceiptStatus.STOCK_IMPORTED ||
+      receipt.status === PurchaseReceiptStatus.COMPLETED
+    ) {
+      throw new BadRequestException("Phiếu này đã được nhập kho");
+    }
+
+    if (
+      receipt.status !== PurchaseReceiptStatus.PAYMENT_REQUESTED &&
+      receipt.status !== PurchaseReceiptStatus.PARTIALLY_PAID &&
+      receipt.status !== PurchaseReceiptStatus.PAID
+    ) {
+      throw new BadRequestException("Phải xác nhận đủ hàng trước khi nhập kho");
     }
 
     if (!receipt.items.length) {
       throw new BadRequestException("Phiếu nhập chưa có dòng hàng");
     }
 
+    // Có giá nhập trong chi tiết sản phẩm thì dùng luôn, nhưng thiếu giá vẫn được nhập kho.
+    await this.fillMissingItemCostsFromProduct(id);
 
-    const totalAmount = this.getReceiptTotal(receipt);
-    const paidAmount = this.getPaidTotal(receipt);
+    receipt = await this.prisma.purchaseReceipt.findUnique({
+      where: { id },
+      include: {
+        items: true,
+        purchaseReceiptPayments: true,
+      },
+    });
 
-    if (totalAmount <= 0) {
-      throw new BadRequestException("Tổng tiền phiếu nhập phải lớn hơn 0");
+    if (!receipt) {
+      throw new NotFoundException("Không tìm thấy phiếu nhập");
     }
 
-    if (paidAmount < totalAmount) {
-      throw new BadRequestException("Phiếu chưa thanh toán đủ cho nhà cung cấp, không được nhập kho");
-    }
+    const stockReceipt = receipt;
 
     const validCreatedById = await this.resolveInventoryMovementCreatedById(
-      createdById || receipt.createdById,
+      createdById || stockReceipt.createdById,
     );
 
-    return this.prisma.$transaction(
+    const result = await this.prisma.$transaction(
       async (tx) => {
-        for (const item of receipt.items) {
-        await tx.inventoryItem.upsert({
-          where: {
-            variantId_branchId: {
+        for (const item of stockReceipt.items) {
+          await tx.inventoryItem.upsert({
+            where: {
+              variantId_branchId: {
+                variantId: item.variantId,
+                branchId: stockReceipt.branchId,
+              },
+            },
+            update: {
+              availableQty: {
+                increment: item.qty,
+              },
+            },
+            create: {
               variantId: item.variantId,
-              branchId: receipt.branchId,
+              branchId: stockReceipt.branchId,
+              availableQty: item.qty,
+              reservedQty: 0,
+              incomingQty: 0,
             },
-          },
-          update: {
-            availableQty: {
-              increment: item.qty,
+          });
+
+          await tx.inventoryMovement.create({
+            data: {
+              variantId: item.variantId,
+              type: InventoryMovementType.IMPORT,
+              qty: item.qty,
+              note: `Nhập kho từ phiếu ${stockReceipt.receiptCode}`,
+              refType: "PURCHASE_RECEIPT",
+              refId: stockReceipt.id,
+              createdById: validCreatedById,
+              branchId: stockReceipt.branchId,
             },
-          },
-          create: {
-            variantId: item.variantId,
-            branchId: receipt.branchId,
-            availableQty: item.qty,
-            reservedQty: 0,
-            incomingQty: 0,
-          },
-        });
+          });
 
-        await tx.inventoryMovement.create({
-          data: {
-            variantId: item.variantId,
-            type: InventoryMovementType.IMPORT,
-            qty: item.qty,
-            note: `Nhập kho từ phiếu ${receipt.receiptCode}`,
-            refType: "PURCHASE_RECEIPT",
-            refId: receipt.id,
-            createdById: validCreatedById,
-            branchId: receipt.branchId,
-          },
-        });
+          // Không được lấy giá 0 của phiếu ghi đè giá nhập đang có trong sản phẩm.
+          const unitCost = this.toNumber(item.unitCost);
+          if (unitCost > 0) {
+            await tx.productVariant.update({
+              where: { id: item.variantId },
+              data: {
+                costPrice: item.unitCost,
+              },
+            });
+          }
+        }
 
-        await tx.productVariant.update({
-          where: { id: item.variantId },
-          data: {
-            costPrice: item.unitCost,
-          },
-        });
-      }
-
+        // confirmedAt là mốc kho độc lập. Không đổi trạng thái tài chính ở đây.
         return tx.purchaseReceipt.update({
-          where: { id: receipt.id },
+          where: { id: stockReceipt.id },
           data: {
-            status: PurchaseReceiptStatus.STOCK_IMPORTED,
             confirmedAt: new Date(),
           },
           include: this.getReceiptInclude(),
@@ -689,6 +971,8 @@ export class PurchaseReceiptsService {
         maxWait: 10000,
       },
     );
+
+    return this.hydrateReceiptCosts(result);
   }
 
   async complete(id: string, user?: any) {
@@ -706,24 +990,45 @@ export class PurchaseReceiptsService {
 
     this.ensureBranchAccess(user, receipt.branchId);
 
-    if (receipt.status !== PurchaseReceiptStatus.STOCK_IMPORTED) {
+    const stockImported =
+      Boolean(receipt.confirmedAt) ||
+      receipt.status === PurchaseReceiptStatus.STOCK_IMPORTED;
+
+    if (!stockImported) {
       throw new BadRequestException("Chỉ hoàn tất được phiếu đã nhập kho");
     }
 
-    const totalAmount = this.getReceiptTotal(receipt);
-    const paidAmount = this.getPaidTotal(receipt);
+    // Bước hoàn tất vẫn là điểm kết thúc tài chính: phải thanh toán đủ.
+    await this.fillMissingItemCostsFromProduct(id);
 
-    if (paidAmount < totalAmount) {
+    const freshReceipt = await this.prisma.purchaseReceipt.findUnique({
+      where: { id },
+      include: {
+        items: true,
+        purchaseReceiptPayments: true,
+      },
+    });
+
+    if (!freshReceipt) {
+      throw new NotFoundException("Không tìm thấy phiếu nhập");
+    }
+
+    const totalAmount = this.getReceiptTotal(freshReceipt);
+    const paidAmount = this.getPaidTotal(freshReceipt);
+
+    if (totalAmount <= 0 || paidAmount < totalAmount) {
       throw new BadRequestException("Phiếu chưa thanh toán đủ, không thể hoàn tất");
     }
 
-    return this.prisma.purchaseReceipt.update({
+    const updated = await this.prisma.purchaseReceipt.update({
       where: { id },
       data: {
         status: PurchaseReceiptStatus.COMPLETED,
       },
       include: this.getReceiptInclude(),
     });
+
+    return this.hydrateReceiptCosts(updated);
   }
 
   async cancel(id: string, user?: any) {
@@ -748,10 +1053,12 @@ export class PurchaseReceiptsService {
       throw new BadRequestException("Phiếu đã thanh toán, cần xử lý hoàn tiền trước khi hủy");
     }
 
-    return this.prisma.purchaseReceipt.update({
+    const updated = await this.prisma.purchaseReceipt.update({
       where: { id },
       data: { status: PurchaseReceiptStatus.CANCELLED },
       include: this.getReceiptInclude(),
     });
+
+    return this.hydrateReceiptCosts(updated);
   }
 }
