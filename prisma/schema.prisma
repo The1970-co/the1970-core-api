@@ -3853,6 +3853,7 @@ model ProductionOrder {
   sizeSet                   Json?
   sizeRatio                 Json?
   plannedQtyOverride        Int?
+  fabricSupplyMode          String                @default("COMPANY")
   note                      String?
   createdById               String?
   createdByName             String?

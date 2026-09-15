@@ -780,7 +780,8 @@ export class ProductionService {
         factory: factories.find((x: any) => x.id === r.productionPartnerId) || null,
         progress: {
           nplDone: Number(summary.accessorySpecCount || 0) > 0,
-          fabricDone: Number(summary.rollCount || 0) > 0,
+          fabricDone: String(r.fabricSupplyMode || "COMPANY").toUpperCase() === "FACTORY" || Number(summary.rollCount || 0) > 0,
+          fabricSupplyMode: String(r.fabricSupplyMode || "COMPANY").toUpperCase() === "FACTORY" ? "FACTORY" : "COMPANY",
           sizeDone: sizeSet.length > 0 && Object.keys(sizeRatio as any).length > 0,
           calculationDone: Number(summary.sizeRowCount || 0) > 0,
           sent: ["SENT", "CUTTING", "SEWING", "QC", "COMPLETED"].includes(String(r.status || "")),
@@ -901,6 +902,7 @@ export class ProductionService {
         sizeSet: body?.sizeSet || sampleSpec?.sizeSet || null,
         sizeRatio: body?.sizeRatio || sampleSpec?.defaultSizeRatio || null,
         plannedQtyOverride: body?.plannedQtyOverride ? Number(body.plannedQtyOverride) : null,
+        fabricSupplyMode: String(body?.fabricSupplyMode || "COMPANY").toUpperCase() === "FACTORY" ? "FACTORY" : "COMPANY",
         note: body?.note || null,
         createdById: actor.id,
         createdByName: actor.name,
@@ -952,6 +954,9 @@ export class ProductionService {
         ...(body?.sizeRatio !== undefined ? { sizeRatio: body.sizeRatio || null } : {}),
         ...(body?.plannedQtyOverride !== undefined
           ? { plannedQtyOverride: body.plannedQtyOverride ? Number(body.plannedQtyOverride) : null }
+          : {}),
+        ...(body?.fabricSupplyMode !== undefined
+          ? { fabricSupplyMode: String(body.fabricSupplyMode || "COMPANY").toUpperCase() === "FACTORY" ? "FACTORY" : "COMPANY" }
           : {}),
         ...(body?.note !== undefined ? { note: body.note || null } : {}),
       },
@@ -1775,29 +1780,50 @@ export class ProductionService {
     const rolls = await this.prisma.productionOrderRoll.findMany({ where: { productionOrderId: id } });
     const mainRolls = (rolls as any[]).filter((r: any) => String(r.fabricRole || "MAIN").toUpperCase() !== "LINING");
     const liningRolls = (rolls as any[]).filter((r: any) => String(r.fabricRole || "MAIN").toUpperCase() === "LINING");
-    const consumption = Number(order.fabricConsumptionM || 0);
-    if (consumption <= 0) throw new BadRequestException("Chưa nhập định mức vải chính / sản phẩm.");
-    if (!mainRolls.length) throw new BadRequestException("Chưa chọn cây vải chính.");
-    const liningComponents = this.normalizeLiningComponents(order);
-    if (liningRolls.length && !liningComponents.length) {
-      throw new BadRequestException("Đã chọn cây vải lót nhưng chưa cấu hình định mức lót thân/tay/túi/cổ ở Bước 4.");
-    }
-
-    const effective = consumption * (1 + Number(order.fabricWastePercent || 0) / 100);
-    const grouped = new Map<string, any>();
-    for (const r of mainRolls as any[]) {
-      const code = this.normalizeColorCode(r.colorCode) || "";
-      const key = `${r.colorName || "Không màu"}|||${code}`;
-      const row = grouped.get(key) || { colorName: r.colorName || "Không màu", colorCode: code || null, meters: 0 };
-      row.meters += Number(r.allocatedM || 0);
-      grouped.set(key, row);
-    }
-
+    const factorySuppliedFabric = String(order.fabricSupplyMode || "COMPANY").toUpperCase() === "FACTORY";
     const ratio = (order.sizeRatio && typeof order.sizeRatio === "object" ? order.sizeRatio : {}) as Record<string, number>;
-    const colors = [...grouped.values()].map((x: any) => {
-      const plannedQty = Math.floor(x.meters / effective);
-      return { ...x, plannedQty, sizes: this.distribute(plannedQty, ratio) };
-    });
+    const positiveRatio = Object.fromEntries(Object.entries(ratio).filter(([, v]) => Number(v) > 0));
+    let effective = 0;
+    let colors: any[] = [];
+
+    if (factorySuppliedFabric) {
+      const provisionalQty = Number(order.plannedQtyOverride || 0);
+      if (!Number.isInteger(provisionalQty) || provisionalQty <= 0) {
+        throw new BadRequestException("Nhà may tự cấp vải: hãy nhập số lượng tạm tính lớn hơn 0.");
+      }
+      if (!Object.keys(positiveRatio).length) {
+        throw new BadRequestException("Nhà may tự cấp vải: hãy chọn dải size và tỷ lệ ở Bước 4 trước khi tính NPL.");
+      }
+      colors = [{
+        colorName: "Tạm tính",
+        colorCode: null,
+        meters: 0,
+        plannedQty: provisionalQty,
+        sizes: this.distribute(provisionalQty, positiveRatio),
+      }];
+    } else {
+      const consumption = Number(order.fabricConsumptionM || 0);
+      if (consumption <= 0) throw new BadRequestException("Chưa nhập định mức vải chính / sản phẩm.");
+      if (!mainRolls.length) throw new BadRequestException("Chưa chọn cây vải chính.");
+      const liningComponents = this.normalizeLiningComponents(order);
+      if (liningRolls.length && !liningComponents.length) {
+        throw new BadRequestException("Đã chọn cây vải lót nhưng chưa cấu hình định mức lót thân/tay/túi/cổ ở Bước 4.");
+      }
+
+      effective = consumption * (1 + Number(order.fabricWastePercent || 0) / 100);
+      const grouped = new Map<string, any>();
+      for (const r of mainRolls as any[]) {
+        const code = this.normalizeColorCode(r.colorCode) || "";
+        const key = `${r.colorName || "Không màu"}|||${code}`;
+        const row = grouped.get(key) || { colorName: r.colorName || "Không màu", colorCode: code || null, meters: 0 };
+        row.meters += Number(r.allocatedM || 0);
+        grouped.set(key, row);
+      }
+      colors = [...grouped.values()].map((x: any) => {
+        const plannedQty = Math.floor(x.meters / effective);
+        return { ...x, plannedQty, sizes: this.distribute(plannedQty, ratio) };
+      });
+    }
 
     const existing = await this.prisma.productionSizePlan.findMany({ where: { productionOrderId: id } });
     const existingMap = new Map(existing.map((x: any) => [`${x.colorName}|||${x.colorCode || ""}|||${this.normalizeProductionSize(x.size)}`, x]));
@@ -1847,7 +1873,7 @@ export class ProductionService {
     const lining = this.liningSummary(order, rolls, totalPlannedQty, totalActualQty);
     const issueState = await this.nplIssueState(id, npl.materials);
     const costSummary = await this.productionCostSummary(id, totalActualQty, issueState.materials, rolls, user, order.productionExtraCosts, order.productionPriceMultiplier);
-    return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, effectiveConsumptionM: effective, colors: this.groupCutRows(sizeRows), materials: issueState.materials, lining, costSummary, nplIssueHistory: issueState.nplIssueHistory, nextNplIssueRound: issueState.nextRoundNo };
+    return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, effectiveConsumptionM: effective, fabricSupplyMode: factorySuppliedFabric ? "FACTORY" : "COMPANY", provisionalQty: factorySuppliedFabric ? Number(order.plannedQtyOverride || 0) : null, colors: this.groupCutRows(sizeRows), materials: issueState.materials, lining, costSummary, nplIssueHistory: issueState.nplIssueHistory, nextNplIssueRound: issueState.nextRoundNo };
   }
 
   private groupCutRows(rows: any[]) {
@@ -1993,7 +2019,8 @@ export class ProductionService {
       this.prisma.productionOrderRoll.count({ where: { productionOrderId: id } }),
       this.prisma.productionSizePlan.count({ where: { productionOrderId: id } }),
     ]);
-    if (!rollCount) throw new BadRequestException("Chưa chọn cây vải.");
+    const factorySuppliedFabric = String(order.fabricSupplyMode || "COMPANY").toUpperCase() === "FACTORY";
+    if (!factorySuppliedFabric && !rollCount) throw new BadRequestException("Chưa chọn cây vải.");
     if (!sizeCount) throw new BadRequestException("Hãy tính sản lượng trước khi gửi lệnh SX.");
     await this.prisma.productionOrder.update({ where: { id }, data: { status: "SENT", sentAt: new Date() } });
     if (order.designSampleId) {
