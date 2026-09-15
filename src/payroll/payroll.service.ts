@@ -25,6 +25,24 @@ type PayrollLikeLine = {
   insuranceDeduction?: unknown;
 };
 
+type AttendanceBranchBreakdown = {
+  branchId: string;
+  branchName: string;
+  fileName?: string | null;
+  normalHours: number;
+  overtimeHours: number;
+  holidayHours: number;
+  overtime3Hours: number;
+  overtime4Hours: number;
+  lateCount: number;
+  lateMinutes: number;
+  earlyCount: number;
+  earlyMinutes: number;
+  importedAt?: string | null;
+};
+
+const ATTENDANCE_BRANCH_NOTE_PREFIX = "[[PAYROLL_ATTENDANCE_BY_BRANCH_V1:";
+
 @Injectable()
 export class PayrollService {
   constructor(
@@ -158,6 +176,54 @@ export class PayrollService {
       grossPay: Math.max(0, Math.round(grossPay)),
       netPay: Math.max(0, Math.round(netPay)),
     };
+  }
+
+  private splitPayrollNote(value: unknown) {
+    const note = String(value || "");
+    const marker = /\s*\[\[PAYROLL_ATTENDANCE_BY_BRANCH_V1:([A-Za-z0-9+/=]+)\]\]\s*$/;
+    const match = note.match(marker);
+    if (!match) return { note: note.trim(), attendanceByBranch: [] as AttendanceBranchBreakdown[] };
+    let decoded: any[] = [];
+    try {
+      const parsed = JSON.parse(Buffer.from(match[1], "base64").toString("utf8"));
+      if (Array.isArray(parsed)) decoded = parsed;
+    } catch {
+      decoded = [];
+    }
+    return {
+      note: note.slice(0, match.index).trim(),
+      attendanceByBranch: decoded
+        .map((item: any) => this.normalizeAttendanceBranch(item))
+        .filter((item: AttendanceBranchBreakdown) => Boolean(item.branchId || item.branchName)),
+    };
+  }
+
+  private normalizeAttendanceBranch(value: any): AttendanceBranchBreakdown {
+    return {
+      branchId: String(value?.branchId || "").trim(),
+      branchName: String(value?.branchName || value?.branchId || "Chi nhánh").trim(),
+      fileName: value?.fileName ? String(value.fileName) : null,
+      normalHours: Math.max(0, this.toNumber(value?.normalHours)),
+      overtimeHours: Math.max(0, this.toNumber(value?.overtimeHours)),
+      holidayHours: Math.max(0, this.toNumber(value?.holidayHours)),
+      overtime3Hours: Math.max(0, this.toNumber(value?.overtime3Hours)),
+      overtime4Hours: Math.max(0, this.toNumber(value?.overtime4Hours)),
+      lateCount: Math.max(0, Number(value?.lateCount || 0)),
+      lateMinutes: Math.max(0, Number(value?.lateMinutes || 0)),
+      earlyCount: Math.max(0, Number(value?.earlyCount || 0)),
+      earlyMinutes: Math.max(0, Number(value?.earlyMinutes || 0)),
+      importedAt: value?.importedAt ? String(value.importedAt) : null,
+    };
+  }
+
+  private noteWithAttendanceBranches(note: unknown, rows: any[]) {
+    const cleanNote = this.splitPayrollNote(note).note;
+    const normalized = (Array.isArray(rows) ? rows : [])
+      .map((item) => this.normalizeAttendanceBranch(item))
+      .filter((item) => Boolean(item.branchId || item.branchName));
+    if (!normalized.length) return cleanNote || null;
+    const encoded = Buffer.from(JSON.stringify(normalized), "utf8").toString("base64");
+    return `${cleanNote}${cleanNote ? "\n" : ""}${ATTENDANCE_BRANCH_NOTE_PREFIX}${encoded}]]`;
   }
 
 
@@ -452,8 +518,11 @@ export class PayrollService {
       lines: (period.lines || []).map((line: any) => {
         const config = configByStaff.get(String(line.staffId || ""));
         const sourceTemplateId = config?.sourceTemplateId ? String(config.sourceTemplateId) : null;
+        const payrollNote = this.splitPayrollNote(line.note);
         return {
           ...line,
+          note: payrollNote.note || null,
+          attendanceByBranch: payrollNote.attendanceByBranch,
           sourceTemplateId,
           sourceTemplateName: sourceTemplateId
             ? (templateNameById.get(sourceTemplateId) || "Mẫu đã xóa / không còn hoạt động")
@@ -1300,10 +1369,17 @@ export class PayrollService {
     return { fileName, summary, rows };
   }
 
-  async applyAttendanceImport(id: string, body: { rows?: any[]; fileName?: string; autoCalculate?: boolean; saveMappings?: boolean } = {}, user?: AnyUser) {
+  async applyAttendanceImport(id: string, body: { rows?: any[]; fileName?: string; branchId?: string; branchName?: string; autoCalculate?: boolean; saveMappings?: boolean } = {}, user?: AnyUser) {
     const period = await this.prisma.payrollPeriod.findUnique({ where: { id }, include: { lines: true } });
     if (!period) throw new NotFoundException("Không tìm thấy kỳ lương.");
     this.scopedBranchId(user, period.branchId || null);
+    const importBranchId = String(body.branchId || "").trim();
+    if (!importBranchId || importBranchId === "ALL") {
+      throw new BadRequestException("Cần chọn đúng chi nhánh của file chấm công.");
+    }
+    this.scopedBranchId(user, importBranchId);
+    const importBranchName = String(body.branchName || await this.resolveBranchName(importBranchId) || importBranchId).trim();
+    const importFileLabel = `${importBranchName} · ${String(body.fileName || "file chấm công")}`;
     const status = String(period.status || "").toUpperCase();
     if (["LOCKED", "PAID", "PARTIALLY_PAID"].includes(status)) throw new BadRequestException("Kỳ lương đã khóa hoặc đã trả, không thể import chấm công.");
 
@@ -1323,8 +1399,8 @@ export class PayrollService {
     let totalLateMinutes = 0;
     let totalEarlyMinutes = 0;
 
-    // Một nhân viên có thể xuất hiện nhiều dòng do chấm công ở nhiều chi nhánh.
-    // Cộng dồn theo staffId trước khi cập nhật để dòng sau không ghi đè dòng trước.
+    // Một nhân viên có thể xuất hiện nhiều dòng trong cùng file. Cộng dồn các
+    // dòng của file hiện tại trước, sau đó ghép với dữ liệu các chi nhánh đã up.
     const rowsByStaff = new Map<string, any>();
     for (const row of rows) {
       const staffId = String(row.staffId || "").trim();
@@ -1360,14 +1436,57 @@ export class PayrollService {
       current.earlyCount += Number(row.earlyCount || 0);
       current.earlyMinutes += Number(row.earlyMinutes || 0);
       if (row.staffName) current.staffNames.add(String(row.staffName));
-      if (row.branchName) current.branchNames.add(String(row.branchName));
+      current.branchNames.add(importBranchName);
       rowsByStaff.set(staffId, current);
     }
 
     for (const [staffId, row] of rowsByStaff.entries()) {
       const line = lineByStaff.get(staffId);
       if (!line) continue;
-      const warning = this.attendanceWarning(row, settings);
+      const existingAttendance = this.splitPayrollNote((line as any).note).attendanceByBranch;
+      const currentBranch: AttendanceBranchBreakdown = this.normalizeAttendanceBranch({
+        branchId: importBranchId,
+        branchName: importBranchName,
+        fileName: body.fileName || row.fileName || null,
+        normalHours: row.normalHours,
+        overtimeHours: row.overtimeHours,
+        holidayHours: row.holidayHours,
+        overtime3Hours: row.overtime3Hours,
+        overtime4Hours: row.overtime4Hours,
+        lateCount: row.lateCount,
+        lateMinutes: row.lateMinutes,
+        earlyCount: row.earlyCount,
+        earlyMinutes: row.earlyMinutes,
+        importedAt: now.toISOString(),
+      });
+      // Up lại cùng chi nhánh sẽ thay số cũ của chi nhánh đó, tránh cộng trùng.
+      // Up chi nhánh khác sẽ giữ số cũ và cộng tất cả vào tổng của nhân viên.
+      const attendanceByBranch = [
+        ...existingAttendance.filter((item) => String(item.branchId) !== importBranchId),
+        currentBranch,
+      ].sort((a, b) => a.branchName.localeCompare(b.branchName, "vi"));
+      const aggregate = attendanceByBranch.reduce((sum, item) => ({
+        normalHours: sum.normalHours + item.normalHours,
+        overtimeHours: sum.overtimeHours + item.overtimeHours,
+        holidayHours: sum.holidayHours + item.holidayHours,
+        overtime3Hours: sum.overtime3Hours + item.overtime3Hours,
+        overtime4Hours: sum.overtime4Hours + item.overtime4Hours,
+        lateCount: sum.lateCount + item.lateCount,
+        lateMinutes: sum.lateMinutes + item.lateMinutes,
+        earlyCount: sum.earlyCount + item.earlyCount,
+        earlyMinutes: sum.earlyMinutes + item.earlyMinutes,
+      }), {
+        normalHours: 0,
+        overtimeHours: 0,
+        holidayHours: 0,
+        overtime3Hours: 0,
+        overtime4Hours: 0,
+        lateCount: 0,
+        lateMinutes: 0,
+        earlyCount: 0,
+        earlyMinutes: 0,
+      });
+      const warning = this.attendanceWarning(aggregate, settings);
       if (body?.saveMappings !== false && row.attendanceCode) {
         const existingConfig = await this.prisma.payrollConfig.findFirst({
           where: { staffId, isActive: true, OR: [{ branchId: line.branchId }, { branchId: null }] },
@@ -1379,23 +1498,24 @@ export class PayrollService {
       }
 
       await this.updateLine(line.id, {
-        normalHours: row.normalHours,
-        overtimeHours: row.overtimeHours,
+        normalHours: aggregate.normalHours,
+        overtimeHours: aggregate.overtimeHours,
         overtimeRate: row.overtimeRate || line.overtimeRate || 1,
-        holidayHours: row.holidayHours,
-        overtime3Hours: row.overtime3Hours,
-        overtime4Hours: row.overtime4Hours,
+        holidayHours: aggregate.holidayHours,
+        overtime3Hours: aggregate.overtime3Hours,
+        overtime4Hours: aggregate.overtime4Hours,
         holidayRate: row.holidayRate || line.holidayRate || 2,
         hourlyRate: row.hourlyRate || line.hourlyRate || 0,
+        attendanceByBranch,
         attendanceCode: row.attendanceCode,
         attendanceMatchedBy: row.matchedBy || null,
         attendanceRawName: Array.from(row.staffNames || []).join(" / ") || row.staffName || row.attendanceRawName || null,
         attendanceSourceFile: body.fileName || row.fileName || null,
         attendanceImportedAt: now,
-        lateCount: row.lateCount || 0,
-        lateMinutes: row.lateMinutes || 0,
-        earlyCount: row.earlyCount || 0,
-        earlyMinutes: row.earlyMinutes || 0,
+        lateCount: aggregate.lateCount,
+        lateMinutes: aggregate.lateMinutes,
+        earlyCount: aggregate.earlyCount,
+        earlyMinutes: aggregate.earlyMinutes,
         attendanceWarningLevel: warning.level,
         attendanceWarningNote: warning.note,
       }, user);
@@ -1404,7 +1524,7 @@ export class PayrollService {
     await (this.prisma as any).payrollAttendanceImport.create({
       data: {
         periodId: id,
-        fileName: body.fileName || null,
+        fileName: importFileLabel,
         totalRows: rows.length,
         matchedRows,
         unmatchedRows,
@@ -1420,7 +1540,7 @@ export class PayrollService {
       where: { id },
       data: {
         attendanceImportedAt: now,
-        attendanceImportFileName: body.fileName || null,
+        attendanceImportFileName: importFileLabel,
       } as any,
     }).catch(() => null);
 
@@ -1733,6 +1853,11 @@ export class PayrollService {
     const configuredAllowance = config
       ? this.toNumber(config.allowanceDefault) + allowanceAdjustmentTotal
       : this.toNumber((line as any).allowance);
+    const storedPayrollNote = this.splitPayrollNote((line as any).note);
+    const nextAttendanceByBranch = Array.isArray(body.attendanceByBranch)
+      ? body.attendanceByBranch
+      : storedPayrollNote.attendanceByBranch;
+    const visiblePayrollNote = body.note === undefined ? storedPayrollNote.note : body.note;
 
     const next: any = {
       salaryType,
@@ -1779,7 +1904,7 @@ export class PayrollService {
       earlyMinutes: body.earlyMinutes === undefined ? (line as any).earlyMinutes : Number(body.earlyMinutes || 0),
       attendanceWarningLevel: body.attendanceWarningLevel === undefined ? (line as any).attendanceWarningLevel : body.attendanceWarningLevel || null,
       attendanceWarningNote: body.attendanceWarningNote === undefined ? (line as any).attendanceWarningNote : body.attendanceWarningNote || null,
-      note: body.note ?? line.note,
+      note: this.noteWithAttendanceBranches(visiblePayrollNote, nextAttendanceByBranch),
     };
 
     const totals = this.calcLineTotals({ ...line, ...next });
