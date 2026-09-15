@@ -927,6 +927,41 @@ export class PayrollService {
     return { templateId: template.id, branchId: template.branchId, created, updated, skipped, total: staffRows.length, results };
   }
 
+  private async applyLiveTemplateToConfig(config: any) {
+    if (!config?.sourceTemplateId || config?.isActive === false) return config;
+
+    const template = await (this.prisma as any).payrollBranchConfigTemplate.findUnique({
+      where: { id: config.sourceTemplateId },
+    });
+    if (!template || template.isActive === false) return config;
+
+    // Cấu hình đang hoạt động và còn liên kết với mẫu phải dùng đúng giá trị
+    // mới nhất của mẫu khi tính/tính lại lương. Chỉ ghi đè các trường công thức,
+    // không đụng vào định danh nhân viên, ngày hiệu lực hay dữ liệu chấm công.
+    const calculationFields = [
+      "salaryType", "baseSalary", "dailyRate", "standardWorkingDays",
+      "orderAttributionMode",
+      "commissionPerOrderEnabled", "commissionPerOrderAmount",
+      "commissionPerItemEnabled", "commissionPerItemAmount",
+      "commissionPercentEnabled", "commissionRate",
+      "hourlyEnabled", "hourlyRate", "standardHoursPerDay",
+      "overtimeRate", "holidayRate", "overtimeConfigs",
+      "paidLeaveEnabled", "paidLeaveHoursPerDay",
+      "mealAllowanceEnabled", "mealHoursPerUnit", "mealAmountPerUnit",
+      "insuranceDeductionAmount",
+      "taggedProductEnabled", "taggedProductRate",
+      "ghnCodBonusEnabled", "ghnCodBonusPerOrder",
+      "applyPos", "applyOnline", "applyFacebook", "applyCod",
+      "allowanceDefault",
+    ] as const;
+
+    const merged = { ...config };
+    for (const field of calculationFields) {
+      if (template[field] !== undefined) merged[field] = template[field];
+    }
+    return merged;
+  }
+
   private async activeConfigsForPeriod(period: any) {
     const branchWhere: Prisma.PayrollConfigWhereInput = {};
     if (period.branchId) branchWhere.OR = [{ branchId: period.branchId }, { branchId: null }];
@@ -962,10 +997,12 @@ export class PayrollService {
       if (fallback) selected.push(fallback);
     }
 
-    return selected.sort((a, b) =>
+    const sorted = selected.sort((a, b) =>
       String(a.branchName || "").localeCompare(String(b.branchName || ""), "vi") ||
       String(a.staffName || "").localeCompare(String(b.staffName || ""), "vi"),
     );
+
+    return Promise.all(sorted.map((config) => this.applyLiveTemplateToConfig(config)));
   }
 
   async calculatePeriod(id: string, body: { workingDaysByStaff?: Record<string, number>; force?: boolean } = {}, user?: AnyUser) {
@@ -1083,9 +1120,14 @@ export class PayrollService {
         const paidLeaveHoursPerDay = this.toNumber((config as any).paidLeaveHoursPerDay || (config as any).standardHoursPerDay || 9.5);
         const paidLeaveAmount = (config as any).paidLeaveEnabled ? paidLeaveDays * paidLeaveHoursPerDay * hourlyRate : 0;
 
-        const rawWorkingHours = normalHours + overtimeHours + holidayHours + overtime3Hours + overtime4Hours;
+        // Tiền ăn chỉ tính trên giờ được cấu hình cho phép. TC đã tắt vẫn giữ
+        // số giờ nhập/chấm công để đối chiếu nhưng không được làm tăng tiền lương.
+        const payableWorkingHours = normalHours + overtime.breakdown.reduce(
+          (sum, row) => sum + (row.enabled ? this.toNumber(row.hours) : 0),
+          0,
+        );
         const mealAllowanceAmount = (config as any).mealAllowanceEnabled
-          ? (rawWorkingHours / Math.max(1, this.toNumber((config as any).mealHoursPerUnit || 9.5))) * this.toNumber((config as any).mealAmountPerUnit || 0)
+          ? (payableWorkingHours / Math.max(1, this.toNumber((config as any).mealHoursPerUnit || 9.5))) * this.toNumber((config as any).mealAmountPerUnit || 0)
           : 0;
 
         const insuranceDeduction = this.toNumber((config as any).insuranceDeductionAmount || 0);
@@ -1107,9 +1149,12 @@ export class PayrollService {
           : 0;
         const commissionTotal = commissionByOrder + commissionByItem + commissionByPercent;
         const bonus = this.toNumber(input.bonus || 0);
-        const allowance = input.allowance === undefined
-          ? this.toNumber(config.allowanceDefault)
-          : this.toNumber(input.allowance);
+        const linkedAllowance = (Array.isArray(input.adjustments) ? input.adjustments : [])
+          .filter((item: any) => String(item?.type || "").toUpperCase() === "ALLOWANCE")
+          .reduce((sum: number, item: any) => sum + this.toNumber(item?.amount), 0);
+        // Phụ cấp mặc định là giá trị từ cấu hình, không phải dữ liệu nhập tay.
+        // Khi bấm Tính lại phải lấy mức mới; chỉ giữ các khoản ALLOWANCE thêm tay.
+        const allowance = this.toNumber(config.allowanceDefault) + linkedAllowance;
         const advance = this.toNumber(input.advance || 0);
         const deduction = this.toNumber(input.deduction || 0);
         const totals = this.calcLineTotals({
@@ -1783,20 +1828,7 @@ export class PayrollService {
     if (requestedConfigId && (!config || String(config.staffId) !== String(line.staffId))) {
       throw new BadRequestException("Cấu hình lương không thuộc nhân viên này.");
     }
-    if (config?.sourceTemplateId) {
-      const template = await (this.prisma as any).payrollBranchConfigTemplate.findUnique({
-        where: { id: config.sourceTemplateId },
-      });
-      if (template?.isActive !== false) {
-        config = {
-          ...config,
-          ...template,
-          id: config.id,
-          staffId: config.staffId,
-          sourceTemplateId: config.sourceTemplateId,
-        };
-      }
-    }
+    if (config) config = await this.applyLiveTemplateToConfig(config);
     const workingDays = body.workingDays === undefined ? this.toNumber(line.workingDays) : this.toNumber(body.workingDays);
     const standardDays = Math.max(1, this.toNumber(config?.standardWorkingDays ?? line.standardDays ?? 26));
     const salaryType = String(config?.salaryType || line.salaryType || "MONTHLY").toUpperCase();
@@ -1830,9 +1862,12 @@ export class PayrollService {
 
     const mealHoursPerUnit = Math.max(1, this.toNumber(body.mealHoursPerUnit ?? config?.mealHoursPerUnit ?? 9.5));
     const mealAmountPerUnit = this.toNumber(body.mealAmountPerUnit ?? config?.mealAmountPerUnit ?? 0);
-    const rawWorkingHours = normalHours + overtimeHours + holidayHours + overtime3Hours + overtime4Hours;
+    const payableWorkingHours = normalHours + overtime.breakdown.reduce(
+      (sum, row) => sum + (row.enabled ? this.toNumber(row.hours) : 0),
+      0,
+    );
     const autoMealAllowanceAmount = config
-      ? (config.mealAllowanceEnabled ? rawWorkingHours / mealHoursPerUnit * mealAmountPerUnit : 0)
+      ? (config.mealAllowanceEnabled ? payableWorkingHours / mealHoursPerUnit * mealAmountPerUnit : 0)
       : body.mealAllowanceAmount === undefined
         ? this.toNumber((line as any).mealAllowanceAmount)
         : this.toNumber(body.mealAllowanceAmount);
