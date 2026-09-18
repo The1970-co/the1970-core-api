@@ -1112,20 +1112,14 @@ export class PayrollService {
         const overtimeConfigs = this.normalizeOvertimeConfigs((config as any).overtimeConfigs, hourlyRate, overtimeRate, holidayRate);
         const overtime = this.calculateOvertime(overtimeConfigs, [overtimeHours, holidayHours, overtime3Hours, overtime4Hours]);
 
-        // T.Giờ từ chấm công đã bao gồm TC1/TC2/TC3/TC4. Tách toàn bộ TC
-        // khỏi tổng giờ trước, sau đó chỉ cộng lại các TC đang bật trong cấu hình.
-        // Nhờ vậy TC disabled sẽ bị loại hoàn toàn khỏi tiền lương.
-        const rawOvertimeHours = overtimeHours + holidayHours + overtime3Hours + overtime4Hours;
-        const regularHours = Math.max(0, normalHours - rawOvertimeHours);
-        const enabledOvertimeHours = overtime.breakdown.reduce(
-          (sum, row) => sum + (row.enabled ? this.toNumber(row.hours) : 0),
-          0,
-        );
-        const convertedWorkingHours = regularHours + overtime.breakdown.reduce(
+        // T.Giờ (normalHours) là tổng giờ gốc dùng để tính lương.
+        // TC1/TC2/TC3/TC4 chỉ là khoản cộng thêm khi cấu hình tương ứng được bật.
+        // Vì vậy TC tắt phải hoàn toàn trung tính: không cộng và cũng không trừ khỏi T.Giờ.
+        const convertedWorkingHours = normalHours + overtime.breakdown.reduce(
           (sum, row) => sum + (row.enabled ? this.toNumber(row.hours) * this.toNumber(row.multiplier) : 0),
           0,
         );
-        const normalHourlyAmount = (config as any).hourlyEnabled ? regularHours * hourlyRate : 0;
+        const normalHourlyAmount = (config as any).hourlyEnabled ? normalHours * hourlyRate : 0;
         const overtimeAmount = (config as any).hourlyEnabled ? overtime.amount : 0;
         const hourlyAmount = normalHourlyAmount + overtimeAmount;
 
@@ -1133,11 +1127,9 @@ export class PayrollService {
         const paidLeaveHoursPerDay = this.toNumber((config as any).paidLeaveHoursPerDay || (config as any).standardHoursPerDay || 9.5);
         const paidLeaveAmount = (config as any).paidLeaveEnabled ? paidLeaveDays * paidLeaveHoursPerDay * hourlyRate : 0;
 
-        // Tiền ăn chỉ tính trên giờ được cấu hình cho phép. TC đã tắt vẫn giữ
-        // số giờ nhập/chấm công để đối chiếu nhưng không được làm tăng tiền lương.
-        const payableWorkingHours = regularHours + enabledOvertimeHours;
+        // T.Giờ đã là tổng giờ thực tế. Không cộng lại giờ TC vào tiền ăn để tránh tính trùng.
         const mealAllowanceAmount = (config as any).mealAllowanceEnabled
-          ? (payableWorkingHours / Math.max(1, this.toNumber((config as any).mealHoursPerUnit || 9.5))) * this.toNumber((config as any).mealAmountPerUnit || 0)
+          ? (normalHours / Math.max(1, this.toNumber((config as any).mealHoursPerUnit || 9.5))) * this.toNumber((config as any).mealAmountPerUnit || 0)
           : 0;
 
         const insuranceDeduction = this.toNumber((config as any).insuranceDeductionAmount || 0);
@@ -1861,18 +1853,13 @@ export class PayrollService {
     const existingBreakdown = Array.isArray((line as any).overtimeBreakdown) ? (line as any).overtimeBreakdown : [];
     const overtimeConfigs = this.normalizeOvertimeConfigs(body.overtimeConfigs || config?.overtimeConfigs || existingBreakdown, hourlyRate, overtimeRate, holidayRate);
     const overtime = this.calculateOvertime(overtimeConfigs, [overtimeHours, holidayHours, overtime3Hours, overtime4Hours]);
-    const rawOvertimeHours = overtimeHours + holidayHours + overtime3Hours + overtime4Hours;
-    const regularHours = Math.max(0, normalHours - rawOvertimeHours);
-    const enabledOvertimeHours = overtime.breakdown.reduce(
-      (sum, row) => sum + (row.enabled ? this.toNumber(row.hours) : 0),
-      0,
-    );
-    const convertedWorkingHours = regularHours + overtime.breakdown.reduce(
+    // T.Giờ là giờ gốc. TC chỉ cộng thêm khi bật; TC tắt không được làm thay đổi T.Giờ.
+    const convertedWorkingHours = normalHours + overtime.breakdown.reduce(
       (sum, row) => sum + (row.enabled ? this.toNumber(row.hours) * this.toNumber(row.multiplier) : 0),
       0,
     );
     const overtimeAmount = hourlyEnabled ? overtime.amount : 0;
-    const hourlyAmount = hourlyEnabled ? regularHours * hourlyRate + overtimeAmount : 0;
+    const hourlyAmount = hourlyEnabled ? normalHours * hourlyRate + overtimeAmount : 0;
 
     const paidLeaveDays = body.paidLeaveDays === undefined ? this.toNumber((line as any).paidLeaveDays) : this.toNumber(body.paidLeaveDays);
     const paidLeaveHoursPerDay = body.paidLeaveHoursPerDay === undefined ? this.toNumber(config?.paidLeaveHoursPerDay ?? (line as any).paidLeaveHoursPerDay) : this.toNumber(body.paidLeaveHoursPerDay);
@@ -1881,9 +1868,8 @@ export class PayrollService {
 
     const mealHoursPerUnit = Math.max(1, this.toNumber(body.mealHoursPerUnit ?? config?.mealHoursPerUnit ?? 9.5));
     const mealAmountPerUnit = this.toNumber(body.mealAmountPerUnit ?? config?.mealAmountPerUnit ?? 0);
-    const payableWorkingHours = regularHours + enabledOvertimeHours;
     const autoMealAllowanceAmount = config
-      ? (config.mealAllowanceEnabled ? payableWorkingHours / mealHoursPerUnit * mealAmountPerUnit : 0)
+      ? (config.mealAllowanceEnabled ? normalHours / mealHoursPerUnit * mealAmountPerUnit : 0)
       : body.mealAllowanceAmount === undefined
         ? this.toNumber((line as any).mealAllowanceAmount)
         : this.toNumber(body.mealAllowanceAmount);
