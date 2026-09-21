@@ -187,18 +187,143 @@ export class SampleFabricService {
     const rate=Number(this.n(row?.exchangeRateToVnd)||0);
     const sourceRolls=Array.isArray(row?.rolls)?row.rolls:[];
     const sourceCosts=Array.isArray(row?.fabricCosts)?row.fabricCosts:[];
+
+    // Phiếu cũ lưu giá ở cấp FabricReceipt, phiếu mới lưu giá theo từng cây.
+    // Luôn ưu tiên giá cây mới; cây chưa có giá thì fallback về giá lịch sử của phiếu.
+    const legacyUnit=Number(this.n(row?.unitPrice)||0);
+    const legacyUnitVnd=Number(this.n(row?.unitPriceVnd)||0);
+    const legacyCurrency=String(row?.priceCurrency||"VND").trim().toUpperCase();
+    const legacyPriceUnit=String(row?.priceUnit||"METER").trim().toUpperCase();
+
+    const legacyQty=(roll:any)=>{
+      if(legacyPriceUnit==="ROLL")return 1;
+      if(legacyPriceUnit==="KG")return Number(this.n(roll?.supplierDeclaredKg)||this.n(roll?.actualKg)||0);
+      return Number(this.n(roll?.supplierDeclaredM)||this.n(roll?.actualM)||0);
+    };
+
+    const legacyUnitCny =
+      legacyCurrency==="CNY"
+        ? legacyUnit
+        : rate>0
+          ? (legacyUnitVnd>0?legacyUnitVnd:legacyUnit)/rate
+          : 0;
+
+    const legacyUnitPriceVnd =
+      legacyUnitVnd>0
+        ? legacyUnitVnd
+        : legacyCurrency==="CNY"
+          ? legacyUnit*rate
+          : legacyUnit;
+
     const codeStats=new Map<string,any>();
-    for(const roll of sourceRolls){const code=String(roll?.fabricCode||row?.fabricCode||"").trim().toUpperCase();if(!code)continue;const current=codeStats.get(code)||{rollCount:0,totalKg:0,goodsCny:0};const qty=this.rollPriceQty(roll),unitPriceCny=Number(this.n(roll?.unitPriceCny)||0);current.rollCount+=1;current.totalKg+=Number(this.n(roll?.actualKg)||this.n(roll?.supplierDeclaredKg)||0);current.goodsCny+=qty*unitPriceCny;codeStats.set(code,current)}
-    const fabricCosts=sourceCosts.map((cost:any)=>{const code=String(cost?.fabricCode||"").trim().toUpperCase(),stats=codeStats.get(code)||{rollCount:0,totalKg:0,goodsCny:0},chinaShippingCny=Number(this.n(cost?.chinaShippingCny)||0),chinaShippingVnd=chinaShippingCny*rate,vnRate=Number(this.n(cost?.vietnamShippingRateVndPerKg)||0),legacyVn=Number(this.n(cost?.vietnamShippingVnd)||0),vietnamShippingVnd=vnRate>0?stats.totalKg*vnRate:legacyVn,totalShippingVnd=chinaShippingVnd+vietnamShippingVnd,goodsVnd=stats.goodsCny*rate;return{...cost,vietnamShippingRateVndPerKg:vnRate,vietnamShippingVnd,rollCount:stats.rollCount,totalKg:stats.totalKg,goodsCny:stats.goodsCny,goodsVnd,chinaShippingVnd,totalShippingVnd,shippingPerRollVnd:stats.rollCount?totalShippingVnd/stats.rollCount:0,fabricPerRollVnd:stats.rollCount?goodsVnd/stats.rollCount:0,landedPerRollVnd:stats.rollCount?(goodsVnd+totalShippingVnd)/stats.rollCount:0}});
+    for(const roll of sourceRolls){
+      const code=String(roll?.fabricCode||row?.fabricCode||"").trim().toUpperCase();
+      if(!code)continue;
+      const current=codeStats.get(code)||{rollCount:0,totalKg:0,goodsCny:0,goodsVnd:0};
+      const currentUnitCny=Number(this.n(roll?.unitPriceCny)||0);
+      const qty=currentUnitCny>0?this.rollPriceQty(roll):legacyQty(roll);
+
+      current.rollCount+=1;
+      current.totalKg+=Number(this.n(roll?.actualKg)||this.n(roll?.supplierDeclaredKg)||0);
+
+      if(currentUnitCny>0){
+        current.goodsCny+=qty*currentUnitCny;
+        current.goodsVnd+=qty*currentUnitCny*rate;
+      }else if(legacyUnitCny>0){
+        current.goodsCny+=qty*legacyUnitCny;
+        current.goodsVnd+=qty*legacyUnitCny*rate;
+      }else if(legacyUnitPriceVnd>0){
+        current.goodsVnd+=qty*legacyUnitPriceVnd;
+      }
+      codeStats.set(code,current);
+    }
+
+    const fabricCosts=sourceCosts.map((cost:any)=>{
+      const code=String(cost?.fabricCode||"").trim().toUpperCase();
+      const stats=codeStats.get(code)||{rollCount:0,totalKg:0,goodsCny:0,goodsVnd:0};
+      const chinaShippingCny=Number(this.n(cost?.chinaShippingCny)||0);
+      const chinaShippingVnd=chinaShippingCny*rate;
+      const vnRate=Number(this.n(cost?.vietnamShippingRateVndPerKg)||0);
+      const storedVn=Number(this.n(cost?.vietnamShippingVnd)||0);
+      const vietnamShippingVnd=vnRate>0?stats.totalKg*vnRate:storedVn;
+      const totalShippingVnd=chinaShippingVnd+vietnamShippingVnd;
+
+      return {
+        ...cost,
+        vietnamShippingRateVndPerKg:vnRate,
+        vietnamShippingVnd,
+        rollCount:stats.rollCount,
+        totalKg:stats.totalKg,
+        goodsCny:stats.goodsCny,
+        goodsVnd:stats.goodsVnd,
+        chinaShippingVnd,
+        totalShippingVnd,
+        shippingPerRollVnd:stats.rollCount?totalShippingVnd/stats.rollCount:0,
+        fabricPerRollVnd:stats.rollCount?stats.goodsVnd/stats.rollCount:0,
+        landedPerRollVnd:stats.rollCount?(stats.goodsVnd+totalShippingVnd)/stats.rollCount:0,
+      };
+    });
+
     const byCode=new Map(fabricCosts.map((x:any)=>[String(x.fabricCode||"").toUpperCase(),x]));
-    const rolls=sourceRolls.map((roll:any)=>{const qty=this.rollPriceQty(roll),unitPriceCny=Number(this.n(roll?.unitPriceCny)||0),lineAmountCny=qty*unitPriceCny,lineAmountVnd=lineAmountCny*rate,code=String(roll?.fabricCode||row?.fabricCode||"").trim().toUpperCase(),cc:any=byCode.get(code),allocatedShippingVnd=Number(cc?.shippingPerRollVnd||0);return{...roll,priceQty:qty,lineAmountCny,lineAmountVnd,allocatedShippingVnd,landedCostVnd:lineAmountVnd+allocatedShippingVnd}});
-    const goodsCny=rolls.reduce((sum:number,x:any)=>sum+Number(x.lineAmountCny||0),0),goodsVnd=goodsCny*rate,chinaShippingCny=fabricCosts.reduce((sum:number,x:any)=>sum+Number(this.n(x?.chinaShippingCny)||0),0),chinaShippingVnd=chinaShippingCny*rate,vietnamShippingVnd=fabricCosts.reduce((sum:number,x:any)=>sum+Number(x?.vietnamShippingVnd||0),0),totalShippingVnd=chinaShippingVnd+vietnamShippingVnd;
-    return {rolls,fabricCosts,summary:{exchangeRateToVnd:rate,goodsCny,goodsVnd,chinaShippingCny,chinaShippingVnd,vietnamShippingVnd,totalShippingVnd,grandTotalVnd:goodsVnd+totalShippingVnd}};
+    const rolls=sourceRolls.map((roll:any)=>{
+      const currentUnitCny=Number(this.n(roll?.unitPriceCny)||0);
+      const qty=currentUnitCny>0?this.rollPriceQty(roll):legacyQty(roll);
+      const effectiveUnitCny=currentUnitCny>0?currentUnitCny:legacyUnitCny;
+      const lineAmountCny=effectiveUnitCny>0?qty*effectiveUnitCny:0;
+      const lineAmountVnd=lineAmountCny>0
+        ? lineAmountCny*rate
+        : legacyUnitPriceVnd>0
+          ? qty*legacyUnitPriceVnd
+          : 0;
+      const code=String(roll?.fabricCode||row?.fabricCode||"").trim().toUpperCase();
+      const cc:any=byCode.get(code);
+      const allocatedShippingVnd=Number(cc?.shippingPerRollVnd||0);
+
+      return {
+        ...roll,
+        unitPriceCny:currentUnitCny>0
+          ? roll.unitPriceCny
+          : legacyUnitCny>0
+            ? legacyUnitCny
+            : null,
+        priceUnit:currentUnitCny>0
+          ? (roll.priceUnit||"METER")
+          : (legacyPriceUnit||"METER"),
+        priceQty:qty,
+        lineAmountCny,
+        lineAmountVnd,
+        allocatedShippingVnd,
+        landedCostVnd:lineAmountVnd+allocatedShippingVnd,
+        legacyReceiptPrice:currentUnitCny<=0&&(legacyUnit>0||legacyUnitVnd>0),
+      };
+    });
+
+    const goodsCny=rolls.reduce((sum:number,x:any)=>sum+Number(x.lineAmountCny||0),0);
+    const goodsVnd=rolls.reduce((sum:number,x:any)=>sum+Number(x.lineAmountVnd||0),0);
+    const chinaShippingCny=fabricCosts.reduce((sum:number,x:any)=>sum+Number(this.n(x?.chinaShippingCny)||0),0);
+    const chinaShippingVnd=chinaShippingCny*rate;
+    const vietnamShippingVnd=fabricCosts.reduce((sum:number,x:any)=>sum+Number(x?.vietnamShippingVnd||0),0);
+    const totalShippingVnd=chinaShippingVnd+vietnamShippingVnd;
+
+    return {
+      rolls,
+      fabricCosts,
+      summary:{
+        exchangeRateToVnd:rate,
+        goodsCny,
+        goodsVnd,
+        chinaShippingCny,
+        chinaShippingVnd,
+        vietnamShippingVnd,
+        totalShippingVnd,
+        grandTotalVnd:goodsVnd+totalShippingVnd,
+      }
+    };
   }
 
   private receiptForUser(row: any, user?: any) {
     if (!row) return row;
-    const canViewCost = user === undefined || this.userHas(user, "fabric_receipt.cost.view") || this.userHas(user, "fabric_receipt.cost.edit");
+    const canViewCost = user === undefined || this.isAdminUser(user);
     const rollTotals = Array.isArray(row.rolls) && row.rolls.length ? this.receiptTotalsFromRolls(row.rolls, row) : null;
     const priced=this.receiptCostSummary(row);
     const fabricConfigs=(Array.isArray(row.fabricConfigs)?row.fabricConfigs:[]).map((x:any)=>({...x,supplier:this.supplierForUser(x.supplier,user)}));
@@ -1730,7 +1855,7 @@ export class SampleFabricService {
     const board = canLinkBoard && body?.fabricBoardId ? await this.prisma.fabricBoard.findUnique({ where: { id: body.fabricBoardId } }) : null;
     const totals=this.receiptTotalsFromRolls(rolls,body);
     const receiver=await this.receiptReceiverSnapshot(body?.receivedByStaffId);
-    const canEditCost=this.userHas(user, "fabric_receipt.cost.edit");
+    const canEditCost=this.isAdminUser(user);
     const color = canLinkBoard && body?.fabricColorId ? await this.prisma.fabricBoardColor.findUnique({ where: { id: body.fabricColorId } }) : null;
     const created = await this.prisma.fabricReceipt.create({
       data: {
@@ -1812,7 +1937,7 @@ export class SampleFabricService {
       const board = canLinkBoard && body?.fabricBoardId ? await tx.fabricBoard.findUnique({ where: { id: body.fabricBoardId } }) : null;
       const color = canLinkBoard && body?.fabricColorId ? await tx.fabricBoardColor.findUnique({ where: { id: body.fabricColorId } }) : null;
       const receiver = body?.receivedByStaffId !== undefined ? await this.receiptReceiverSnapshot(body.receivedByStaffId) : undefined;
-      const canEditCost=this.userHas(user, "fabric_receipt.cost.edit");
+      const canEditCost=this.isAdminUser(user);
       const totals = Array.isArray(body?.rolls) ? this.receiptTotalsFromRolls(body.rolls,body) : null;
       if (Array.isArray(body?.rolls)) {
         const keepIds: string[] = [];
@@ -1933,7 +2058,7 @@ export class SampleFabricService {
   }
 
   async setFabricReceiptCost(id: string, body: any, user?: any) {
-    if (!this.userHas(user, "fabric_receipt.cost.edit")) throw new BadRequestException("Không có quyền sửa đơn giá / tỷ giá vải.");
+    if (!this.isAdminUser(user)) throw new BadRequestException("Chỉ Admin / Owner được sửa đơn giá / tỷ giá vải.");
     const found = await this.prisma.fabricReceipt.findUnique({ where: { id }, select: { id: true } });
     if (!found) throw new NotFoundException("Không tìm thấy phiếu vải về.");
 

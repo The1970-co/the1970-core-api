@@ -147,12 +147,12 @@ export class OrderService implements OnModuleInit {
       const bankName = String(item?.bankName || "").trim();
       const accountNumber = String(item?.accountNumber || "").replace(/\s+/g, "").trim();
       const accountName = String(item?.accountName || "").trim().toUpperCase();
-      const isActive = item?.isActive !== false;
+      const isActive = true;
       const sortOrder = Number.isFinite(Number(item?.sortOrder))
         ? Number(item.sortOrder)
         : slot * 10;
 
-      if (isActive && (!bankCode || !accountNumber || !accountName)) {
+      if (!bankCode || !accountNumber || !accountName) {
         throw new BadRequestException(
           `Tài khoản QR số ${slot} đang bật nhưng thiếu ngân hàng, số tài khoản hoặc tên tài khoản`,
         );
