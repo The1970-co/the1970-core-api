@@ -155,6 +155,20 @@ export class OrderController {
     return this.orderService.getAssignableStaffForOrders(req.user);
   }
 
+  @Get("pos-bank-accounts")
+  async getPosBankAccounts() {
+    return this.orderService.getPosBankAccounts();
+  }
+
+  @Patch("pos-bank-accounts")
+  async savePosBankAccounts(
+    @Body() body: any,
+    @Req() req: Request & { user?: any },
+  ) {
+    this.assertPermission(req.user, "settings.edit");
+    return this.orderService.savePosBankAccounts(body);
+  }
+
   @Get(":id")
   async getOrderById(
     @Param("id") id: string,

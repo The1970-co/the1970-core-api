@@ -100,6 +100,106 @@ export class OrderService implements OnModuleInit {
   }
 
 
+  private async ensurePosBankAccountTable() {
+    await this.prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "PosBankAccount" (
+        "id" TEXT PRIMARY KEY,
+        "slot" INTEGER NOT NULL UNIQUE,
+        "label" TEXT NOT NULL,
+        "bankCode" TEXT NOT NULL,
+        "bankName" TEXT,
+        "accountNumber" TEXT NOT NULL,
+        "accountName" TEXT NOT NULL,
+        "isActive" BOOLEAN NOT NULL DEFAULT TRUE,
+        "sortOrder" INTEGER NOT NULL DEFAULT 0,
+        "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+  }
+
+  async getPosBankAccounts() {
+    await this.ensurePosBankAccountTable();
+
+    const rows = await this.prisma.$queryRawUnsafe<any[]>(`
+      SELECT
+        "id", "slot", "label", "bankCode", "bankName",
+        "accountNumber", "accountName", "isActive", "sortOrder"
+      FROM "PosBankAccount"
+      ORDER BY "sortOrder" ASC, "slot" ASC
+    `);
+
+    return Array.isArray(rows) ? rows : [];
+  }
+
+  async savePosBankAccounts(input: any) {
+    await this.ensurePosBankAccountTable();
+
+    const rawItems = Array.isArray(input) ? input : input?.items;
+    if (!Array.isArray(rawItems)) {
+      throw new BadRequestException("Danh sách tài khoản QR không hợp lệ");
+    }
+
+    const items = rawItems.map((item: any, index: number) => {
+      const slot = index + 1;
+      const label = String(item?.label || `Tài khoản ${slot}`).trim();
+      const bankCode = String(item?.bankCode || "").trim().toUpperCase();
+      const bankName = String(item?.bankName || "").trim();
+      const accountNumber = String(item?.accountNumber || "").replace(/\s+/g, "").trim();
+      const accountName = String(item?.accountName || "").trim().toUpperCase();
+      const isActive = item?.isActive !== false;
+      const sortOrder = Number.isFinite(Number(item?.sortOrder))
+        ? Number(item.sortOrder)
+        : slot * 10;
+
+      if (isActive && (!bankCode || !accountNumber || !accountName)) {
+        throw new BadRequestException(
+          `Tài khoản QR số ${slot} đang bật nhưng thiếu ngân hàng, số tài khoản hoặc tên tài khoản`,
+        );
+      }
+
+      return {
+        id: `pos-bank-${slot}`,
+        slot,
+        label,
+        bankCode,
+        bankName: bankName || null,
+        accountNumber,
+        accountName,
+        isActive,
+        sortOrder,
+      };
+    });
+
+    await this.prisma.$transaction(async (tx: any) => {
+      await tx.$executeRawUnsafe(`DELETE FROM "PosBankAccount"`);
+
+      for (const item of items) {
+        await tx.$executeRawUnsafe(
+          `
+            INSERT INTO "PosBankAccount" (
+              "id", "slot", "label", "bankCode", "bankName",
+              "accountNumber", "accountName", "isActive", "sortOrder",
+              "createdAt", "updatedAt"
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),NOW())
+          `,
+          item.id,
+          item.slot,
+          item.label,
+          item.bankCode,
+          item.bankName,
+          item.accountNumber,
+          item.accountName,
+          item.isActive,
+          item.sortOrder,
+        );
+      }
+    });
+
+    return this.getPosBankAccounts();
+  }
+
   private toNumber(value: unknown) {
     if (typeof value === "number") return value;
     return Number(value || 0);

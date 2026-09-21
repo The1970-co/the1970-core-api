@@ -3390,12 +3390,31 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
         where: { providerMessageId: metaProviderMessageId },
         select: { id: true },
       });
-      message = echoed
-        ? await this.prisma.omniMessage.update({
-            where: { id: echoed.id },
-            data: messageData,
-          })
-        : await this.prisma.omniMessage.create({ data: messageData });
+      if (echoed) {
+        message = await this.prisma.omniMessage.update({
+          where: { id: echoed.id },
+          data: messageData,
+        });
+      } else {
+        try {
+          message = await this.prisma.omniMessage.create({ data: messageData });
+        } catch (error: any) {
+          const target = Array.isArray(error?.meta?.target)
+            ? error.meta.target.map((item: any) => String(item || "")).join(",")
+            : String(error?.meta?.target || "");
+
+          // Meta echo có thể tạo providerMessageId đúng giữa findUnique() và create().
+          // Đây là race hợp lệ: lấy row echo vừa tạo và cập nhật lại đúng tên nhân viên.
+          if (error?.code === "P2002" && target.includes("providerMessageId")) {
+            message = await this.prisma.omniMessage.update({
+              where: { providerMessageId: metaProviderMessageId },
+              data: messageData,
+            });
+          } else {
+            throw error;
+          }
+        }
+      }
     } else {
       message = await this.prisma.omniMessage.create({ data: messageData });
     }
