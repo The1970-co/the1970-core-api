@@ -1576,6 +1576,7 @@ export class ProductionService {
                   select: {
                     fabricCode: true,
                     chinaShippingCny: true,
+                    vietnamShippingRateVndPerKg: true,
                     vietnamShippingVnd: true,
                   },
                 },
@@ -1589,14 +1590,25 @@ export class ProductionService {
     const siblingRolls = receiptIds.length
       ? await this.prisma.fabricReceiptRoll.findMany({
           where: { fabricReceiptId: { in: receiptIds } },
-          select: { id: true, fabricReceiptId: true, fabricCode: true },
+          select: {
+            id: true,
+            fabricReceiptId: true,
+            fabricCode: true,
+            actualKg: true,
+            supplierDeclaredKg: true,
+          },
         })
       : [];
 
     const siblingCount = new Map<string, number>();
+    const siblingKg = new Map<string, number>();
     for (const row of siblingRolls as any[]) {
       const key = `${row.fabricReceiptId}|||${String(row.fabricCode || "").trim().toUpperCase()}`;
       siblingCount.set(key, (siblingCount.get(key) || 0) + 1);
+      siblingKg.set(
+        key,
+        (siblingKg.get(key) || 0) + Number(row.actualKg ?? row.supplierDeclaredKg ?? 0),
+      );
     }
 
     const allocationByRoll = new Map((orderRolls || []).map((x: any) => [String(x.fabricReceiptRollId), x]));
@@ -1657,9 +1669,15 @@ export class ProductionService {
         ? receipt.fabricCosts.find((x: any) => String(x.fabricCode || "").trim().toUpperCase() === code)
         : null;
       const chinaShippingVnd = Number(costRow?.chinaShippingCny || 0) * rate;
-      const vietnamShippingVnd = Number(costRow?.vietnamShippingVnd || 0);
       const countKey = `${roll.fabricReceiptId}|||${code}`;
       const codeRollCount = Math.max(1, siblingCount.get(countKey) || 1);
+      const codeTotalKg = Math.max(0, siblingKg.get(countKey) || 0);
+      const vietnamShippingRateVndPerKg = Number(costRow?.vietnamShippingRateVndPerKg || 0);
+      const storedVietnamShippingVnd = Number(costRow?.vietnamShippingVnd || 0);
+      const vietnamShippingVnd =
+        vietnamShippingRateVndPerKg > 0
+          ? codeTotalKg * vietnamShippingRateVndPerKg
+          : storedVietnamShippingVnd;
       const shippingPerRollVnd = (chinaShippingVnd + vietnamShippingVnd) / codeRollCount;
 
       const fraction = priceUnit === "ROLL"
@@ -1687,6 +1705,11 @@ export class ProductionService {
         costVnd,
         missingPrice,
         priceSource,
+        goodsFullVnd,
+        shippingPerRollVnd,
+        chinaShippingVnd,
+        vietnamShippingVnd,
+        shippingFraction: fraction,
       };
     });
 
