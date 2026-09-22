@@ -43,6 +43,9 @@ type GetOrdersParams = {
    * Có thể truyền nhiều giá trị dạng comma-separated.
    */
   codReconciliationStatus?: string;
+  /** Danh sách ID/tên nhân viên tạo đơn, phân tách bằng dấu | hoặc dấu phẩy. */
+  createdByStaffIds?: string;
+  createdByStaffNames?: string;
   quickStatus?: string;
   exportMode?: boolean;
 };
@@ -2557,6 +2560,41 @@ export class OrderService implements OnModuleInit {
       .filter((item) => item && item !== "ALL");
   }
 
+  private normalizeOrderListFilterValues(value?: string | null) {
+    return Array.from(
+      new Set(
+        String(value || "")
+          .split(/[\|,;]/g)
+          .map((item) => item.trim())
+          .filter(Boolean),
+      ),
+    );
+  }
+
+  private buildCreatedByStaffWhere(
+    staffIds?: string | null,
+    staffNames?: string | null,
+  ): Prisma.OrderWhereInput | null {
+    const ids = this.normalizeOrderListFilterValues(staffIds);
+    const names = this.normalizeOrderListFilterValues(staffNames);
+    const conditions: Prisma.OrderWhereInput[] = [];
+
+    if (ids.length) {
+      conditions.push({ createdByStaffId: { in: ids } });
+    }
+
+    if (names.length) {
+      conditions.push({
+        createdByStaffName: {
+          in: names,
+          mode: "insensitive",
+        },
+      });
+    }
+
+    return conditions.length ? { OR: conditions } : null;
+  }
+
   private trueCodReconciliationStatusSql(alias = "s") {
     return `UPPER(COALESCE(${alias}."codReconciliationStatus", '')) IN (
       'PAID',
@@ -3084,6 +3122,8 @@ export class OrderService implements OnModuleInit {
       dateTo = "",
       datePreset = "",
       codReconciliationStatus = "",
+      createdByStaffIds = "",
+      createdByStaffNames = "",
       quickStatus = "",
       exportMode = false,
     } = params;
@@ -3120,10 +3160,18 @@ export class OrderService implements OnModuleInit {
 
     let searchWhere: Prisma.OrderWhereInput | null = null;
     let exactSearchHit = false;
+    const createdByStaffWhere = this.buildCreatedByStaffWhere(
+      createdByStaffIds,
+      createdByStaffNames,
+    );
 
     if (keyword) {
       const exactWhere = this.buildOrderWhereByUser(user, {
-        AND: [baseWhere, this.buildExactOrderSearchWhere(keyword)],
+        AND: [
+          baseWhere,
+          ...(createdByStaffWhere ? [createdByStaffWhere] : []),
+          this.buildExactOrderSearchWhere(keyword),
+        ],
       } as Prisma.OrderWhereInput);
 
       const exactTotal = await this.prisma.order.count({ where: exactWhere });
@@ -3137,7 +3185,12 @@ export class OrderService implements OnModuleInit {
     }
 
     const quickStatusWhere = this.buildQuickStatusWhere(quickStatus);
-    const filterParts = [baseWhere, searchWhere, quickStatusWhere].filter(Boolean) as Prisma.OrderWhereInput[];
+    const filterParts = [
+      baseWhere,
+      createdByStaffWhere,
+      searchWhere,
+      quickStatusWhere,
+    ].filter(Boolean) as Prisma.OrderWhereInput[];
 
     const scopedWhere = this.buildOrderWhereByUser(
       user,

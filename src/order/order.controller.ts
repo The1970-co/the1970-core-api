@@ -106,6 +106,8 @@ export class OrderController {
     @Query("codReconciliationStatus") codReconciliationStatus?: string,
     @Query("codReconciliation") codReconciliation?: string,
     @Query("codReconciliationFilter") codReconciliationFilter?: string,
+    @Query("createdByStaffIds") createdByStaffIds?: string,
+    @Query("createdByStaffNames") createdByStaffNames?: string,
     @Query("quickStatus") quickStatus?: string,
     @Query("exportMode") exportMode?: string
   ) {
@@ -125,6 +127,8 @@ export class OrderController {
           codReconciliation ||
           codReconciliationFilter ||
           "",
+        createdByStaffIds: createdByStaffIds || "",
+        createdByStaffNames: createdByStaffNames || "",
         quickStatus: quickStatus || "",
         exportMode: ["1", "true", "yes"].includes(String(exportMode || "").toLowerCase()),
       },
