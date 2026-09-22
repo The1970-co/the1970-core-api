@@ -446,7 +446,7 @@ export class PayrollService {
             select: {
               branchId: true,
               branchName: true,
-              taggedProductQty: true,
+              successItemQty: true,
               normalHours: true,
               note: true,
             },
@@ -494,12 +494,13 @@ export class PayrollService {
       };
 
       for (const line of row.lines || []) {
-        // "Tổng SP" trên bảng lương là SP gắn tên dùng để tính lương sản phẩm,
-        // không phải số lượng sản phẩm lấy từ đơn bán thành công.
+        // Cột "SP" trong chi tiết kỳ lương đang hiển thị successItemQty.
+        // Cộng trực tiếp theo chi nhánh của dòng lương để số ngoài danh sách
+        // luôn khớp với tổng các dòng ở trang chi tiết.
         addProducts(
           line.branchId || null,
           line.branchName || null,
-          line.taggedProductQty,
+          line.successItemQty,
         );
 
         const attendanceByBranch = this.splitPayrollNote(line.note).attendanceByBranch;
