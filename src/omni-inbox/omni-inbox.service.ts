@@ -572,7 +572,12 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       const message =
         json?.error?.message || `Meta Graph API lỗi ${res.status}`;
       this.logger.warn(`[META_GRAPH_POST_FAILED] ${path} | ${message}`);
-      throw new BadRequestException(message);
+      const error = new BadRequestException(message);
+      const attachmentRejected = res.status === 400 &&
+        Number(json?.error?.code) === 100 &&
+        /(?:không thể tải (?:file|tệp) đính kèm lên|failed to (?:upload|fetch) (?:the )?attachment|could not (?:upload|fetch) (?:the )?attachment)/i.test(message);
+      Object.assign(error, { metaAttachmentRejected: attachmentRejected });
+      throw error;
     }
 
     return json as T;
@@ -3194,7 +3199,8 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  // Optimize ordinary Cloudinary photo URLs only. Preserve signed URLs,
+  // Optimize product photos only. Chat uploads are already resized by the UI.
+  // Preserve signed URLs,
   // existing transformations, animated media and external attachments.
   private optimizeOutgoingImageUrl(value: string): string {
     const original = safeText(value);
@@ -3203,7 +3209,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       if (url.protocol !== "https:" || url.hostname !== "res.cloudinary.com" ||
           url.port || url.username || url.password || url.search || url.hash) return original;
       const match = url.pathname.match(
-        /^(\/[^/]+\/image\/upload\/)(v\d+\/the1970\/(?:products|omni-inbox)\/.+\.(jpe?g|png))$/i,
+        /^(\/[^/]+\/image\/upload\/)(v\d+\/the1970\/products\/.+\.(jpe?g|png))$/i,
       );
       if (!match) return original;
       const format = match[3].toLowerCase() === "png" ? "f_png" : "f_jpg";
@@ -3211,6 +3217,33 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       return url.toString();
     } catch {
       return original;
+    }
+  }
+
+  private async sendWithOriginalImageFallback<T>(
+    send: (message: any) => Promise<T>,
+    message: any,
+    originalUrl: string,
+    onFallback: () => void,
+  ): Promise<T> {
+    try {
+      return await send(message);
+    } catch (error: any) {
+      const payload = message?.attachment?.payload;
+      if (error?.metaAttachmentRejected !== true ||
+          message?.attachment?.type !== "image" ||
+          !originalUrl || !payload?.url || payload.url === originalUrl) throw error;
+
+      // Only retry an explicit attachment rejection, never an ambiguous timeout.
+      // Keep the same messaging mode/recipient and make at most one retry.
+      onFallback();
+      return await send({
+        ...message,
+        attachment: {
+          ...message.attachment,
+          payload: { ...payload, url: originalUrl },
+        },
+      });
     }
   }
 
@@ -3226,6 +3259,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     });
     if (!conversation) throw new NotFoundException("Không tìm thấy hội thoại.");
 
+    const originalAttachmentUrl = safeText(dto.attachmentUrl);
     // Use the same delivery URL for Meta and the saved message so the Inbox
     // also displays the lightweight image. Cloudinary keeps the original asset.
     dto = {
@@ -3316,14 +3350,31 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
           inboundAgeMs > standardWindowMs &&
           inboundAgeMs <= humanAgentWindowMs;
 
+        const sendCurrentMessage = (humanAgent: boolean) =>
+          this.sendWithOriginalImageFallback(
+            (message: any) => humanAgent
+              ? this.sendMetaHumanAgentMessage(recipientPsid, message)
+              : this.metaPost("me/messages", {
+                  recipient: { id: recipientPsid },
+                  messaging_type: "RESPONSE",
+                  message,
+                }),
+            metaMessage,
+            originalAttachmentUrl,
+            () => {
+              dto.attachmentUrl = originalAttachmentUrl;
+              // Also retain the fallback URL if a later window retry is needed.
+              if (metaMessage.attachment) {
+                metaMessage.attachment.payload.url = originalAttachmentUrl;
+              }
+              this.logger.warn(
+                `[META_IMAGE_ORIGINAL_FALLBACK] conversation=${id} reason=ATTACHMENT_REJECTED`,
+              );
+            },
+          );
+
         try {
-          const metaResult: any = shouldUseHumanAgent
-            ? await this.sendMetaHumanAgentMessage(recipientPsid, metaMessage)
-            : await this.metaPost("me/messages", {
-                recipient: { id: recipientPsid },
-                messaging_type: "RESPONSE",
-                message: metaMessage,
-              });
+          const metaResult: any = await sendCurrentMessage(shouldUseHumanAgent);
           metaProviderMessageId =
             safeText(metaResult?.message_id || metaResult?.messageId) || null;
 
@@ -3357,10 +3408,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
             );
 
             try {
-              const humanResult: any = await this.sendMetaHumanAgentMessage(
-                recipientPsid,
-                metaMessage,
-              );
+              const humanResult: any = await sendCurrentMessage(true);
               metaProviderMessageId =
                 safeText(humanResult?.message_id || humanResult?.messageId) || null;
 
