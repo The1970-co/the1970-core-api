@@ -3194,6 +3194,26 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  // Optimize ordinary Cloudinary photo URLs only. Preserve signed URLs,
+  // existing transformations, animated media and external attachments.
+  private optimizeOutgoingImageUrl(value: string): string {
+    const original = safeText(value);
+    try {
+      const url = new URL(original);
+      if (url.protocol !== "https:" || url.hostname !== "res.cloudinary.com" ||
+          url.port || url.username || url.password || url.search || url.hash) return original;
+      const match = url.pathname.match(
+        /^(\/[^/]+\/image\/upload\/)(v\d+\/the1970\/(?:products|omni-inbox)\/.+\.(jpe?g|png))$/i,
+      );
+      if (!match) return original;
+      const format = match[3].toLowerCase() === "png" ? "f_png" : "f_jpg";
+      url.pathname = match[1] + "c_limit,w_1600,h_1600/q_auto/" + format + "/" + match[2];
+      return url.toString();
+    } catch {
+      return original;
+    }
+  }
+
   async sendMessage(
     id: string,
     dto: { text: string; attachmentUrl?: string; attachmentType?: "image" | "file"; fileName?: string },
@@ -3206,6 +3226,14 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     });
     if (!conversation) throw new NotFoundException("Không tìm thấy hội thoại.");
 
+    // Use the same delivery URL for Meta and the saved message so the Inbox
+    // also displays the lightweight image. Cloudinary keeps the original asset.
+    dto = {
+      ...dto,
+      attachmentUrl: dto.attachmentType === "file"
+        ? dto.attachmentUrl
+        : this.optimizeOutgoingImageUrl(dto.attachmentUrl || ""),
+    };
     const text = safeText(dto.text);
     if (!text && !dto.attachmentUrl)
       throw new BadRequestException("Tin nhắn trống.");

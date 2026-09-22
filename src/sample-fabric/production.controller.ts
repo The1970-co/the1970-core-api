@@ -248,6 +248,12 @@ export class ProductionController {
     return this.service.createNplIssue(id, body, req.user);
   }
 
+  @Post("orders/:id/complete")
+  @RequirePermissions("production.edit")
+  complete(@Param("id") id: string, @Req() req: any) {
+    return this.service.completeOrder(id, req.user);
+  }
+
   @Post("orders/:id/cancel")
   @RequirePermissions("production.edit")
   cancel(@Param("id") id: string, @Req() req: any) {

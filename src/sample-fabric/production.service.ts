@@ -77,6 +77,17 @@ export class ProductionService {
     return matched?.[1] ? this.normalizeProductionSize(matched[1]) : null;
   }
 
+  private colorScopedAccessory(note?: any) {
+    return /\[\[COLOR_SCOPED\]\]/i.test(String(note || ""));
+  }
+
+  private materialScopeLabel(value?: any) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    if (/^(MÀU|MAU):/i.test(raw)) return `màu ${raw.split(":").slice(1).join(":").trim()}`;
+    return `size ${raw}`;
+  }
+
   private normalizeAccessorySpecifications(typeName: string, value: any) {
     const specs = value && typeof value === "object" && !Array.isArray(value) ? { ...value } : {};
     if (String(typeName || "").trim() !== "Mác Size") return specs;
@@ -717,11 +728,30 @@ export class ProductionService {
       factoryIds.length ? this.prisma.productionPartner.findMany({ where: { id: { in: factoryIds } }, select: { id: true, code: true, name: true } }) : [],
       sampleIds.length ? this.prisma.designSample.findMany({ where: { id: { in: sampleIds } }, select: { id: true, code: true, name: true, coverImageUrl: true } }) : [],
       productIds.length ? this.prisma.product.findMany({ where: { id: { in: productIds } }, select: { id: true, name: true, slug: true, imageUrl: true, variants: { select: { sku: true }, take: 10 } } }) : [],
-      orderIds.length ? this.prisma.productionOrderRoll.findMany({ where: { productionOrderId: { in: orderIds } }, select: { productionOrderId: true, allocatedM: true } }) : [],
-      orderIds.length ? this.prisma.productionSizePlan.findMany({ where: { productionOrderId: { in: orderIds } }, select: { productionOrderId: true, plannedQty: true, actualQty: true, size: true } }) : [],
+      orderIds.length ? this.prisma.productionOrderRoll.findMany({ where: { productionOrderId: { in: orderIds } }, select: { productionOrderId: true, fabricReceiptRollId: true, allocatedM: true, colorName: true, colorCode: true } }) : [],
+      orderIds.length ? this.prisma.productionSizePlan.findMany({ where: { productionOrderId: { in: orderIds } }, select: { productionOrderId: true, plannedQty: true, actualQty: true, size: true, colorName: true, colorCode: true } }) : [],
       orderIds.length ? this.prisma.productionOrderAccessorySpec.findMany({ where: { productionOrderId: { in: orderIds } }, select: { productionOrderId: true } }) : [],
       orderIds.length ? this.prisma.productionMaterialCalc.findMany({ where: { productionOrderId: { in: orderIds } }, select: { productionOrderId: true } }) : [],
     ]);
+
+    const sourceRollIds = Array.from(new Set<string>((rollRows as any[]).map((x: any) => String(x.fabricReceiptRollId || "")).filter(Boolean)));
+    const sourceRolls = sourceRollIds.length ? await this.prisma.fabricReceiptRoll.findMany({
+      where: { id: { in: sourceRollIds } },
+      select: {
+        id: true,
+        fabricCode: true,
+        colorName: true,
+        colorCode: true,
+        fabricReceipt: {
+          select: {
+            fabricName: true,
+            fabricCode: true,
+            fabricConfigs: { select: { fabricCode: true, materialName: true } },
+          },
+        },
+      },
+    }) : [];
+    const sourceRollById = new Map((sourceRolls as any[]).map((x: any) => [String(x.id), x]));
 
     const summaryByOrder = new Map<string, any>();
     for (const id of orderIds) {
@@ -733,6 +763,9 @@ export class ProductionService {
         totalActualQty: 0,
         accessorySpecCount: 0,
         materialCalcCount: 0,
+        fabricNames: new Set<string>(),
+        materialNames: new Set<string>(),
+        colorTotals: new Map<string, { name: string; code?: string | null; plannedQty: number; actualQty: number }>(),
       });
     }
     for (const row of rollRows as any[]) {
@@ -740,13 +773,30 @@ export class ProductionService {
       if (!s) continue;
       s.rollCount += 1;
       s.allocatedM += Number(row.allocatedM || 0);
+      const detail: any = sourceRollById.get(String(row.fabricReceiptRollId || ""));
+      const receipt: any = detail?.fabricReceipt || {};
+      const fabricName = String(receipt?.fabricName || detail?.fabricCode || receipt?.fabricCode || "").trim();
+      if (fabricName) s.fabricNames.add(fabricName);
+      const rollFabricCode = String(detail?.fabricCode || receipt?.fabricCode || "").trim();
+      const cfg = Array.isArray(receipt?.fabricConfigs) ? receipt.fabricConfigs.find((x: any) => String(x.fabricCode || "").trim() === rollFabricCode) : null;
+      const materialName = String(cfg?.materialName || "").trim();
+      if (materialName) s.materialNames.add(materialName);
     }
     for (const row of sizeRows as any[]) {
       const s = summaryByOrder.get(row.productionOrderId);
       if (!s) continue;
       s.sizeRowCount += 1;
-      s.totalPlannedQty += Number(row.plannedQty || 0);
-      s.totalActualQty += Number(row.actualQty ?? row.plannedQty ?? 0);
+      const plannedQty = Number(row.plannedQty || 0);
+      const actualQty = Number(row.actualQty ?? row.plannedQty ?? 0);
+      s.totalPlannedQty += plannedQty;
+      s.totalActualQty += actualQty;
+      const colorName = String(row.colorName || "Không rõ màu").trim() || "Không rõ màu";
+      const colorKey = colorName.toLocaleUpperCase("vi");
+      const current = s.colorTotals.get(colorKey) || { name: colorName, code: row.colorCode || null, plannedQty: 0, actualQty: 0 };
+      current.plannedQty += plannedQty;
+      current.actualQty += actualQty;
+      if (!current.code && row.colorCode) current.code = row.colorCode;
+      s.colorTotals.set(colorKey, current);
     }
     for (const row of accessoryRows as any[]) {
       const s = summaryByOrder.get(row.productionOrderId);
@@ -792,6 +842,10 @@ export class ProductionService {
           totalPlannedQty: Number(summary.totalPlannedQty || 0),
           totalActualQty: Number(summary.totalActualQty || 0),
           sizeRatioText,
+          fabricNames: Array.from(summary.fabricNames || []),
+          materialNames: Array.from(summary.materialNames || []),
+          colorCount: Number(summary.colorTotals?.size || 0),
+          colorBreakdown: Array.from(summary.colorTotals?.values?.() || []).sort((a: any, b: any) => String(a.name || "").localeCompare(String(b.name || ""), "vi")),
         },
       };
     });
@@ -1109,12 +1163,18 @@ export class ProductionService {
 
     // Sau khi có bảng cắt, NPL luôn bám số CẮT THỰC TẾ. Nếu một dòng cũ chưa có actualQty thì tạm dùng plannedQty.
     const totalsBySize: Record<string, number> = {};
+    const totalsByColor = new Map<string, { name: string; qty: number }>();
     let totalQty = 0;
     for (const row of sizeRows as any[]) {
       const qty = Number(row.actualQty ?? row.plannedQty ?? 0);
       totalQty += qty;
       const size = this.normalizeProductionSize(row.size);
       totalsBySize[size] = (totalsBySize[size] || 0) + qty;
+      const colorName = String(row.colorName || "Không rõ màu").trim() || "Không rõ màu";
+      const colorKey = colorName.toLocaleUpperCase("vi");
+      const color = totalsByColor.get(colorKey) || { name: colorName, qty: 0 };
+      color.qty += qty;
+      totalsByColor.set(colorKey, color);
     }
 
     let specs = await this.prisma.productionOrderAccessorySpec.findMany({ where: { productionOrderId: id } });
@@ -1161,6 +1221,10 @@ export class ProductionService {
         // NPL cố định một size (VD khóa 72cm chỉ dùng cho size L): chỉ tính đúng sản lượng size đó.
         const sizeQty = this.totalForTaggedSize(totalsBySize, fixedSize);
         materials.push(makeRow(sizeQty * per, fixedSize));
+      } else if (this.colorScopedAccessory(spec.note) && totalsByColor.size) {
+        // Chế độ "Theo màu": cùng một NPL/định mức nhưng tách số lượng riêng theo từng màu sản xuất.
+        // Dùng prefix MÀU: trong sizeLabel để tương thích dữ liệu cũ mà không cần migration DB.
+        for (const color of totalsByColor.values()) materials.push(makeRow(Number(color.qty) * per, `MÀU:${color.name}`));
       } else if (spec.sizeScoped && Object.keys(totalsBySize).length) {
         // Chế độ "Theo tất cả size": sinh một dòng cho mỗi size.
         for (const [size, qty] of Object.entries(totalsBySize)) materials.push(makeRow(Number(qty) * per, size));
@@ -1321,7 +1385,7 @@ export class ProductionService {
       for (const row of requested) {
         const key = this.nplIssueKey(row.accessoryItemId, row.sizeLabel);
         const material: any = stateMap.get(key);
-        if (!material) throw new BadRequestException(`Không tìm thấy dòng NPL ${row.accessoryItemId}${row.sizeLabel ? ` · size ${row.sizeLabel}` : ""}.`);
+        if (!material) throw new BadRequestException(`Không tìm thấy dòng NPL ${row.accessoryItemId}${row.sizeLabel ? ` · ${this.materialScopeLabel(row.sizeLabel)}` : ""}.`);
 
         const remaining = Number(material.remainingToIssue || 0);
         if (row.qty > remaining + 0.0001) {
@@ -1576,7 +1640,6 @@ export class ProductionService {
                   select: {
                     fabricCode: true,
                     chinaShippingCny: true,
-                    vietnamShippingRateVndPerKg: true,
                     vietnamShippingVnd: true,
                   },
                 },
@@ -1590,25 +1653,14 @@ export class ProductionService {
     const siblingRolls = receiptIds.length
       ? await this.prisma.fabricReceiptRoll.findMany({
           where: { fabricReceiptId: { in: receiptIds } },
-          select: {
-            id: true,
-            fabricReceiptId: true,
-            fabricCode: true,
-            actualKg: true,
-            supplierDeclaredKg: true,
-          },
+          select: { id: true, fabricReceiptId: true, fabricCode: true },
         })
       : [];
 
     const siblingCount = new Map<string, number>();
-    const siblingKg = new Map<string, number>();
     for (const row of siblingRolls as any[]) {
       const key = `${row.fabricReceiptId}|||${String(row.fabricCode || "").trim().toUpperCase()}`;
       siblingCount.set(key, (siblingCount.get(key) || 0) + 1);
-      siblingKg.set(
-        key,
-        (siblingKg.get(key) || 0) + Number(row.actualKg ?? row.supplierDeclaredKg ?? 0),
-      );
     }
 
     const allocationByRoll = new Map((orderRolls || []).map((x: any) => [String(x.fabricReceiptRollId), x]));
@@ -1669,15 +1721,9 @@ export class ProductionService {
         ? receipt.fabricCosts.find((x: any) => String(x.fabricCode || "").trim().toUpperCase() === code)
         : null;
       const chinaShippingVnd = Number(costRow?.chinaShippingCny || 0) * rate;
+      const vietnamShippingVnd = Number(costRow?.vietnamShippingVnd || 0);
       const countKey = `${roll.fabricReceiptId}|||${code}`;
       const codeRollCount = Math.max(1, siblingCount.get(countKey) || 1);
-      const codeTotalKg = Math.max(0, siblingKg.get(countKey) || 0);
-      const vietnamShippingRateVndPerKg = Number(costRow?.vietnamShippingRateVndPerKg || 0);
-      const storedVietnamShippingVnd = Number(costRow?.vietnamShippingVnd || 0);
-      const vietnamShippingVnd =
-        vietnamShippingRateVndPerKg > 0
-          ? codeTotalKg * vietnamShippingRateVndPerKg
-          : storedVietnamShippingVnd;
       const shippingPerRollVnd = (chinaShippingVnd + vietnamShippingVnd) / codeRollCount;
 
       const fraction = priceUnit === "ROLL"
@@ -1705,11 +1751,6 @@ export class ProductionService {
         costVnd,
         missingPrice,
         priceSource,
-        goodsFullVnd,
-        shippingPerRollVnd,
-        chinaShippingVnd,
-        vietnamShippingVnd,
-        shippingFraction: fraction,
       };
     });
 
@@ -1954,6 +1995,15 @@ export class ProductionService {
     const issueState = await this.nplIssueState(id, npl.materials);
     const costSummary = await this.productionCostSummary(id, totalActualQty, issueState.materials, rolls, user, (freshOrder || order).productionExtraCosts, (freshOrder || order).productionPriceMultiplier);
     return { totalQty: totalPlannedQty, totalPlannedQty, totalActualQty, colors: this.groupCutRows(sizeRows), materials: issueState.materials, cutHistory, lining, costSummary, nplIssueHistory: issueState.nplIssueHistory, nextNplIssueRound: issueState.nextRoundNo };
+  }
+
+  async completeOrder(id: string, user?: any) {
+    const order = await this.prisma.productionOrder.findUnique({ where: { id }, select: { id: true, status: true } });
+    if (!order) throw new NotFoundException("Không tìm thấy lệnh SX.");
+    if (order.status === "CANCELLED") throw new BadRequestException("Lệnh đã huỷ, không thể đánh dấu hoàn thành.");
+    if (order.status === "COMPLETED") return this.getOrder(id, user);
+    await this.prisma.productionOrder.update({ where: { id }, data: { status: "COMPLETED" } });
+    return this.getOrder(id, user);
   }
 
   async cancelOrder(id: string, user?: any) {

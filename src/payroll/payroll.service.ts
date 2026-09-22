@@ -441,10 +441,83 @@ export class PayrollService {
         orderBy: { createdAt: "desc" },
         skip: (page - 1) * pageSize,
         take: pageSize,
+        include: {
+          lines: {
+            select: {
+              branchId: true,
+              branchName: true,
+              normalHours: true,
+              taggedProductQty: true,
+              note: true,
+            },
+          },
+        },
       }),
     ]);
 
-    return { rows, total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) };
+    const rowsWithWorkTotals = rows.map((row: any) => {
+      const workingHoursByBranch = new Map<string, {
+        branchId: string | null;
+        branchName: string;
+        totalHours: number;
+      }>();
+      let totalTaggedProductQty = 0;
+
+      for (const line of row.lines || []) {
+        totalTaggedProductQty += Number(line.taggedProductQty || 0);
+        const attendanceByBranch = this.splitPayrollNote(line.note).attendanceByBranch;
+        const hourRows = attendanceByBranch.length
+          ? attendanceByBranch.map((item) => ({
+              branchId: item.branchId || null,
+              branchName: item.branchName || item.branchId || "Chưa gán chi nhánh",
+              totalHours: this.toNumber(item.normalHours),
+            }))
+          : [{
+              branchId: line.branchId || null,
+              branchName: line.branchName || line.branchId || "Chưa gán chi nhánh",
+              totalHours: this.toNumber(line.normalHours),
+            }];
+
+        for (const item of hourRows) {
+          const key = String(item.branchId || item.branchName || "UNASSIGNED");
+          const current = workingHoursByBranch.get(key) || {
+            branchId: item.branchId,
+            branchName: item.branchName,
+            totalHours: 0,
+          };
+          current.totalHours += item.totalHours;
+          workingHoursByBranch.set(key, current);
+        }
+      }
+
+      const branchHours = Array.from(workingHoursByBranch.values())
+        .map((item) => ({
+          ...item,
+          totalHours: Math.round(item.totalHours * 100) / 100,
+        }))
+        .sort((a, b) => a.branchName.localeCompare(b.branchName, "vi"));
+      const totalWorkingHours = branchHours.reduce(
+        (sum, item) => sum + item.totalHours,
+        0,
+      );
+      const period = { ...row };
+      delete period.lines;
+
+      return {
+        ...period,
+        totalTaggedProductQty,
+        totalWorkingHours: Math.round(totalWorkingHours * 100) / 100,
+        workingHoursByBranch: branchHours,
+      };
+    });
+
+    return {
+      rows: rowsWithWorkTotals,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
+    };
   }
 
   async createPeriod(body: CreatePayrollPeriodDto, user?: AnyUser) {
