@@ -434,7 +434,7 @@ export class PayrollService {
       ];
     }
 
-    const [total, rows] = await this.prisma.$transaction([
+    const [total, rows, branchRows] = await this.prisma.$transaction([
       this.prisma.payrollPeriod.count({ where }),
       this.prisma.payrollPeriod.findMany({
         where,
@@ -446,14 +446,21 @@ export class PayrollService {
             select: {
               branchId: true,
               branchName: true,
-              normalHours: true,
               taggedProductQty: true,
+              normalHours: true,
               note: true,
             },
           },
         },
       }),
+      this.prisma.branch.findMany({
+        select: { id: true, name: true },
+      }),
     ]);
+
+    const branchNameById = new Map(
+      branchRows.map((branch) => [String(branch.id), branch.name || branch.id]),
+    );
 
     const rowsWithWorkTotals = rows.map((row: any) => {
       const workingHoursByBranch = new Map<string, {
@@ -461,10 +468,40 @@ export class PayrollService {
         branchName: string;
         totalHours: number;
       }>();
-      let totalTaggedProductQty = 0;
+      const productQtyByBranch = new Map<string, {
+        branchId: string | null;
+        branchName: string;
+        totalProducts: number;
+      }>();
+
+      const addProducts = (
+        branchId: string | null,
+        fallbackBranchName: string | null,
+        quantity: unknown,
+      ) => {
+        const safeBranchId = String(branchId || "").trim() || null;
+        const branchName = safeBranchId
+          ? branchNameById.get(safeBranchId) || fallbackBranchName || safeBranchId
+          : fallbackBranchName || "Chưa xác định chi nhánh";
+        const key = String(safeBranchId || branchName || "UNASSIGNED");
+        const current = productQtyByBranch.get(key) || {
+          branchId: safeBranchId,
+          branchName,
+          totalProducts: 0,
+        };
+        current.totalProducts += Number(quantity || 0);
+        productQtyByBranch.set(key, current);
+      };
 
       for (const line of row.lines || []) {
-        totalTaggedProductQty += Number(line.taggedProductQty || 0);
+        // "Tổng SP" trên bảng lương là SP gắn tên dùng để tính lương sản phẩm,
+        // không phải số lượng sản phẩm lấy từ đơn bán thành công.
+        addProducts(
+          line.branchId || null,
+          line.branchName || null,
+          line.taggedProductQty,
+        );
+
         const attendanceByBranch = this.splitPayrollNote(line.note).attendanceByBranch;
         const hourRows = attendanceByBranch.length
           ? attendanceByBranch.map((item) => ({
@@ -500,12 +537,36 @@ export class PayrollService {
         (sum, item) => sum + item.totalHours,
         0,
       );
+      const expectedProductBranches = row.branchId
+        ? branchRows.filter((branch) => String(branch.id) === String(row.branchId))
+        : branchRows;
+      for (const branch of expectedProductBranches) {
+        const key = String(branch.id);
+        if (!productQtyByBranch.has(key)) {
+          productQtyByBranch.set(key, {
+            branchId: branch.id,
+            branchName: branch.name || branch.id,
+            totalProducts: 0,
+          });
+        }
+      }
+      const branchProducts = Array.from(productQtyByBranch.values())
+        .map((item) => ({
+          ...item,
+          totalProducts: Math.round(item.totalProducts),
+        }))
+        .sort((a, b) => a.branchName.localeCompare(b.branchName, "vi"));
+      const totalProductQty = branchProducts.reduce(
+        (sum, item) => sum + item.totalProducts,
+        0,
+      );
       const period = { ...row };
       delete period.lines;
 
       return {
         ...period,
-        totalTaggedProductQty,
+        totalProductQty,
+        productQtyByBranch: branchProducts,
         totalWorkingHours: Math.round(totalWorkingHours * 100) / 100,
         workingHoursByBranch: branchHours,
       };
