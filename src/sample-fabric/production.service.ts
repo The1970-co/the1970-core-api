@@ -1082,7 +1082,27 @@ export class ProductionService {
         }
       }
     });
-    return this.getOrder(id);
+
+    // Nếu lệnh đã từng có bảng sản lượng, việc sửa / thêm / xoá NPL ở Bước 2
+    // sẽ đồng bộ tồn kho ngay theo sản lượng hiện tại, không cần bấm "Xuất NPL".
+    if (touchesNpl) {
+      const currentOrder = await this.prisma.productionOrder.findUnique({
+        where: { id },
+        select: { status: true },
+      });
+      if (currentOrder && !["CANCELLED", "COMPLETED"].includes(String(currentOrder.status || ""))) {
+        const sizeRows = await this.prisma.productionSizePlan.findMany({
+          where: { productionOrderId: id },
+          orderBy: [{ colorName: "asc" }, { size: "asc" }],
+        });
+        if (sizeRows.length) {
+          const npl = await this.calculateMaterialsFromSizePlans(id, sizeRows);
+          await this.reconcileOrderNplStock(id, npl.materials, user);
+        }
+      }
+    }
+
+    return this.getOrder(id, user);
   }
 
   async setOrderRolls(id: string, body: any) {
@@ -1452,6 +1472,262 @@ export class ProductionService {
 
     const fresh = await this.nplIssueState(id);
     return { success: true, issue: result, ...fresh };
+  }
+
+
+  private async reconcileOrderNplStock(id: string, materialsInput: any[], user?: Actor) {
+    const order = await this.prisma.productionOrder.findUnique({
+      where: { id },
+      select: { id: true, status: true },
+    });
+    if (!order) throw new NotFoundException("Không tìm thấy lệnh SX.");
+    if (["CANCELLED", "COMPLETED"].includes(String(order.status || ""))) {
+      return this.nplIssueState(id, materialsInput);
+    }
+
+    const materials = Array.isArray(materialsInput) ? materialsInput : [];
+    const targets = new Map<string, any>();
+    for (const row of materials) {
+      const accessoryItemId = String(row?.accessoryItemId || "").trim();
+      if (!accessoryItemId) continue;
+      const sizeLabel = String(row?.sizeLabel || "").trim().toUpperCase() || null;
+      const key = this.nplIssueKey(accessoryItemId, sizeLabel);
+      const current = targets.get(key);
+      const requiredQty = Math.max(0, Number(row?.requiredQty || 0));
+      if (current) {
+        current.requiredQty += requiredQty;
+      } else {
+        targets.set(key, {
+          key,
+          accessoryItemId,
+          sizeLabel,
+          accessoryCode: row?.accessoryCode || null,
+          accessoryName: String(row?.accessoryName || ""),
+          unit: String(row?.unit || "PIECE"),
+          requiredQty,
+        });
+      }
+    }
+
+    const issueItems = await this.prisma.productionNplIssueItem.findMany({
+      where: { productionOrderId: id },
+      orderBy: { createdAt: "asc" },
+    });
+    const issuedByKey = new Map<string, number>();
+    const historyMeta = new Map<string, any>();
+    for (const row of issueItems as any[]) {
+      const sizeLabel = String(row?.sizeKey || row?.sizeLabel || "").trim().toUpperCase() || null;
+      const key = this.nplIssueKey(row.accessoryItemId, sizeLabel);
+      issuedByKey.set(key, (issuedByKey.get(key) || 0) + Number(row.issuedQty || 0));
+      historyMeta.set(key, {
+        key,
+        accessoryItemId: String(row.accessoryItemId),
+        sizeLabel,
+        accessoryCode: row.accessoryCode || null,
+        accessoryName: String(row.accessoryName || ""),
+        unit: String(row.unit || "PIECE"),
+        requiredQty: Number(row.requiredQtyAtIssue || 0),
+      });
+    }
+
+    const keys = new Set<string>([...targets.keys(), ...issuedByKey.keys()]);
+    const candidates = [...keys]
+      .map((key) => {
+        const target = targets.get(key) || historyMeta.get(key);
+        if (!target) return null;
+        const requiredQty = Number(targets.get(key)?.requiredQty || 0);
+        const issuedQty = Number(issuedByKey.get(key) || 0);
+        const delta = Math.round((requiredQty - issuedQty) * 1000) / 1000;
+        if (Math.abs(delta) <= 0.0001) return null;
+        return { ...target, requiredQty, issuedQty, delta };
+      })
+      .filter(Boolean) as any[];
+
+    if (!candidates.length) return this.nplIssueState(id, materials);
+
+    const actor = this.actor(user);
+    await this.prisma.$transaction(async (tx: any) => {
+      const maxRound = await tx.productionNplIssue.aggregate({
+        where: { productionOrderId: id },
+        _max: { roundNo: true },
+      });
+      const roundNo = Number(maxRound?._max?.roundNo || 0) + 1;
+      const issue = await tx.productionNplIssue.create({
+        data: {
+          productionOrderId: id,
+          roundNo,
+          note: "[[AUTO_NPL_SYNC]] Tự động đồng bộ tồn NPL theo lệnh sản xuất",
+          createdById: actor.id,
+          createdByName: actor.name,
+        },
+      });
+
+      let createdItems = 0;
+      for (const row of candidates) {
+        const stockItem = await tx.productionAccessoryItem.findUnique({
+          where: { id: row.accessoryItemId },
+          select: { id: true, stockQty: true },
+        });
+        if (!stockItem) continue;
+
+        const stockBefore = Number(stockItem.stockQty || 0);
+        let movedQty = 0;
+
+        if (row.delta > 0) {
+          // Tự trừ tối đa phần còn thiếu nhưng không cho tồn kho âm.
+          movedQty = Math.min(Number(row.delta || 0), stockBefore);
+          movedQty = Math.round(movedQty * 1000) / 1000;
+          if (movedQty <= 0.0001) continue;
+          await tx.productionAccessoryItem.update({
+            where: { id: row.accessoryItemId },
+            data: { stockQty: { decrement: movedQty } },
+          });
+        } else {
+          // Khi giảm định mức / giảm sản lượng / bỏ NPL: tự hoàn phần đã giữ thừa về kho.
+          movedQty = -Math.min(Math.abs(Number(row.delta || 0)), Math.max(0, Number(row.issuedQty || 0)));
+          movedQty = Math.round(movedQty * 1000) / 1000;
+          if (Math.abs(movedQty) <= 0.0001) continue;
+          await tx.productionAccessoryItem.update({
+            where: { id: row.accessoryItemId },
+            data: { stockQty: { increment: Math.abs(movedQty) } },
+          });
+        }
+
+        const stockAfter = Math.max(0, stockBefore - movedQty);
+        const issuedAfter = Number(row.issuedQty || 0) + movedQty;
+        const remainingAfter = Math.max(0, Number(row.requiredQty || 0) - issuedAfter);
+
+        await tx.productionNplIssueItem.create({
+          data: {
+            issueId: issue.id,
+            productionOrderId: id,
+            accessoryItemId: row.accessoryItemId,
+            accessoryCode: row.accessoryCode || null,
+            accessoryName: row.accessoryName || row.accessoryCode || "NPL",
+            sizeLabel: row.sizeLabel,
+            sizeKey: row.sizeLabel || "",
+            unit: row.unit || "PIECE",
+            requiredQtyAtIssue: Number(row.requiredQty || 0),
+            issuedBeforeQty: Number(row.issuedQty || 0),
+            issuedQty: movedQty,
+            remainingAfterQty: remainingAfter,
+            stockBeforeQty: stockBefore,
+            stockAfterQty: stockAfter,
+            note: movedQty > 0
+              ? "Tự động trừ kho khi lệnh SX có sản lượng NPL"
+              : "Tự động hoàn kho do định mức / sản lượng NPL giảm",
+          },
+        });
+        createdItems += 1;
+      }
+
+      if (!createdItems) {
+        await tx.productionNplIssue.delete({ where: { id: issue.id } });
+      }
+    });
+
+    return this.nplIssueState(id, materials);
+  }
+
+  private async returnOrderNplStock(
+    tx: any,
+    id: string,
+    actor: { id: string | null; name: string },
+    reason: string,
+    keepHistory: boolean,
+  ) {
+    const issueItems = await tx.productionNplIssueItem.findMany({
+      where: { productionOrderId: id },
+      orderBy: { createdAt: "asc" },
+    });
+
+    const grouped = new Map<string, any>();
+    for (const row of issueItems as any[]) {
+      const sizeLabel = String(row?.sizeKey || row?.sizeLabel || "").trim().toUpperCase() || null;
+      const key = this.nplIssueKey(row.accessoryItemId, sizeLabel);
+      const current = grouped.get(key) || {
+        accessoryItemId: String(row.accessoryItemId),
+        accessoryCode: row.accessoryCode || null,
+        accessoryName: String(row.accessoryName || ""),
+        sizeLabel,
+        unit: String(row.unit || "PIECE"),
+        requiredQtyAtIssue: Number(row.requiredQtyAtIssue || 0),
+        netIssuedQty: 0,
+      };
+      current.netIssuedQty += Number(row.issuedQty || 0);
+      current.accessoryCode = row.accessoryCode || current.accessoryCode;
+      current.accessoryName = String(row.accessoryName || current.accessoryName);
+      current.unit = String(row.unit || current.unit);
+      current.requiredQtyAtIssue = Number(row.requiredQtyAtIssue || current.requiredQtyAtIssue || 0);
+      grouped.set(key, current);
+    }
+
+    const rows = [...grouped.values()].filter((row: any) => Number(row.netIssuedQty || 0) > 0.0001);
+    if (!rows.length) return { returnedQty: 0, returnedLines: 0 };
+
+    let historyIssue: any = null;
+    if (keepHistory) {
+      const maxRound = await tx.productionNplIssue.aggregate({
+        where: { productionOrderId: id },
+        _max: { roundNo: true },
+      });
+      historyIssue = await tx.productionNplIssue.create({
+        data: {
+          productionOrderId: id,
+          roundNo: Number(maxRound?._max?.roundNo || 0) + 1,
+          note: `[[AUTO_NPL_RETURN]] ${reason}`,
+          createdById: actor.id,
+          createdByName: actor.name,
+        },
+      });
+    }
+
+    let returnedQty = 0;
+    for (const row of rows) {
+      const qty = Math.round(Number(row.netIssuedQty || 0) * 1000) / 1000;
+      if (qty <= 0.0001) continue;
+      const stockItem = await tx.productionAccessoryItem.findUnique({
+        where: { id: row.accessoryItemId },
+        select: { id: true, stockQty: true },
+      });
+      if (!stockItem) continue;
+
+      const stockBefore = Number(stockItem.stockQty || 0);
+      const stockAfter = stockBefore + qty;
+      await tx.productionAccessoryItem.update({
+        where: { id: row.accessoryItemId },
+        data: { stockQty: { increment: qty } },
+      });
+      returnedQty += qty;
+
+      if (historyIssue) {
+        await tx.productionNplIssueItem.create({
+          data: {
+            issueId: historyIssue.id,
+            productionOrderId: id,
+            accessoryItemId: row.accessoryItemId,
+            accessoryCode: row.accessoryCode || null,
+            accessoryName: row.accessoryName || row.accessoryCode || "NPL",
+            sizeLabel: row.sizeLabel,
+            sizeKey: row.sizeLabel || "",
+            unit: row.unit || "PIECE",
+            requiredQtyAtIssue: Number(row.requiredQtyAtIssue || 0),
+            issuedBeforeQty: qty,
+            issuedQty: -qty,
+            remainingAfterQty: 0,
+            stockBeforeQty: stockBefore,
+            stockAfterQty: stockAfter,
+            note: reason,
+          },
+        });
+      }
+    }
+
+    if (historyIssue && returnedQty <= 0.0001) {
+      await tx.productionNplIssue.delete({ where: { id: historyIssue.id } });
+    }
+
+    return { returnedQty, returnedLines: rows.length };
   }
 
   private normalizeLiningComponents(order: any) {
@@ -1932,6 +2208,9 @@ export class ProductionService {
 
     const sizeRows = await this.prisma.productionSizePlan.findMany({ where: { productionOrderId: id }, orderBy: [{ colorName: "asc" }, { size: "asc" }] });
     const npl = await this.calculateMaterialsFromSizePlans(id, sizeRows);
+    // Có sản lượng là tự giữ / trừ NPL khỏi kho. Nếu kho thiếu thì trừ phần đang có,
+    // phần thiếu vẫn hiển thị để bổ sung sau. Tính lại sẽ tự cân chỉnh tăng / hoàn phần thừa.
+    await this.reconcileOrderNplStock(id, npl.materials, user);
     const totalPlannedQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.plannedQty || 0), 0);
     const totalActualQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.actualQty ?? x.plannedQty ?? 0), 0);
     const lining = this.liningSummary(order, rolls, totalPlannedQty, totalActualQty);
@@ -1986,6 +2265,8 @@ export class ProductionService {
 
     const sizeRows = await this.prisma.productionSizePlan.findMany({ where: { productionOrderId: id }, orderBy: [{ colorName: "asc" }, { size: "asc" }] });
     const npl = await this.calculateMaterialsFromSizePlans(id, sizeRows);
+    // Sửa số cắt thực tế -> tự điều chỉnh tồn NPL theo phần chênh lệch.
+    await this.reconcileOrderNplStock(id, npl.materials, user);
     const totalPlannedQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.plannedQty || 0), 0);
     const totalActualQty = sizeRows.reduce((sum: number, x: any) => sum + Number(x.actualQty ?? x.plannedQty ?? 0), 0);
     const cutHistory = await this.prisma.productionCutQtyHistory.findMany({ where: { productionOrderId: id }, orderBy: { createdAt: "desc" }, take: 200 });
@@ -2012,20 +2293,31 @@ export class ProductionService {
     if (String(order.status) === "COMPLETED") {
       throw new BadRequestException("Lệnh đã hoàn thành, không thể huỷ.");
     }
+    if (String(order.status) === "CANCELLED") return this.getOrder(id, user);
     const actor = this.actor(user);
     await this.prisma.$transaction(async (tx: any) => {
+      // Hoàn đúng phần NPL đang bị giữ / đã xuất của lệnh về kho trước khi đánh dấu huỷ.
+      // Dùng issue history làm sổ cái nên thao tác này idempotent: huỷ lại không cộng kho lần 2.
+      await this.returnOrderNplStock(
+        tx,
+        id,
+        actor,
+        "Tự động hoàn toàn bộ NPL về kho do huỷ lệnh sản xuất",
+        true,
+      );
+
       // Giữ nguyên cây vải/NPL/size/lịch sử để tra cứu. availableFabricRolls sẽ bỏ qua allocation của lệnh CANCELLED.
       await tx.productionOrder.update({
         where: { id },
         data: {
           status: "CANCELLED",
-          note: [String(order.note || "").trim(), `Đã huỷ bởi ${actor.name || "—"} lúc ${new Date().toISOString()}`]
+          note: [String(order.note || "").trim(), `Đã huỷ bởi ${actor.name || "—"} lúc ${new Date().toISOString()} · NPL đã tự động hoàn kho`]
             .filter(Boolean)
             .join("\n"),
         },
       });
     });
-    return this.getOrder(id);
+    return this.getOrder(id, user);
   }
 
   async saveProductionExtraCosts(id: string, body: any, user?: any) {
@@ -2069,6 +2361,16 @@ export class ProductionService {
       throw new BadRequestException("Chỉ được xoá lệnh chưa triển khai, đang lên kế hoạch hoặc đã huỷ.");
     }
     await this.prisma.$transaction(async (tx: any) => {
+      // Nếu xoá thẳng lệnh DRAFT/PLANNING chưa qua thao tác Huỷ, phải trả lại NPL trước
+      // rồi mới xoá lịch sử để không làm hụt tồn kho vĩnh viễn.
+      await this.returnOrderNplStock(
+        tx,
+        id,
+        { id: null, name: "Hệ thống" },
+        "Tự động hoàn NPL do xoá lệnh sản xuất",
+        false,
+      );
+
       await tx.productionOrderRoll.deleteMany({ where: { productionOrderId: id } });
       await tx.productionCutQtyHistory.deleteMany({ where: { productionOrderId: id } });
       await tx.productionSizePlan.deleteMany({ where: { productionOrderId: id } });
