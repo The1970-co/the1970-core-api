@@ -81,6 +81,18 @@ export class ProductionService {
     return /\[\[COLOR_SCOPED\]\]/i.test(String(note || ""));
   }
 
+  private colorScopedTargets(note?: any) {
+    const matched = String(note || "").match(/\[\[COLOR_TARGETS:([^\]]*)\]\]/i);
+    if (!matched?.[1]) return [] as string[];
+    return matched[1]
+      .split("|")
+      .map((x) => {
+        try { return decodeURIComponent(x); } catch { return x; }
+      })
+      .map((x) => String(x || "").trim())
+      .filter(Boolean);
+  }
+
   private productionQuickStage(note?: any) {
     return String(note || "").match(/\[\[SX_STAGE:([A-Z_]+)\]\]/i)?.[1]?.toUpperCase() || null;
   }
@@ -1293,9 +1305,16 @@ export class ProductionService {
         const sizeQty = this.totalForTaggedSize(totalsBySize, fixedSize);
         materials.push(makeRow(sizeQty * per, fixedSize));
       } else if (this.colorScopedAccessory(spec.note) && totalsByColor.size) {
-        // Chế độ "Theo màu": cùng một NPL/định mức nhưng tách số lượng riêng theo từng màu sản xuất.
-        // Dùng prefix MÀU: trong sizeLabel để tương thích dữ liệu cũ mà không cần migration DB.
-        for (const color of totalsByColor.values()) materials.push(makeRow(Number(color.qty) * per, `MÀU:${color.name}`));
+        // NPL "Theo màu" chỉ được tính cho đúng màu vải đã gán ở Bước 5.
+        // Nếu chưa gán màu thì KHÔNG sinh dòng NPL để tránh tự trừ kho sai cho toàn bộ màu.
+        const targets = this.colorScopedTargets(spec.note);
+        if (targets.length) {
+          const targetKeys = new Set(targets.map((x) => String(x || "").trim().toLocaleUpperCase("vi")));
+          for (const [colorKey, color] of totalsByColor.entries()) {
+            if (!targetKeys.has(colorKey)) continue;
+            materials.push(makeRow(Number(color.qty) * per, `MÀU:${color.name}`));
+          }
+        }
       } else if (spec.sizeScoped && Object.keys(totalsBySize).length) {
         // Chế độ "Theo tất cả size": sinh một dòng cho mỗi size.
         for (const [size, qty] of Object.entries(totalsBySize)) materials.push(makeRow(Number(qty) * per, size));
