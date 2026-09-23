@@ -81,6 +81,23 @@ export class ProductionService {
     return /\[\[COLOR_SCOPED\]\]/i.test(String(note || ""));
   }
 
+  private productionQuickStage(note?: any) {
+    return String(note || "").match(/\[\[SX_STAGE:([A-Z_]+)\]\]/i)?.[1]?.toUpperCase() || null;
+  }
+
+  private productionQuickNote(note?: any) {
+    return String(note || "")
+      .replace(/\[\[SX_STAGE:[A-Z_]+\]\]/ig, "")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+  }
+
+  private withProductionQuickStage(note: any, stage: any) {
+    const clean = this.productionQuickNote(note);
+    const normalizedStage = String(stage || "").trim().toUpperCase();
+    return [normalizedStage ? `[[SX_STAGE:${normalizedStage}]]` : "", clean].filter(Boolean).join(" ") || null;
+  }
+
   private materialScopeLabel(value?: any) {
     const raw = String(value || "").trim();
     if (!raw) return "";
@@ -822,6 +839,8 @@ export class ProductionService {
 
       return {
         ...r,
+        note: this.productionQuickNote(r.note) || null,
+        quickStage: this.productionQuickStage(r.note),
         sourceCode: code,
         sourceName: name,
         sourceImageUrl: imageUrl,
@@ -886,7 +905,10 @@ export class ProductionService {
     const nplIssueState = await this.nplIssueState(id, materials);
     const costSummary = await this.productionCostSummary(id, totalActualQty, nplIssueState.materials, rolls, user, order.productionExtraCosts, order.productionPriceMultiplier);
     return {
-      ...order, sourceCode, sourceName, sourceImageUrl,
+      ...order,
+      note: this.productionQuickNote(order.note) || null,
+      quickStage: this.productionQuickStage(order.note),
+      sourceCode, sourceName, sourceImageUrl,
       source: { type: order.sourceType, id: order.designSampleId || order.productId, code: sourceCode, name: sourceName, imageUrl: sourceImageUrl },
       sample: legacySample ? { ...legacySample, code: sourceCode, name: sourceName, coverImageUrl: sourceImageUrl } : null,
       factory, rolls, sizes, materials: nplIssueState.materials, accessorySpecs, cutHistory, lining, costSummary, nplIssueHistory: nplIssueState.nplIssueHistory, nplIssueCount: nplIssueState.nplIssueCount, nextNplIssueRound: nplIssueState.nextRoundNo,
@@ -983,7 +1005,30 @@ export class ProductionService {
   }
 
   async updateOrder(id: string, body: any) {
-    return this.prisma.productionOrder.update({
+    const touchesQuickMeta =
+      Object.prototype.hasOwnProperty.call(body || {}, "note") ||
+      Object.prototype.hasOwnProperty.call(body || {}, "quickStage");
+
+    let storedNote: string | null | undefined = undefined;
+    if (touchesQuickMeta) {
+      const current = await this.prisma.productionOrder.findUnique({
+        where: { id },
+        select: { note: true },
+      });
+      if (!current) throw new NotFoundException("Không tìm thấy lệnh SX.");
+
+      const currentStage = this.productionQuickStage(current.note);
+      const currentNote = this.productionQuickNote(current.note);
+      const nextStage = Object.prototype.hasOwnProperty.call(body || {}, "quickStage")
+        ? String(body?.quickStage || "").trim().toUpperCase()
+        : currentStage;
+      const nextNote = Object.prototype.hasOwnProperty.call(body || {}, "note")
+        ? String(body?.note || "").trim()
+        : currentNote;
+      storedNote = this.withProductionQuickStage(nextNote, nextStage);
+    }
+
+    const updated = await this.prisma.productionOrder.update({
       where: { id },
       data: {
         ...(body?.productionPartnerId !== undefined ? { productionPartnerId: body.productionPartnerId } : {}),
@@ -1012,9 +1057,15 @@ export class ProductionService {
         ...(body?.fabricSupplyMode !== undefined
           ? { fabricSupplyMode: String(body.fabricSupplyMode || "COMPANY").toUpperCase() === "FACTORY" ? "FACTORY" : "COMPANY" }
           : {}),
-        ...(body?.note !== undefined ? { note: body.note || null } : {}),
+        ...(touchesQuickMeta ? { note: storedNote ?? null } : {}),
       },
     });
+
+    return {
+      ...updated,
+      note: this.productionQuickNote(updated.note) || null,
+      quickStage: this.productionQuickStage(updated.note),
+    };
   }
 
   async saveOrderSpec(id: string, body: any, user?: any) {
