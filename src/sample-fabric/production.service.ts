@@ -1978,6 +1978,7 @@ export class ProductionService {
               select: {
                 receiptCode: true,
                 fabricName: true,
+                colorName: true,
                 fabricCode: true,
                 exchangeRateToVnd: true,
                 unitPriceVnd: true,
@@ -2088,7 +2089,7 @@ export class ProductionService {
         rollCode: roll.rollCode || null,
         fabricCode: code || null,
         fabricName: receipt.fabricName || null,
-        colorName: roll.colorName || null,
+        colorName: roll.colorName || receipt.colorName || null,
         priceUnit,
         usedQty,
         qtyUnit,
