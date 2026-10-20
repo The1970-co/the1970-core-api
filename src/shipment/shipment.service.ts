@@ -5461,6 +5461,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       process.env.AHAMOVE_SERVICES ||
       [
         `${cityPrefix}-BIKE`,
+        `${cityPrefix}-POOL`,
         `${cityPrefix}-2H`,
         `${cityPrefix}-TRUCK-1000`,
         `${cityPrefix}-TRUCK-2000`,
@@ -5483,9 +5484,10 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     if (code.includes("TRUCK-1000")) return "Xe tải 1000kg";
     if (code.includes("TRUCK-2000")) return "Xe tải 2000kg";
     if (code.includes("TRUCK-5000")) return "Xe tải 5000kg";
-    if (code.includes("2H") || code.includes("SAVING") || code.includes("ECONOMY")) {
-      return "Siêu Tốc - Tiết Kiệm";
+    if (code.includes("POOL") || code.includes("SAVING") || code.includes("ECONOMY") || code.includes("ECO")) {
+      return "Siêu tốc - Tiết kiệm";
     }
+    if (code.includes("2H")) return "Tiết kiệm 2H";
     if (code.includes("BIKE") || code.includes("EXPRESS")) return "Siêu Tốc";
 
     return serviceId || "AhaMove";
@@ -5495,12 +5497,21 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     const code = String(serviceId || "").toUpperCase();
 
     if (code.includes("TRUCK")) return "Xe tải";
-    if (code.includes("2H") || code.includes("SAVING") || code.includes("ECONOMY")) {
-      return "Giao trong 1 giờ";
+    if (code.includes("POOL") || code.includes("SAVING") || code.includes("ECONOMY") || code.includes("ECO")) {
+      return "Tiết kiệm chi phí · thời gian tùy khu vực";
     }
+    if (code.includes("2H")) return "Giao dự kiến trong 2 giờ";
     if (code.includes("BIKE") || code.includes("EXPRESS")) return "Ưu tiên, giao hoả tốc";
 
     return "Nội thành realtime";
+  }
+
+  async listAhamoveServices(cityId = "HAN", deliveryType?: "INSTANT" | "TRUCK") {
+    const city = String(cityId || "HAN").trim().toUpperCase();
+    if (!/^[A-Z]{2,8}$/.test(city)) {
+      throw new BadRequestException("cityId không hợp lệ");
+    }
+    return this.ahamoveClient.listServices(city, deliveryType);
   }
 
   async quoteAhamove(body: any) {
@@ -5538,9 +5549,12 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         .map((item) => item.trim())
         .filter(Boolean);
 
+    // Admin cu co the gui danh sach 5 dich vu co dinh. Ghep them cac dich vu
+    // backend ho tro de goi moi van duoc thu bao gia, khong can doi frontend.
+    // API AhaMove se quyet dinh dich vu nao hop le cho tuyen duong/tai khoan.
     const services = Array.from(
       new Set(
-        requestedServices
+        [...requestedServices, ...this.getAhamoveDefaultServices()]
           .map((item: any) => String(item || "").trim().toUpperCase())
           .filter(Boolean)
       )

@@ -169,6 +169,12 @@ export class AhamoveClient {
     return json;
   }
 
+  async listServices(cityId = "HAN", deliveryType?: "INSTANT" | "TRUCK") {
+    const params = new URLSearchParams({ city_id: cityId });
+    if (deliveryType) params.set("delivery_type", deliveryType);
+    return this.request("GET", `/v3/services?${params.toString()}`);
+  }
+
   async estimate(body: Record<string, unknown>) {
     return this.request("POST", "/v3/orders/estimates", body);
   }

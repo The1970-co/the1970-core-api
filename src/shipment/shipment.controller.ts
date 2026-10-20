@@ -336,6 +336,21 @@ export class ShipmentController {
     return this.shipmentService.trackViettelPostByShipmentId(id);
   }
 
+  @Get("ahamove/services")
+  getAhamoveServices(
+    @Query("cityId") cityId?: string,
+    @Query("deliveryType") deliveryType?: string,
+  ) {
+    const type = String(deliveryType || "").trim().toUpperCase();
+    if (type && type !== "INSTANT" && type !== "TRUCK") {
+      throw new BadRequestException("deliveryType phải là INSTANT hoặc TRUCK");
+    }
+    return this.shipmentService.listAhamoveServices(
+      cityId || "HAN",
+      (type || undefined) as "INSTANT" | "TRUCK" | undefined,
+    );
+  }
+
   @Post("ahamove/quote")
   quoteAhamove(@Body() body: any) {
     return this.shipmentService.quoteAhamove(body);
