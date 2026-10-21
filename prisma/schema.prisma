@@ -4140,3 +4140,36 @@ model WebsiteProductImage {
 
   @@index([websiteProductId, sortOrder])
 }
+
+// Tai khoan ngan hang QR POS dang ton tai trong PostgreSQL.
+// Khai bao de Prisma khong de xuat DROP TABLE khi db push/migrate diff.
+model PosBankAccount {
+  id            String   @id
+  slot          Int      @unique
+  label         String
+  bankCode      String
+  bankName      String?
+  accountNumber String
+  accountName   String
+  isActive      Boolean  @default(true)
+  sortOrder     Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @default(now())
+}
+
+// Quy tac thanh toan POS dong bo tren PostgreSQL.
+model PosPaymentRule {
+  id              String   @id
+  branchId        String
+  kind            String
+  operator        String   @default("gte")
+  threshold       Int      @default(0)
+  paymentSourceId String
+  qrAccountId     String   @default("")
+  priority        Int      @default(0)
+  enabled         Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([branchId, enabled, priority])
+}
