@@ -4173,3 +4173,21 @@ model PosPaymentRule {
 
   @@index([branchId, enabled, priority])
 }
+model WebsiteHomepage {
+  id              String   @id @default(cuid())
+  market          String   @unique
+  draftConfig     Json
+  publishedConfig Json?
+  publishedAt     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+model WebsiteNavigation {
+  id              String   @id @default(cuid())
+  market          String   @unique
+  draftConfig     Json
+  publishedConfig Json?
+  publishedAt     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}

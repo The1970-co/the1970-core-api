@@ -38,6 +38,9 @@ import { FinancialReportModule } from "./reports/financial-report.module";
 import { SampleFabricModule } from "./sample-fabric/sample-fabric.module";
 import { StorefrontModule } from "./storefront/storefront.module";
 import { WebsiteCatalogModule } from "./website-catalog/website-catalog.module";
+import { WebsiteHomepageModule } from "./website-homepage/website-homepage.module"; 
+import { WebsiteNavigationModule } from "./website-navigation/website-navigation.module";
+
 @Module({
   imports: [
     PrismaModule,
@@ -79,6 +82,8 @@ import { WebsiteCatalogModule } from "./website-catalog/website-catalog.module";
     SampleFabricModule,
     StorefrontModule,
     WebsiteCatalogModule,
+    WebsiteHomepageModule,
+    WebsiteNavigationModule,
   ],
 })
 export class AppModule {}
