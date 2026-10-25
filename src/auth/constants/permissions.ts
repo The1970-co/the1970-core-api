@@ -5,6 +5,7 @@ export const PERMISSIONS = {
   MENU_POS: "menu.pos",
   MENU_RETURNS: "menu.returns",
   MENU_PRODUCTS: "menu.products",
+  MENU_WEBSITE: "menu.website",
   MENU_PROMOTIONS: "menu.promotions",
   MENU_PRODUCT_CATEGORIES: "menu.product_categories",
   MENU_SUPPLIERS: "menu.suppliers",
@@ -75,6 +76,12 @@ export const PERMISSIONS = {
   PRODUCTS_MASTER_DATA_MANAGE: "products.master_data.manage",
   PRODUCTS_EXCEL_EXPORT: "products.excel.export",
   PRODUCTS_EXCEL_IMPORT: "products.excel.import",
+
+  WEBSITE_VIEW: "website.view",
+  WEBSITE_EDIT: "website.edit",
+  WEBSITE_DELETE: "website.delete",
+  WEBSITE_PUBLISH: "website.publish",
+  WEBSITE_IMAGE_UPLOAD: "website.image.upload",
 
   INVENTORY_VIEW: "inventory.view",
   INVENTORY_MANAGE: "inventory.manage",

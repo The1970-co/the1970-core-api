@@ -20,31 +20,31 @@ export class WebsiteCatalogController {
   constructor(private readonly service: WebsiteCatalogService) {}
 
   @Get()
-  @RequirePermissions("products.view")
+  @RequirePermissions("website.view")
   list(@Query("q") q?: string, @Query("status") status?: string) {
     return this.service.list({ q, status });
   }
 
   @Get(":id")
-  @RequirePermissions("products.view")
+  @RequirePermissions("website.view")
   get(@Param("id") id: string) {
     return this.service.get(id);
   }
 
   @Post()
-  @RequirePermissions("products.edit")
+  @RequirePermissions("website.edit")
   create(@Body() body: any) {
     return this.service.create(body);
   }
 
   @Patch(":id")
-  @RequirePermissions("products.edit")
+  @RequirePermissions("website.edit")
   update(@Param("id") id: string, @Body() body: any) {
     return this.service.update(id, body);
   }
 
   @Delete(":id")
-  @RequirePermissions("products.edit")
+  @RequirePermissions("website.delete")
   remove(@Param("id") id: string) {
     return this.service.remove(id);
   }

@@ -18,7 +18,7 @@ import { Readable } from "stream";
 import cloudinary from "../utils/cloudinary";
 import { JwtGuard } from "../auth/jwt.guard";
 import { PermissionGuard } from "../auth/guards/permission.guard";
-import { RequirePermissions } from "../auth/decorators/require-permissions.decorator";
+import { RequireAnyPermissions, RequirePermissions } from "../auth/decorators/require-permissions.decorator";
 import { ProductService } from "./product.service";
 
 @UseGuards(JwtGuard, PermissionGuard)
@@ -27,7 +27,7 @@ export class ProductController {
   constructor(private readonly productService: ProductService) {}
 
   @Get()
-  @RequirePermissions("products.view")
+  @RequireAnyPermissions("products.view", "website.view")
   getProducts(
     @Query("page") page?: string,
     @Query("limit") limit?: string,
@@ -98,7 +98,7 @@ export class ProductController {
   }
 
   @Post("upload-image")
-  @RequirePermissions("products.image.upload")
+  @RequireAnyPermissions("products.image.upload", "website.image.upload")
   @UseInterceptors(FileInterceptor("file"))
   async uploadProductImage(@UploadedFile() file: Express.Multer.File) {
     if (!file) {
