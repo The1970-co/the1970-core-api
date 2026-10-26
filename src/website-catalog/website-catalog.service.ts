@@ -134,13 +134,14 @@ export class WebsiteCatalogService {
         marketInternational: body?.marketInternational === true,
         featured: body?.featured === true,
         sortOrder: Number(body?.sortOrder || 0),
+        websiteCategorySlugs: Array.isArray(body?.websiteCategorySlugs) ? body.websiteCategorySlugs.map((x:any)=>String(x).trim()).filter(Boolean) : [],
         titleVi,
         titleEn: this.nullable(body?.titleEn),
         shortDescriptionVi: this.nullable(body?.shortDescriptionVi),
         shortDescriptionEn: this.nullable(body?.shortDescriptionEn),
         descriptionVi: this.nullable(body?.descriptionVi),
         descriptionEn: this.nullable(body?.descriptionEn),
-        coverImageUrl: this.nullable(body?.coverImageUrl) || images[0]?.url || product.imageUrl || null,
+        coverImageUrl: this.nullable(body?.coverImageUrl) || product.imageUrl || images[0]?.url || null,
         seoTitleVi: this.nullable(body?.seoTitleVi),
         seoTitleEn: this.nullable(body?.seoTitleEn),
         seoDescriptionVi: this.nullable(body?.seoDescriptionVi),
@@ -179,6 +180,7 @@ export class WebsiteCatalogService {
               : body.marketInternational === true,
           featured: body?.featured === undefined ? current.featured : body.featured === true,
           sortOrder: body?.sortOrder === undefined ? current.sortOrder : Number(body.sortOrder || 0),
+          websiteCategorySlugs: body?.websiteCategorySlugs === undefined ? current.websiteCategorySlugs : (Array.isArray(body.websiteCategorySlugs) ? body.websiteCategorySlugs.map((x:any)=>String(x).trim()).filter(Boolean) : []),
           titleVi,
           titleEn: body?.titleEn === undefined ? current.titleEn : this.nullable(body.titleEn),
           shortDescriptionVi:
@@ -198,11 +200,9 @@ export class WebsiteCatalogService {
               ? current.descriptionEn
               : this.nullable(body.descriptionEn),
           coverImageUrl:
-            body?.coverImageUrl !== undefined
-              ? this.nullable(body.coverImageUrl)
-              : replaceImages && images.length
-                ? images[0].url
-                : current.coverImageUrl,
+            body?.coverImageUrl === undefined
+              ? current.coverImageUrl
+              : this.nullable(body.coverImageUrl),
           seoTitleVi:
             body?.seoTitleVi === undefined ? current.seoTitleVi : this.nullable(body.seoTitleVi),
           seoTitleEn:
@@ -282,10 +282,11 @@ export class WebsiteCatalogService {
         market === "INTERNATIONAL"
           ? row.shortDescriptionEn || row.shortDescriptionVi
           : row.shortDescriptionVi,
-      imageUrl: row.coverImageUrl || row.images[0]?.url || row.product.imageUrl,
+      imageUrl: row.coverImageUrl || row.images[0]?.url || null,
       images: row.images.map((x) => ({ url: x.url, altVi: x.altVi, altEn: x.altEn })),
       category: row.product.categoryRel?.name || row.product.category || null,
       featured: row.featured,
+      websiteCategorySlugs: row.websiteCategorySlugs || [],
       variants: row.product.variants.map((v) => ({
         id: v.id,
         sku: v.sku,

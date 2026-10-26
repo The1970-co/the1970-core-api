@@ -4094,11 +4094,13 @@ model WebsiteProduct {
   id                  String               @id @default(cuid())
   productId           String               @unique
   slug                String               @unique
+  websiteCategorySlugs String[] @default([])
   status              WebsitePublishStatus @default(DRAFT)
   marketVn            Boolean              @default(true)
   marketInternational Boolean              @default(false)
   featured            Boolean              @default(false)
   sortOrder           Int                  @default(0)
+  
 
   titleVi            String
   titleEn            String?
@@ -4191,3 +4193,21 @@ model WebsiteNavigation {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 }
+model WebsiteSettings {
+  id                            String   @id @default(cuid())
+  market                        String   @unique
+  cartEnabled                   Boolean  @default(false)
+  checkoutEnabled               Boolean  @default(false)
+  newCustomerDiscountEnabled    Boolean  @default(false)
+  newCustomerDiscountPercent    Decimal  @default(0) @db.Decimal(5, 2)
+  messengerEnabled              Boolean  @default(false)
+  messengerUrl                  String?
+  zaloEnabled                   Boolean  @default(false)
+  zaloUrl                       String?
+  defaultBranchId               String?
+  createdAt                     DateTime @default(now())
+  updatedAt                     DateTime @updatedAt
+
+  @@index([market])
+}
+
