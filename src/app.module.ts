@@ -40,6 +40,8 @@ import { StorefrontModule } from "./storefront/storefront.module";
 import { WebsiteCatalogModule } from "./website-catalog/website-catalog.module";
 import { WebsiteHomepageModule } from "./website-homepage/website-homepage.module"; 
 import { WebsiteNavigationModule } from "./website-navigation/website-navigation.module";
+import { WebsiteSettingsModule } from "./website-settings/website-settings.module";
+import { WebsiteCommerceModule } from "./website-commerce/website-commerce.module";
 
 @Module({
   imports: [
@@ -84,6 +86,8 @@ import { WebsiteNavigationModule } from "./website-navigation/website-navigation
     WebsiteCatalogModule,
     WebsiteHomepageModule,
     WebsiteNavigationModule,
+    WebsiteSettingsModule,
+    WebsiteCommerceModule,
   ],
 })
 export class AppModule {}

@@ -25,8 +25,14 @@ export class WebsiteNavigationAdminController {
 
   @Patch()
   @RequirePermissions("website.edit")
-  save(@Query("market") market: string | undefined, @Body() body: any) {
-    return this.service.saveDraft(market, body?.config ?? body);
+  save(
+    @Query("market") market: string | undefined,
+    @Body() body: any,
+  ) {
+    return this.service.saveDraft(
+      market,
+      body?.config ?? body,
+    );
   }
 
   @Post("publish")

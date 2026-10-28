@@ -6,7 +6,10 @@ import { WebsiteNavigationPublicController } from "./website-navigation-public.c
 
 @Module({
   imports: [PrismaModule],
-  controllers: [WebsiteNavigationAdminController, WebsiteNavigationPublicController],
+  controllers: [
+    WebsiteNavigationAdminController,
+    WebsiteNavigationPublicController,
+  ],
   providers: [WebsiteNavigationService],
   exports: [WebsiteNavigationService],
 })
