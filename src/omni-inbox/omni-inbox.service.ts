@@ -100,6 +100,17 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
   private readonly messengerHistoryBackfillDone = new Set<string>();
   private readonly messengerHistoryBackfillRunning = new Map<string, Promise<any>>();
 
+  // Bộ đếm chỉ đọc: giúp đối chiếu nguyên nhân RAM tăng mà không log dữ liệu khách.
+  getMemoryDiagnostics() {
+    return {
+      facebookPostSourceCache: this.facebookPostSourceCache.size,
+      messengerHistoryBackfillDone: this.messengerHistoryBackfillDone.size,
+      messengerHistoryBackfillRunning: this.messengerHistoryBackfillRunning.size,
+      webhookPageCache: this.webhookPageCache.size,
+      webhookPageInFlight: this.webhookPageInFlight.size,
+    };
+  }
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly realtime: OmniInboxRealtimeService,
@@ -2222,6 +2233,9 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     }
 
     const q = safeText(query.q);
+    const searchStartMs = q ? Date.now() : 0;
+    let messageSearchMs = 0;
+    let searchKind: "phone" | "text" = "text";
     if (q) {
       const qDigits = q.replace(/\D/g, "");
       const compactQuery = q.replace(/[\s.+()-]/g, "");
@@ -2232,6 +2246,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       const messageConversationIds = new Set<string>();
 
       if (isPhoneSearch) {
+        searchKind = "phone";
         const normalizedPhone = qDigits.startsWith("84")
           ? `0${qDigits.slice(2)}`
           : qDigits;
@@ -2239,6 +2254,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
 
         // Chuẩn hoá cả nội dung tin trong PostgreSQL để khớp các dạng:
         // 098..., +84 98..., 098...., 098-... hoặc có khoảng trắng.
+        const messageSearchStartMs = Date.now();
         const rows = await (this.prisma as any).$queryRawUnsafe(
           `SELECT DISTINCT "conversationId"
              FROM "OmniMessage"
@@ -2247,6 +2263,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
             LIMIT 2000`,
           `%${phoneSuffix}%`,
         );
+        messageSearchMs = Date.now() - messageSearchStartMs;
         for (const row of Array.isArray(rows) ? rows : []) {
           const id = safeText(row?.conversationId);
           if (id) messageConversationIds.add(id);
@@ -2298,6 +2315,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
             : { id: "__PHONE_NOT_FOUND__" },
         ];
       } else {
+        const messageSearchStartMs = Date.now();
         const matchingMessages = await this.prisma.omniMessage.findMany({
           where: {
             OR: [
@@ -2310,6 +2328,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
           distinct: ["conversationId"],
           take: 2000,
         });
+        messageSearchMs = Date.now() - messageSearchStartMs;
         for (const row of matchingMessages) {
           const id = safeText(row.conversationId);
           if (id) messageConversationIds.add(id);
@@ -2362,6 +2381,14 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     ]);
 
     await this.enrichConversationCustomers(items as any);
+
+    // Performance telemetry only; never log phone numbers or customer searches.
+    if (q && Date.now() - searchStartMs >= 1000) {
+      this.logger.warn(
+        `[OMNI_SEARCH_SLOW] kind=${searchKind} totalMs=${Date.now() - searchStartMs} ` +
+        `messageMs=${messageSearchMs} results=${items.length} page=${page}`,
+      );
+    }
 
     return {
       items,
