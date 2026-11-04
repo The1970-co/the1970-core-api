@@ -5,6 +5,12 @@ import { PrismaService } from "../prisma/prisma.service";
 
 @Injectable()
 export class FinanceService {
+  // Prevent running expensive CREATE/ALTER/UPDATE schema bootstrap on every API request.
+  // The promise also coalesces concurrent first requests. On failure, retry next request.
+  private localDeliverySchemaReady: Promise<void> | null = null;
+  private cashVoucherSchemaReady: Promise<void> | null = null;
+  private dailyCashBalanceSchemaReady: Promise<void> | null = null;
+
   constructor(private readonly prisma: PrismaService) {}
 
   private isOwner(user?: any) {
@@ -592,6 +598,16 @@ export class FinanceService {
 
 
   private async ensureLocalDeliveryReconciliationTable() {
+    if (!this.localDeliverySchemaReady) {
+      this.localDeliverySchemaReady = this.initializeEnsureLocalDeliveryReconciliationTable().catch((error) => {
+        this.localDeliverySchemaReady = null;
+        throw error;
+      });
+    }
+    return this.localDeliverySchemaReady;
+  }
+
+  private async initializeEnsureLocalDeliveryReconciliationTable(): Promise<void> {
     await this.prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS "LocalDeliveryReconciliation" (
         "id" TEXT PRIMARY KEY,
@@ -1651,6 +1667,18 @@ export class FinanceService {
 
 
   private async ensureCashVoucherTable() {
+    if (!this.cashVoucherSchemaReady) {
+      this.cashVoucherSchemaReady = this.initializeEnsureCashVoucherTable().catch((error) => {
+        this.cashVoucherSchemaReady = null;
+        throw error;
+      });
+    }
+    return this.cashVoucherSchemaReady;
+  }
+
+  // Temporary runtime fallback for databases not yet migrated; execute once per process.
+  // Long-term: move these schema changes to a versioned Prisma migration.
+  private async initializeEnsureCashVoucherTable(): Promise<void> {
     await this.prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS "CashVoucher" (
         "id" TEXT PRIMARY KEY,
@@ -2495,6 +2523,18 @@ export class FinanceService {
   }
 
   private async ensureDailyCashBalanceTable() {
+    if (!this.dailyCashBalanceSchemaReady) {
+      this.dailyCashBalanceSchemaReady = this.initializeEnsureDailyCashBalanceTable().catch((error) => {
+        this.dailyCashBalanceSchemaReady = null;
+        throw error;
+      });
+    }
+    return this.dailyCashBalanceSchemaReady;
+  }
+
+  // Temporary runtime fallback for databases not yet migrated; execute once per process.
+  // Long-term: move these schema changes to a versioned Prisma migration.
+  private async initializeEnsureDailyCashBalanceTable(): Promise<void> {
     await this.prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS "DailyCashBalance" (
         "id" TEXT PRIMARY KEY,

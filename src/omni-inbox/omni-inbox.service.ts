@@ -59,6 +59,39 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
   private unassignedSweepTimer: ReturnType<typeof setInterval> | null = null;
   private readonly logger = new Logger(OmniInboxService.name);
   private readonly facebookPostSourceCache = new Map<string, { expiresAt: number; data: any }>();
+  // Page metadata need not be written for every webhook. Keep timestamp fresh within 30s.
+  private readonly webhookPageCache = new Map<string, { expiresAt: number; page: any }>();
+  private readonly webhookPageInFlight = new Map<string, Promise<any>>();
+  // Cache restored customer names briefly to avoid repeated history scans.
+  private readonly mappedCustomerNameCache = new Map<string, { expiresAt: number; name: string }>();
+
+  private async getWebhookPage(pageId: string) {
+    const cached = this.webhookPageCache.get(pageId);
+    if (cached && cached.expiresAt > Date.now()) return cached.page;
+    const pending = this.webhookPageInFlight.get(pageId);
+    if (pending) return pending;
+
+    const pageName = pageId === this.configuredPageId ? "The 1970" : `Page ${pageId}`;
+    const job = this.prisma.omniInboxPage.upsert({
+      where: { providerPageId: pageId },
+      update: { lastWebhookAt: new Date(), pageName },
+      create: {
+        providerPageId: pageId,
+        pageName,
+        channel: "FACEBOOK",
+        lastWebhookAt: new Date(),
+      },
+    });
+    this.webhookPageInFlight.set(pageId, job);
+    try {
+      const page = await job;
+      this.webhookPageCache.set(pageId, { page, expiresAt: Date.now() + 30_000 });
+      return page;
+    } finally {
+      this.webhookPageInFlight.delete(pageId);
+    }
+  }
+
 
   // Lazy backfill Messenger: chỉ sync lịch sử của khách thực sự quay lại nhắn,
   // không quét toàn bộ Page. Map này chống gọi Meta lặp lại liên tục trong cùng
@@ -1312,6 +1345,38 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
         return { skipped: true, reason: "OUTSIDE_WORKING_HOURS" };
       }
 
+      // When there are no configured candidates, avoid 100 wasted assignment attempts.
+      // Keep normal heartbeat/settings-triggered behaviour when staff become eligible.
+      const membersSetting: any = await (this.prisma as any).omniAssignmentSetting.findUnique({
+        where: { id: "default" },
+        select: {
+          requireOnline: true,
+          onlineWindowSeconds: true,
+          members: {
+            where: { isActive: true },
+            select: { staffId: true, receiveMessages: true, receiveComments: true },
+          },
+        },
+      });
+      const eligibleMembers: any[] = (membersSetting?.members || [])
+        .filter((member: any) => member.receiveMessages || member.receiveComments);
+      if (!eligibleMembers.length) {
+        return { skipped: true, reason: "NO_ELIGIBLE_MEMBERS" };
+      }
+      if (membersSetting?.requireOnline) {
+        const cutoff = new Date(Date.now() - Number(membersSetting.onlineWindowSeconds || 90) * 1000);
+        const onlineCount = await (this.prisma as any).omniStaffPresence.count({
+          where: {
+            staffId: { in: eligibleMembers.map((member: any) => member.staffId) },
+            manualAway: false,
+            lastHeartbeatAt: { gte: cutoff },
+          },
+        });
+        if (!onlineCount) {
+          return { skipped: true, reason: "NO_STAFF_ONLINE" };
+        }
+      }
+
       const rows = await this.prisma.omniConversation.findMany({
         where: {
           assigneeId: null,
@@ -1994,6 +2059,8 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
   private async getMappedCustomerNameFromMessages(providerUserId?: string | null) {
     const psid = safeText(providerUserId);
     if (!psid) return "";
+    const cached = this.mappedCustomerNameCache.get(psid);
+    if (cached && cached.expiresAt > Date.now()) return cached.name;
 
     const rows = await this.prisma.omniMessage.findMany({
       where: {
@@ -2006,12 +2073,24 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       select: { senderName: true },
     });
 
+    let mappedName = "";
     for (const row of rows) {
       const name = safeText(row.senderName);
-      if (isUsableProfileName(name)) return name;
+      if (isUsableProfileName(name)) {
+        mappedName = name;
+        break;
+      }
     }
-
-    return "";
+    // Bound memory growth; a restart also clears this best-effort cache.
+    if (this.mappedCustomerNameCache.size >= 2_000) {
+      const firstKey = this.mappedCustomerNameCache.keys().next().value;
+      if (firstKey) this.mappedCustomerNameCache.delete(firstKey);
+    }
+    this.mappedCustomerNameCache.set(psid, {
+      name: mappedName,
+      expiresAt: Date.now() + (mappedName ? 300_000 : 30_000),
+    });
+    return mappedName;
   }
 
   private async refreshCustomerProfileIfNeeded(customer?: any | null) {
@@ -4069,21 +4148,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     });
     if (existed) return { duplicated: true };
 
-    const page = await this.prisma.omniInboxPage.upsert({
-      where: { providerPageId: pageId },
-      update: {
-        lastWebhookAt: new Date(),
-        pageName:
-          pageId === this.configuredPageId ? "The 1970" : `Page ${pageId}`,
-      },
-      create: {
-        providerPageId: pageId,
-        pageName:
-          pageId === this.configuredPageId ? "The 1970" : `Page ${pageId}`,
-        channel: "FACEBOOK",
-        lastWebhookAt: new Date(),
-      },
-    });
+    const page = await this.getWebhookPage(pageId);
 
     const isPageAuthored =
       senderId === pageId ||
@@ -4277,25 +4342,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
         if (existedEcho) return { duplicated: true, echo: true };
       }
 
-      const page = await this.prisma.omniInboxPage.upsert({
-        where: { providerPageId: pageId },
-        update: {
-          lastWebhookAt: new Date(),
-          pageName:
-            pageId === this.configuredPageId
-              ? "The 1970"
-              : `Page ${pageId}`,
-        },
-        create: {
-          providerPageId: pageId,
-          pageName:
-            pageId === this.configuredPageId
-              ? "The 1970"
-              : `Page ${pageId}`,
-          channel: "FACEBOOK",
-          lastWebhookAt: new Date(),
-        },
-      });
+      const page = await this.getWebhookPage(pageId);
 
       const existingCustomer = await this.prisma.omniCustomer.findUnique({
         where: { providerUserId: customerPsid },
@@ -4458,25 +4505,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
 
     // Webhook phải ghi tin vào DB/SSE trước, không chờ Graph profile.
     // Profile sẽ refresh nền sau để tin mới xuất hiện gần như ngay lập tức.
-    const page = await this.prisma.omniInboxPage.upsert({
-      where: { providerPageId: recipientId },
-      update: {
-        lastWebhookAt: new Date(),
-        pageName:
-          recipientId === this.configuredPageId
-            ? "The 1970"
-            : `Page ${recipientId}`,
-      },
-      create: {
-        providerPageId: recipientId,
-        pageName:
-          recipientId === this.configuredPageId
-            ? "The 1970"
-            : `Page ${recipientId}`,
-        channel: "FACEBOOK",
-        lastWebhookAt: new Date(),
-      },
-    });
+    const page = await this.getWebhookPage(recipientId);
 
     const existingCustomer = await this.prisma.omniCustomer.findUnique({
       where: { providerUserId: senderId },
