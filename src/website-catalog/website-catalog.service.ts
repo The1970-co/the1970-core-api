@@ -40,6 +40,18 @@ export class WebsiteCatalogService {
     return WebsitePublishStatus.DRAFT;
   }
 
+  private normalizeCategorySlugs(value: unknown) {
+    if (!Array.isArray(value)) return [];
+
+    return Array.from(
+      new Set(
+        value
+          .map((item) => this.slugify(item))
+          .filter(Boolean),
+      ),
+    );
+  }
+
   private normalizeImages(value: unknown) {
     if (!Array.isArray(value)) return [];
     return value
@@ -134,7 +146,9 @@ export class WebsiteCatalogService {
         marketInternational: body?.marketInternational === true,
         featured: body?.featured === true,
         sortOrder: Number(body?.sortOrder || 0),
-        websiteCategorySlugs: Array.isArray(body?.websiteCategorySlugs) ? body.websiteCategorySlugs.map((x:any)=>String(x).trim()).filter(Boolean) : [],
+        websiteCategorySlugs: this.normalizeCategorySlugs(
+          body?.websiteCategorySlugs,
+        ),
         titleVi,
         titleEn: this.nullable(body?.titleEn),
         shortDescriptionVi: this.nullable(body?.shortDescriptionVi),
@@ -179,8 +193,14 @@ export class WebsiteCatalogService {
               ? current.marketInternational
               : body.marketInternational === true,
           featured: body?.featured === undefined ? current.featured : body.featured === true,
-          sortOrder: body?.sortOrder === undefined ? current.sortOrder : Number(body.sortOrder || 0),
-          websiteCategorySlugs: body?.websiteCategorySlugs === undefined ? current.websiteCategorySlugs : (Array.isArray(body.websiteCategorySlugs) ? body.websiteCategorySlugs.map((x:any)=>String(x).trim()).filter(Boolean) : []),
+          sortOrder:
+            body?.sortOrder === undefined
+              ? current.sortOrder
+              : Number(body.sortOrder || 0),
+          websiteCategorySlugs:
+            body?.websiteCategorySlugs === undefined
+              ? current.websiteCategorySlugs
+              : this.normalizeCategorySlugs(body.websiteCategorySlugs),
           titleVi,
           titleEn: body?.titleEn === undefined ? current.titleEn : this.nullable(body.titleEn),
           shortDescriptionVi:
@@ -282,11 +302,13 @@ export class WebsiteCatalogService {
         market === "INTERNATIONAL"
           ? row.shortDescriptionEn || row.shortDescriptionVi
           : row.shortDescriptionVi,
-      imageUrl: row.coverImageUrl || row.images[0]?.url || null,
+      imageUrl: row.coverImageUrl || row.images[0]?.url || row.product.imageUrl,
       images: row.images.map((x) => ({ url: x.url, altVi: x.altVi, altEn: x.altEn })),
       category: row.product.categoryRel?.name || row.product.category || null,
+      websiteCategorySlugs: Array.isArray(row.websiteCategorySlugs)
+        ? row.websiteCategorySlugs
+        : [],
       featured: row.featured,
-      websiteCategorySlugs: row.websiteCategorySlugs || [],
       variants: row.product.variants.map((v) => ({
         id: v.id,
         sku: v.sku,
