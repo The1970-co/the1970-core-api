@@ -376,6 +376,9 @@ export class ProductionService {
   }
 
   async updateFactory(id: string, body: any) {
+    if (body?.name !== undefined && !String(body.name || "").trim()) {
+      throw new BadRequestException("Tên nhà may không được để trống.");
+    }
     return this.prisma.productionPartner.update({
       where: { id },
       data: {
@@ -1017,6 +1020,22 @@ export class ProductionService {
   }
 
   async updateOrder(id: string, body: any) {
+    let nextProductionPartnerId: string | undefined;
+    if (body?.productionPartnerId !== undefined) {
+      nextProductionPartnerId = String(body.productionPartnerId || "").trim();
+      if (!nextProductionPartnerId) throw new BadRequestException("Chưa chọn nhà may / nhà sản xuất.");
+
+      const [currentOrder, nextFactory] = await Promise.all([
+        this.prisma.productionOrder.findUnique({ where: { id }, select: { productionPartnerId: true } }),
+        this.prisma.productionPartner.findUnique({ where: { id: nextProductionPartnerId }, select: { id: true, isActive: true } }),
+      ]);
+      if (!currentOrder) throw new NotFoundException("Không tìm thấy lệnh SX.");
+      if (!nextFactory) throw new NotFoundException("Không tìm thấy nhà may / nhà sản xuất.");
+      if (!nextFactory.isActive && currentOrder.productionPartnerId !== nextProductionPartnerId) {
+        throw new BadRequestException("Nhà may này đã ngừng hoạt động. Vui lòng chọn nhà may khác.");
+      }
+    }
+
     const touchesQuickMeta =
       Object.prototype.hasOwnProperty.call(body || {}, "note") ||
       Object.prototype.hasOwnProperty.call(body || {}, "quickStage");
@@ -1043,7 +1062,7 @@ export class ProductionService {
     const updated = await this.prisma.productionOrder.update({
       where: { id },
       data: {
-        ...(body?.productionPartnerId !== undefined ? { productionPartnerId: body.productionPartnerId } : {}),
+        ...(nextProductionPartnerId !== undefined ? { productionPartnerId: nextProductionPartnerId } : {}),
         ...(body?.status !== undefined ? { status: body.status } : {}),
         ...(body?.plannedStartAt !== undefined
           ? { plannedStartAt: body.plannedStartAt ? new Date(body.plannedStartAt) : null }
