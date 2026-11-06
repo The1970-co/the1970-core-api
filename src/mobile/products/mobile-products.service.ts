@@ -9,6 +9,7 @@ export class MobileProductsService {
     q?: string;
     branchId?: string;
     status?: string;
+    category?: string;
     take?: number;
   }) {
     const q = input.q?.trim();
@@ -18,6 +19,38 @@ export class MobileProductsService {
 
     if (input.status && input.status !== "all") {
       where.status = input.status;
+    }
+
+    // Dùng cùng quy tắc chuẩn hoá danh mục với API web /products.
+    // Lọc ở database TRƯỚC findMany/take để không bị mất sản phẩm.
+    const category = String(input.category || "").trim();
+    if (category && category.toLowerCase() !== "all") {
+      const normalizeCategory = (value: unknown) =>
+        String(value ?? "")
+          .trim()
+          .toLowerCase()
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .replace(/[*:]/g, "")
+          .replace(/[_-]+/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+
+      const wantedKey = normalizeCategory(category);
+      const existingCategories = await this.prisma.product.findMany({
+        where: {
+          category: { not: null },
+          ...(where.status ? { status: where.status } : {}),
+        },
+        select: { category: true },
+        distinct: ["category"],
+      });
+      const matchedCategories = existingCategories
+        .map((product) => String(product.category || "").trim())
+        .filter((value) => value && normalizeCategory(value) === wantedKey);
+
+      if (!matchedCategories.length) return [];
+      where.category = { in: matchedCategories };
     }
 
     if (q) {

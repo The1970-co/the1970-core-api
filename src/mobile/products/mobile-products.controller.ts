@@ -12,12 +12,14 @@ export class MobileProductsController {
     @Query("q") q?: string,
     @Query("branchId") branchId?: string,
     @Query("status") status?: string,
+    @Query("category") category?: string,
     @Query("take") take?: string
   ) {
     return this.service.getProducts({
       q,
       branchId,
       status,
+      category,
       take: Number(take || 50),
     });
   }
