@@ -100,7 +100,9 @@ export class WebsiteNavigationService {
       announcementLink: this.text(
         settingsSource.announcementLink,
       ),
-      headerLogoUrl: this.text(settingsSource.headerLogoUrl),
+      headerLogoUrl: this.text(
+        settingsSource.headerLogoUrl,
+      ),
       headerLogoWidth: this.number(
         settingsSource.headerLogoWidth,
         40,
