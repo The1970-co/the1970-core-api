@@ -655,8 +655,8 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       return "CHOXEMHANGKHONGTHU";
     }
 
-    if (value === "CHOXEMHANG" || value === "CHOXEMHANGCHOTHU") {
-      return "CHOXEMHANG";
+    if (value === "CHOXEMHANG" || value === "CHOXEMHANGCHOTHU" || value === "CHOTHUHANG") {
+      return "CHOTHUHANG";
     }
 
     return "KHONGCHOXEMHANG";
@@ -2893,7 +2893,16 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       );
       const codFailedAmount = requestedCodFailedAmount > 0 ? requestedCodFailedAmount : 0;
       const requiredNote = this.normalizeGhnRequiredNote((dto as any).requiredNote);
-      const shipmentNote = String(dto.note || "").trim();
+      // API tạo vận đơn GHN không có cờ partial-delivery được công bố.
+      // GHN yêu cầu gửi chỉ dẫn qua note, với điều kiện Shop ID đã được GHN kích hoạt dịch vụ.
+      const rawShipmentNote = String(dto.note || "").trim();
+      const hasPartialInstruction =
+        /giao\s*(?:hàng\s*)?1\s*phần\s*[-–]\s*trả\s*1\s*phần/i.test(rawShipmentNote);
+      const ghnPartialDelivery = (dto as any).ghnPartialDelivery === true || hasPartialInstruction;
+      const partialNote = "Giao 1 phần - Trả 1 phần";
+      const shipmentNote = ghnPartialDelivery && !hasPartialInstruction
+        ? [partialNote, "Thu hồi sản phẩm cũ của khách về shop khi đổi hàng", rawShipmentNote].filter(Boolean).join(" | ")
+        : rawShipmentNote;
       const actorName = this.getShipmentActorName(user);
       const created = await this.ghnClient.createOrder({
         payment_type_id: 1,
@@ -2940,6 +2949,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       const shipmentMetadata = {
         ...(created || {}),
         note: shipmentNote,
+        ghnPartialDelivery,
         required_note: requiredNote,
         requiredNote,
         cod_failed_amount: codFailedAmount,
@@ -3116,7 +3126,16 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
           ? 0
           : remainingCodAmount,
       insuranceValue: Number(order.finalAmount || 0),
-      note: "",
+      // Khi tạo vận đơn sau (từ đơn đã lưu), đọc lại dấu Giao 1 phần trong Order.note.
+      // Không gửi metadata nội bộ như giảm giá/CustomerId cho GHN.
+      note: /giao\s*(?:hàng\s*)?1\s*phần\s*[-–]\s*trả\s*1\s*phần/i.test(orderNoteText)
+        ? "Giao 1 phần - Trả 1 phần | Thu hồi sản phẩm cũ của khách về shop khi đổi hàng"
+        : "",
+      requiredNote: /cho xem hàng, không cho thử/i.test(orderNoteText)
+        ? "CHOXEMHANGKHONGTHU"
+        : /cho xem hàng, cho thử/i.test(orderNoteText)
+          ? "CHOTHUHANG"
+          : "KHONGCHOXEMHANG",
       clientOrderCode: order.orderCode,
       content: `Đơn ${order.orderCode}`,
       ...(inferredCodFailedAmount > 0
