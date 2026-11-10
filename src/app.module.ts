@@ -42,6 +42,7 @@ import { WebsiteHomepageModule } from "./website-homepage/website-homepage.modul
 import { WebsiteNavigationModule } from "./website-navigation/website-navigation.module";
 import { WebsiteSettingsModule } from "./website-settings/website-settings.module";
 import { WebsiteCommerceModule } from "./website-commerce/website-commerce.module";
+import { BusinessReportModule } from "./business-report/business-report.module";
 
 @Module({
   imports: [
@@ -88,6 +89,7 @@ import { WebsiteCommerceModule } from "./website-commerce/website-commerce.modul
     WebsiteNavigationModule,
     WebsiteSettingsModule,
     WebsiteCommerceModule,
+    BusinessReportModule,
   ],
 })
 export class AppModule {}

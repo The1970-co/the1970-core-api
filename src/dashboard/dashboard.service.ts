@@ -765,6 +765,52 @@ export class DashboardService {
       dailyMap.set(key, row);
     }
 
+    // Đơn tạo trong ngày: cùng tập đơn hợp lệ, dựa vào createdAt, tách POS/Facebook.
+    // Sử dụng để Dashboard và push dùng chung số liệu (không cần endpoint War Room).
+    const createdOrdersRaw = await this.prisma.order.findMany({
+      where: {
+        ...validOrderWhere,
+        createdAt: { gte: dailyReportStart, lt: tomorrowStart },
+      },
+      select: {
+        createdAt: true,
+        salesChannel: true,
+        finalAmount: true,
+        items: { select: { qty: true, variant: { select: { costPrice: true } } } },
+      },
+    });
+    const createdByDay = new Map<string, {
+      createdOrders: number; createdAmount: number; createdCostEstimate: number;
+      posCreatedOrders: number; posCreatedAmount: number; posCreatedCostEstimate: number;
+      facebookCreatedOrders: number; facebookCreatedAmount: number; facebookCreatedCostEstimate: number;
+      otherCreatedOrders: number; otherCreatedAmount: number; otherCreatedCostEstimate: number;
+    }>();
+    for (const order of createdOrdersRaw) {
+      const key = this.dayKey(order.createdAt);
+      const row = createdByDay.get(key) || {
+        createdOrders: 0, createdAmount: 0, createdCostEstimate: 0,
+        posCreatedOrders: 0, posCreatedAmount: 0, posCreatedCostEstimate: 0,
+        facebookCreatedOrders: 0, facebookCreatedAmount: 0, facebookCreatedCostEstimate: 0,
+        otherCreatedOrders: 0, otherCreatedAmount: 0, otherCreatedCostEstimate: 0,
+      };
+      const amount = this.n(order.finalAmount);
+      const cost = order.items.reduce((sum, item) => sum + this.n(item.qty) * this.n(item.variant?.costPrice), 0);
+      const channel = String(order.salesChannel || '').toUpperCase();
+      const prefix = channel === 'POS' || channel === 'SHOWROOM' ? 'pos'
+        : channel.includes('FACEBOOK') ? 'facebook' : 'other';
+      row.createdOrders += 1;
+      row.createdAmount += amount;
+      row.createdCostEstimate += cost;
+      if (prefix === 'pos') {
+        row.posCreatedOrders += 1; row.posCreatedAmount += amount; row.posCreatedCostEstimate += cost;
+      } else if (prefix === 'facebook') {
+        row.facebookCreatedOrders += 1; row.facebookCreatedAmount += amount; row.facebookCreatedCostEstimate += cost;
+      } else {
+        row.otherCreatedOrders += 1; row.otherCreatedAmount += amount; row.otherCreatedCostEstimate += cost;
+      }
+      createdByDay.set(key, row);
+    }
+
     // Ép merge ads vào dailyMap sau khi cộng đơn hàng. Đây là điểm fix chính:
     // totalAdsCost có số thì dailyRows từng ngày cũng phải nhận đúng adsCost.
     for (const [key, row] of dailyMap.entries()) {
@@ -817,6 +863,7 @@ export class DashboardService {
           adsCost: row.adsCost,
           profit: row.profit,
           orders: row.orders,
+          ...(createdByDay.get(key) || {}),
         },
       };
     });

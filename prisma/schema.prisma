@@ -4211,3 +4211,21 @@ model WebsiteSettings {
   @@index([market])
 }
 
+
+// Bản ghi chống gửi trùng và lưu lịch sử thông báo (migration bắt buộc).
+model BusinessReportDelivery {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  userId    String
+  kind      String
+  title     String
+  body      String
+  status    String   @default("PENDING")
+  sent      Int      @default(0)
+  failed    Int      @default(0)
+  error     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, createdAt(sort: Desc)])
+}

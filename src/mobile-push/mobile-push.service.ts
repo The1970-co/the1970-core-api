@@ -297,6 +297,27 @@ export class MobilePushService implements OnModuleDestroy {
     }
   }
 
+  // Báo cáo chỉ gửi tới token của đúng tài khoản đã bật thông báo.
+  async notifyReport(userId: string, title: string, body: string, payload: Record<string, unknown>) {
+    const tokens = await this.prisma.mobilePushToken.findMany({
+      where: { userId, isActive: true, platform: 'ios', provider: 'apns' },
+      select: { token: true }, take: 100,
+    });
+    if (!tokens.length) return { success: true, sent: 0, failed: 0 };
+    const note: any = new apn.Notification();
+    note.topic = process.env.APNS_BUNDLE_ID || 'co.the1970.operations';
+    note.pushType = 'alert';
+    note.priority = 10;
+    note.expiry = Math.floor(Date.now() / 1000) + 3600;
+    note.alert = { title, body };
+    note.sound = 'default';
+    note.payload = { type: 'business_report', ...payload };
+    const result = await this.provider().send(note, tokens.map(t => t.token));
+    const dead = result.failed.filter((x: any) => ['Unregistered', 'BadDeviceToken'].includes(String(x.response?.reason || ''))).map((x: any) => x.device).filter(Boolean);
+    if (dead.length) await this.prisma.mobilePushToken.updateMany({ where: { token: { in: dead } }, data: { isActive: false } });
+    return { success: result.failed.length === 0, sent: result.sent.length, failed: result.failed.length };
+  }
+
   onModuleDestroy() {
     this.apnProvider?.shutdown();
   }

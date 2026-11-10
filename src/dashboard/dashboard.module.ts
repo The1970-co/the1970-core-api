@@ -8,5 +8,6 @@ import { MetaAdsModule } from '../meta-ads/meta-ads.module';
   imports: [PrismaModule, MetaAdsModule],
   controllers: [DashboardController],
   providers: [DashboardService],
+  exports: [DashboardService],
 })
 export class DashboardModule {}
