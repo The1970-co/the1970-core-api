@@ -22,7 +22,7 @@ const defaults: ReportSettings = {
   metrics: {orders:true,pos:true,cod:true,createdRevenue:true,successRevenue:true,actualProfit:false,estimatedProfit:false,ads:false},
   alerts: {pos:false,cod:false,revenue:false,growth:true,record:true,decline:false},
   posTarget: 20_000_000, codTarget: 30_000_000, revenueTarget: 50_000_000,
-  growthPct: 10, declinePct: 20, recordDays: 7,
+  growthPct: 0, declinePct: 20, recordDays: 7,
   operatingCostEnabled: true, dailyOperatingCost: 7_000_000,
 };
 
@@ -92,6 +92,15 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
     return next;
   }
   async history(user:any) {const id=this.owner(user);return this.prisma.businessReportDelivery.findMany({where:{userId:id},orderBy:{createdAt:'desc'},take:50});}
+  async devices(user:any) {
+    const userId=this.owner(user);
+    const devices=await this.prisma.mobilePushToken.findMany({
+      where:{userId,isActive:true,platform:'ios',provider:'apns'},
+      select:{id:true,deviceId:true,appVersion:true,lastSeenAt:true,createdAt:true,token:true},
+      orderBy:{lastSeenAt:'desc'},take:50,
+    });
+    return devices.map((d,i)=>({id:d.id,label:`iPhone ${i+1} · ${d.token.slice(-6)}`,deviceId:d.deviceId,appVersion:d.appVersion,lastSeenAt:d.lastSeenAt}));
+  }
 
   // Use DashboardService as one source for revenue, ads & cost. Augmented dailyRows
   // from that same service expose created orders by channel for web and mobile.
@@ -126,9 +135,12 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
     return entries.filter(([key])=>c.metrics[key]).map(([,v])=>v).join(' · ') || 'Không có chỉ số được bật';
   }
   async preview(user:any) { const c=await this.settings(user);const s=await this.snapshot(c);return {snapshot:s, title:`Báo cáo kinh doanh ${s.time}`,body:this.format(s,c)}; }
-  async test(user:any) {
+  async test(user:any, tokenId?:string, kind:'daily'|'growth'='daily') {
     const id=this.owner(user),c=await this.settings(user),s=await this.snapshot(c);
-    return this.push.notifyReport(id,'[Thử] Báo cáo kinh doanh',this.format(s,c),{kind:'test',day:s.day});
+    const title=kind==='growth'?'[Thử] Cảnh báo tăng trưởng':'[Thử] Báo cáo kinh doanh';
+    const body=kind==='growth'?`Doanh thu thành công hiện tại: ${fmt(s.successRevenue)}đ. Đây là thông báo thử.`:this.format(s,c);
+    // Only tokens belonging to the authenticated owner/admin may be addressed.
+    return this.push.notifyReport(id,title,body,{kind:kind==='growth'?'growth':'test',day:s.day},tokenId);
   }
   private async deliver(userId:string,key:string,kind:string,title:string,body:string,day:string) {
     // Unique key provides deduplication even if Railway runs >1 worker.
@@ -180,8 +192,8 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
           const before=num(a._sum.finalAmount),current=num(b._sum.finalAmount);
           if(before>0){
             const pct=100*(current-before)/before;
-            if(c.alerts.growth&&pct>=c.growthPct)await this.deliver(userId,`growth:${userId}:${p.day}:${c.growthPct}`,'growth','Doanh thu tăng trưởng',`Doanh thu thành công tăng ${pct.toFixed(1)}% so với hôm qua cùng giờ (${fmt(current)}đ).`,p.day);
-            if(c.alerts.decline&&pct<=-c.declinePct)await this.deliver(userId,`decline:${userId}:${p.day}:${c.declinePct}`,'decline','Doanh thu giảm',`Doanh thu thành công giảm ${Math.abs(pct).toFixed(1)}% so với hôm qua cùng giờ.`,p.day);
+            if(c.alerts.growth&&pct>0&&pct>=c.growthPct)await this.deliver(userId,`growth:${userId}:${p.day}:${c.growthPct}`,'growth','Doanh thu tăng trưởng',`Doanh thu thành công tăng ${pct.toFixed(1)}% so với hôm qua cùng giờ (${fmt(current)}đ).`,p.day);
+            if(c.alerts.decline&&pct<0&&pct<=-c.declinePct)await this.deliver(userId,`decline:${userId}:${p.day}:${c.declinePct}`,'decline','Doanh thu giảm',`Doanh thu thành công giảm ${Math.abs(pct).toFixed(1)}% so với hôm qua cùng giờ.`,p.day);
           }
         }
         if(c.alerts.record){

@@ -1,4 +1,4 @@
-import { Injectable, OnModuleDestroy } from "@nestjs/common";
+import { Injectable, OnModuleDestroy, BadRequestException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import * as apn from "apn";
 import * as fs from "fs";
@@ -298,24 +298,34 @@ export class MobilePushService implements OnModuleDestroy {
   }
 
   // Báo cáo chỉ gửi tới token của đúng tài khoản đã bật thông báo.
-  async notifyReport(userId: string, title: string, body: string, payload: Record<string, unknown>) {
+  async notifyReport(userId: string, title: string, body: string, payload: Record<string, unknown>, tokenId?: string) {
     const tokens = await this.prisma.mobilePushToken.findMany({
-      where: { userId, isActive: true, platform: 'ios', provider: 'apns' },
-      select: { token: true }, take: 100,
+      where: { userId, isActive: true, platform: 'ios', provider: 'apns', ...(tokenId ? {id:tokenId} : {}) },
+      select: {id:true, token: true}, take: 100,
     });
-    if (!tokens.length) return { success: true, sent: 0, failed: 0 };
+    if (tokenId && !tokens.length) throw new BadRequestException('Thiết bị không thuộc tài khoản hoặc token đã ngừng hoạt động');
+    if (!tokens.length) return { success: false, sent: 0, failed: 0, reason:'NO_DEVICE', devices:[] };
     const note: any = new apn.Notification();
     note.topic = process.env.APNS_BUNDLE_ID || 'co.the1970.operations';
     note.pushType = 'alert';
     note.priority = 10;
     note.expiry = Math.floor(Date.now() / 1000) + 3600;
     note.alert = { title, body };
-    note.sound = 'default';
+    // Custom sound requires report.caf/alert.caf bundled into the iOS target.
+    // Keep the default sound until the new iOS build ships with those assets.
+    const configured = payload.kind === 'growth' || payload.kind === 'decline' || payload.kind === 'record'
+      ? process.env.APNS_ALERT_SOUND : process.env.APNS_REPORT_SOUND;
+    note.sound = configured || 'default';
     note.payload = { type: 'business_report', ...payload };
     const result = await this.provider().send(note, tokens.map(t => t.token));
+    const failedByToken = new Map(result.failed.map((x:any) => [x.device, x]));
+    const devices=tokens.map(t=>{
+      const err:any=failedByToken.get(t.token);
+      return {id:t.id,status:err?'FAILED':'ACCEPTED',reason:err?.response?.reason || err?.error?.message || null};
+    });
     const dead = result.failed.filter((x: any) => ['Unregistered', 'BadDeviceToken'].includes(String(x.response?.reason || ''))).map((x: any) => x.device).filter(Boolean);
     if (dead.length) await this.prisma.mobilePushToken.updateMany({ where: { token: { in: dead } }, data: { isActive: false } });
-    return { success: result.failed.length === 0, sent: result.sent.length, failed: result.failed.length };
+    return { success: result.failed.length === 0, sent: result.sent.length, failed: result.failed.length, devices };
   }
 
   onModuleDestroy() {

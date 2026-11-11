@@ -11,5 +11,6 @@ export class BusinessReportController {
   @Post('settings') save(@Req() req:Request & {user?:any},@Body() body:any){return this.reports.save(req.user,body);}
   @Get('preview') preview(@Req() req:Request & {user?:any}){return this.reports.preview(req.user);}
   @Get('history') history(@Req() req:Request & {user?:any}){return this.reports.history(req.user);}
-  @Post('test') test(@Req() req:Request & {user?:any}){return this.reports.test(req.user);}
+  @Get('devices') devices(@Req() req:Request & {user?:any}){return this.reports.devices(req.user);}
+  @Post('test') test(@Req() req:Request & {user?:any},@Body() body:any){return this.reports.test(req.user,body?.tokenId,body?.kind==='growth'?'growth':'daily');}
 }
