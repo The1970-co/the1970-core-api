@@ -48,9 +48,13 @@ const num = (n:any) => Number.isFinite(Number(n)) ? Number(n) : 0;
 export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
   private timer?: ReturnType<typeof setInterval>;
   private running=false;
+  private lastTickAt: Date | null = null;
+  private lastTickError: string | null = null;
+  private lastTickSummary: Record<string, unknown> | null = null;
   constructor(private prisma:PrismaService, private dashboard:DashboardService, private push:MobilePushService, private shipment:ShipmentService) {}
   onModuleInit() {
     // Railway backend must be a persistent instance; no browser/phone required.
+    console.log('[REPORT_SCHEDULER_START] timezone=Asia/Ho_Chi_Minh interval=60s');
     this.timer=setInterval(()=>void this.tick().catch(e=>console.error('[REPORT_CRON]',e)), 60_000);
     void this.tick().catch(e=>console.error('[REPORT_BOOT]',e));
   }
@@ -194,8 +198,36 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
       await this.prisma.businessReportDelivery.update({where:{key},data:{status:result.sent?'SENT':result.failed?'FAILED':'NO_DEVICE',sent:result.sent,failed:result.failed}});
     } catch(e:any) {await this.prisma.businessReportDelivery.update({where:{key},data:{status:'FAILED',error:String(e?.message||e).slice(0,500)}});}
   }
+  // Diagnoses whether this API process is actually running the scheduler.
+  async schedulerStatus(user:any) {
+    const userId=this.owner(user);
+    const c=await this.settings(user);
+    const p=vnParts();
+    const histories=await this.prisma.businessReportDelivery.findMany({
+      where:{userId,kind:'daily',key:{startsWith:`daily:${userId}:${p.day}:`}},
+      select:{key:true,status:true,createdAt:true,sent:true,failed:true,error:true},
+      orderBy:{createdAt:'desc'},take:20,
+    });
+    return {
+      serverNow:new Date().toISOString(),localNow:p, schedulerStarted:Boolean(this.timer),
+      isRunning:this.running,lastTickAt:this.lastTickAt,lastTickError:this.lastTickError,
+      lastTickSummary:this.lastTickSummary,enabled:c.enabled,slots:c.slots,
+      // Values that have passed should have delivery rows; otherwise scheduler is not delivering.
+      dueToday:c.slots.filter(x=>x.enabled&&x.time<=p.time),histories,
+    };
+  }
+
+  async runSchedulerCheck(user:any) {
+    this.owner(user);
+    await this.tick();
+    return this.schedulerStatus(user);
+  }
+
   private async tick(){
     if(this.running)return; this.running=true;
+    const stats={owners:0, dueSlots:0, sentChecks:0, skipped:0, errors:0};
+    this.lastTickAt=new Date();
+    this.lastTickError=null;
     try {
       const p=vnParts();
       // Active owner/admin devices get default schedule even before first settings visit.
@@ -211,13 +243,27 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
       for(const row of rows){
         const userId=row.key.slice(KEY_PREFIX.length);
         if(!authorized.has(userId)) continue;
+        stats.owners++;
+        try {
         const c=await this.settings({id:userId,role:'OWNER'});
         if(!c.enabled)continue;
-        const due=c.slots.some(x=>x.enabled&&x.time===p.time);
-        // Alert evaluation every 5 minutes, not every minute.
-        if(!due&&p.minutes%5!==0)continue;
+        // Catch up any due slot earlier today, including after restarts or slow queries.
+        // Unique delivery key prevents duplicates; never send tomorrow's slots early.
+        const dueSlots=c.slots.filter(x=>x.enabled && x.time<=p.time);
+        stats.dueSlots+=dueSlots.length;
+        // Avoid expensive Dashboard/Shipment queries every minute after noon.
+        const dueKeys=dueSlots.map(slot=>`daily:${userId}:${p.day}:${slot.time}`);
+        const existing=dueKeys.length?await this.prisma.businessReportDelivery.findMany({
+          where:{key:{in:dueKeys}},select:{key:true},
+        }):[];
+        const existingKeys=new Set(existing.map(x=>x.key));
+        const pendingSlots=dueSlots.filter(slot=>!existingKeys.has(`daily:${userId}:${p.day}:${slot.time}`));
+        if(!pendingSlots.length&&p.minutes%5!==0)continue;
         const s=await this.snapshot(c);
-        if(due)await this.deliver(userId,`daily:${userId}:${p.day}:${p.time}`,'daily',`Báo cáo kinh doanh ${p.time}`,this.format(s,c),p.day);
+        for(const slot of pendingSlots){
+          stats.sentChecks++;
+          await this.deliver(userId,`daily:${userId}:${p.day}:${slot.time}`,'daily',`Báo cáo kinh doanh ${slot.time}`,this.format(s,c),p.day);
+        }
         if(p.minutes%5!==0)continue;
         for(const [name,value,threshold,label] of [
           ['pos',s.posRevenue,c.posTarget,'POS'],['cod',s.codRevenue,c.codTarget,'COD'],['revenue',s.createdRevenue,c.revenueTarget,'Tổng doanh thu tạo'],
@@ -246,7 +292,19 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
             if(s.createdRevenue>highest)await this.deliver(userId,`record:${userId}:${p.day}:${c.recordDays}`,'record',`Kỷ lục doanh thu ${c.recordDays} ngày`,`Doanh thu tạo đơn ${fmt(s.createdRevenue)}đ, vượt mức cao nhất ${fmt(highest)}đ.`,p.day);
           }
         }
+        } catch (error:any) {
+          stats.errors++;
+          console.error(`[REPORT_SCHEDULER_USER_FAILED] user=${userId}`,error);
+        }
       }
-    } finally {this.running=false;}
+    } catch(error:any) {
+      this.lastTickError=String(error?.message || error);
+      console.error('[REPORT_SCHEDULER_TICK_FAILED]',error);
+      throw error;
+    } finally {
+      this.lastTickSummary=stats;
+      this.running=false;
+      console.log('[REPORT_SCHEDULER_TICK]',{at:this.lastTickAt?.toISOString(),...stats});
+    }
   }
 }
