@@ -230,19 +230,47 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
     this.lastTickError=null;
     try {
       const p=vnParts();
-      // Active owner/admin devices get default schedule even before first settings visit.
-      const [savedRows, admins, activeTokens] = await Promise.all([
-        this.prisma.systemSetting.findMany({where:{key:{startsWith:KEY_PREFIX}}}),
+      // Both AdminUser (legacy) and StaffUser (current multi-role accounts) exist.
+      // Only active Owner/Admin users can receive financial report pushes.
+      // Push tokens are registered per device, so a user with two iPhones receives both.
+      const [savedRows, legacyAdmins, staffAdmins, activeTokens] = await Promise.all([
+        this.prisma.systemSetting.findMany({where:{key:{startsWith:KEY_PREFIX}},select:{key:true}}),
         this.prisma.adminUser.findMany({where:{isActive:true,role:{in:['OWNER','ADMIN']}},select:{id:true}}),
-        this.prisma.mobilePushToken.findMany({where:{isActive:true,platform:'ios',provider:'apns',userId:{not:null}},select:{userId:true}}),
+        this.prisma.staffUser.findMany({
+          where:{
+            isActive:true,
+            OR:[
+              {role:{in:['OWNER','ADMIN','owner','admin']}},
+              {roles:{some:{roleCode:{in:['OWNER','ADMIN','owner','admin']}}}},
+            ],
+          },
+          select:{id:true},
+        }),
+        this.prisma.mobilePushToken.findMany({
+          where:{isActive:true,platform:'ios',provider:'apns'},
+          select:{userId:true,staffId:true},
+        }),
       ]);
-      const authorized = new Set(admins.map(u=>u.id));
-      const ids = new Set(savedRows.map(r=>r.key.slice(KEY_PREFIX.length)));
-      for(const device of activeTokens) if(device.userId&&authorized.has(device.userId)) ids.add(device.userId);
-      const rows=[...ids].map(id=>({key:KEY_PREFIX+id}));
-      for(const row of rows){
-        const userId=row.key.slice(KEY_PREFIX.length);
-        if(!authorized.has(userId)) continue;
+      const authorized = new Set([...legacyAdmins,...staffAdmins].map(u=>u.id));
+      const configuredIds = new Set(savedRows.map(r=>r.key.slice(KEY_PREFIX.length)));
+      const ids = new Set<string>();
+      // Every logged-in iPhone should already have an active APNs token. Only allow
+      // valid Owner/Admin identities, regardless of which user table stores them.
+      for(const device of activeTokens){
+        if(device.userId && authorized.has(device.userId)) ids.add(device.userId);
+        // If staffId is populated but userId differs, this is a registration
+        // mismatch. Do not send to a possibly unrelated userId.
+      }
+      for(const id of configuredIds) if(authorized.has(id)) ids.add(id);
+      console.log('[REPORT_SCHEDULER_RECIPIENTS]',{
+        savedSettings:savedRows.length,
+        legacyAdmins:legacyAdmins.length,
+        staffAdmins:staffAdmins.length,
+        activeDevices:activeTokens.length,
+        staffIdOnlyDevices:activeTokens.filter(t=>t.staffId && authorized.has(t.staffId) && t.userId !== t.staffId).length,
+        authorizedRecipients:ids.size,
+      });
+      for(const userId of ids){
         stats.owners++;
         try {
         const c=await this.settings({id:userId,role:'OWNER'});
