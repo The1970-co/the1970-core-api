@@ -63,7 +63,9 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
   private owner(user:any) {
     const id=String(user?.id || user?.userId || '');
     if(!id) throw new ForbiddenException('Không xác định tài khoản');
-    if(!['OWNER','ADMIN'].includes(String(user?.role || '').toUpperCase())) throw new ForbiddenException('Chỉ owner/admin được cấu hình báo cáo doanh thu và lợi nhuận');
+    const roles = [user?.role, ...(Array.isArray(user?.roles) ? user.roles.map((r:any) => typeof r === 'string' ? r : r?.roleCode) : [])]
+      .map((r:any) => String(r || '').trim().toLowerCase());
+    if(!roles.includes('owner') && !roles.includes('admin')) throw new ForbiddenException('Chỉ owner/admin được cấu hình báo cáo doanh thu và lợi nhuận');
     return id;
   }
   async settings(user:any) {
@@ -230,45 +232,34 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
     this.lastTickError=null;
     try {
       const p=vnParts();
-      // Both AdminUser (legacy) and StaffUser (current multi-role accounts) exist.
-      // Only active Owner/Admin users can receive financial report pushes.
-      // Push tokens are registered per device, so a user with two iPhones receives both.
-      const [savedRows, legacyAdmins, staffAdmins, activeTokens] = await Promise.all([
+      // JWT login and /auth/me use StaffUser + StaffUserRole, never AdminUser.
+      // Only active APNs devices belonging to active owner/admin StaffUser may receive reports.
+      const [savedRows, staff, activeTokens] = await Promise.all([
         this.prisma.systemSetting.findMany({where:{key:{startsWith:KEY_PREFIX}},select:{key:true}}),
-        this.prisma.adminUser.findMany({where:{isActive:true,role:{in:['OWNER','ADMIN']}},select:{id:true}}),
         this.prisma.staffUser.findMany({
-          where:{
-            isActive:true,
-            OR:[
-              {role:{in:['OWNER','ADMIN','owner','admin']}},
-              {roles:{some:{roleCode:{in:['OWNER','ADMIN','owner','admin']}}}},
-            ],
-          },
-          select:{id:true},
+          where:{isActive:true},
+          select:{id:true,role:true,roles:{select:{roleCode:true}}},
         }),
         this.prisma.mobilePushToken.findMany({
-          where:{isActive:true,platform:'ios',provider:'apns'},
-          select:{userId:true,staffId:true},
+          where:{isActive:true,platform:'ios',provider:'apns',userId:{not:null}},
+          select:{userId:true},
         }),
       ]);
-      const authorized = new Set([...legacyAdmins,...staffAdmins].map(u=>u.id));
-      const configuredIds = new Set(savedRows.map(r=>r.key.slice(KEY_PREFIX.length)));
-      const ids = new Set<string>();
-      // Every logged-in iPhone should already have an active APNs token. Only allow
-      // valid Owner/Admin identities, regardless of which user table stores them.
-      for(const device of activeTokens){
-        if(device.userId && authorized.has(device.userId)) ids.add(device.userId);
-        // If staffId is populated but userId differs, this is a registration
-        // mismatch. Do not send to a possibly unrelated userId.
-      }
-      for(const id of configuredIds) if(authorized.has(id)) ids.add(id);
-      console.log('[REPORT_SCHEDULER_RECIPIENTS]',{
-        savedSettings:savedRows.length,
-        legacyAdmins:legacyAdmins.length,
-        staffAdmins:staffAdmins.length,
-        activeDevices:activeTokens.length,
-        staffIdOnlyDevices:activeTokens.filter(t=>t.staffId && authorized.has(t.staffId) && t.userId !== t.staffId).length,
-        authorizedRecipients:ids.size,
+      const authorized = new Set(staff.filter(user => {
+        const roles = [user.role, ...user.roles.map(role => role.roleCode)]
+          .map(role => String(role || '').trim().toLowerCase());
+        return roles.includes('owner') || roles.includes('admin');
+      }).map(user => user.id));
+      const deviceIds = new Set(activeTokens.map(token => token.userId).filter((id):id is string => Boolean(id)));
+      const savedIds = new Set(savedRows.map(row => row.key.slice(KEY_PREFIX.length)));
+      // Saved settings are per account; devices get its default schedule even without saved settings.
+      const ids = [...deviceIds].filter(id => authorized.has(id));
+      console.log('[REPORT_SCHEDULER_RECIPIENTS]', {
+        activeAdminAccounts:authorized.size,
+        activeDeviceTokens:activeTokens.length,
+        activeDeviceAccounts:deviceIds.size,
+        eligibleAdminAccounts:ids.length,
+        eligibleAdminWithSavedSettings:ids.filter(id => savedIds.has(id)).length,
       });
       for(const userId of ids){
         stats.owners++;
