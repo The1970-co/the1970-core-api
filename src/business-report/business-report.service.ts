@@ -2,6 +2,7 @@ import { Injectable, OnModuleInit, OnModuleDestroy, ForbiddenException, BadReque
 import { PrismaService } from '../prisma/prisma.service';
 import { DashboardService } from '../dashboard/dashboard.service';
 import { MobilePushService } from '../mobile-push/mobile-push.service';
+import { ShipmentService } from '../shipment/shipment.service';
 
 const TZ = 'Asia/Ho_Chi_Minh';
 const KEY_PREFIX = 'business_report_settings:';
@@ -47,7 +48,7 @@ const num = (n:any) => Number.isFinite(Number(n)) ? Number(n) : 0;
 export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
   private timer?: ReturnType<typeof setInterval>;
   private running=false;
-  constructor(private prisma:PrismaService, private dashboard:DashboardService, private push:MobilePushService) {}
+  constructor(private prisma:PrismaService, private dashboard:DashboardService, private push:MobilePushService, private shipment:ShipmentService) {}
   onModuleInit() {
     // Railway backend must be a persistent instance; no browser/phone required.
     this.timer=setInterval(()=>void this.tick().catch(e=>console.error('[REPORT_CRON]',e)), 60_000);
@@ -102,25 +103,67 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
     return devices.map((d,i)=>({id:d.id,label:`iPhone ${i+1} · ${d.token.slice(-6)}`,deviceId:d.deviceId,appVersion:d.appVersion,lastSeenAt:d.lastSeenAt}));
   }
 
-  // Use DashboardService as one source for revenue, ads & cost. Augmented dailyRows
-  // from that same service expose created orders by channel for web and mobile.
+  // Dashboard Web currently combines DashboardService (daily ads) with
+  // ShipmentService.getWarRoomDeliveryRevenue (actual delivered sales and created orders).
+  // Keep the same two independent sources here. Never infer delivered sales from
+  // overview.dailyRows.raw.revenue, which includes non-delivered orders.
   async snapshot(settings:ReportSettings, now=new Date()) {
     const p=vnParts(now);
-    const overview=await this.dashboard.getOverview();
-    const daily=(overview.dailyRows as any[]);
-    const today=daily.find(r=>r.date===p.day)?.raw || {};
+    const [overview, warRoom] = await Promise.all([
+      this.dashboard.getOverview(),
+      this.shipment.getWarRoomDeliveryRevenue({range:'today',fromDate:p.day,toDate:p.day}),
+    ]);
+    if (!warRoom || !Array.isArray(warRoom.dailySuccessRows) || !Array.isArray(warRoom.createdOrders)) {
+      throw new Error('War Room chưa trả đủ dữ liệu giao thành công và đơn tạo; ngừng gửi báo cáo để tránh số liệu sai');
+    }
+    const daily=(overview.dailyRows || []) as any[];
+    const today=daily.find(r=>String(r.date || '').slice(0,10)===p.day)?.raw || {};
+    const delivered=(warRoom.dailySuccessRows as any[]).find(r=>String(r.date || '').slice(0,10)===p.day);
+    // No delivered row today means zero delivered revenue, NOT overview daily revenue.
+    const revenue=num(delivered?.successAmount);
+    const cost=num(delivered?.successCost);
+    const ads=num(today.adsCost);
     const operating=settings.operatingCostEnabled?settings.dailyOperatingCost:0;
-    const revenue=num(today.revenue),cost=num(today.cost),ads=num(today.adsCost);
-    const createdRevenue=num(today.posCreatedAmount)+num(today.facebookCreatedAmount);
-    const createdCost=num(today.posCreatedCostEstimate)+num(today.facebookCreatedCostEstimate);
-    const fallbackCost=createdRevenue*(revenue>0&&cost>0?cost/revenue:0.42);
-    const estCost=createdCost>0?createdCost:fallbackCost;
-    return {day:p.day,time:p.time, minutes:p.minutes,
-      orders:num(today.createdOrders),pos:num(today.posCreatedOrders),cod:num(today.facebookCreatedOrders),
-      createdRevenue:num(today.createdAmount),posRevenue:num(today.posCreatedAmount),codRevenue:num(today.facebookCreatedAmount),
-      successRevenue:revenue,actualProfit:revenue-cost-ads-operating,
-      estimatedProfit:createdRevenue-estCost-ads-operating,ads,operating,
-      historical:daily,
+
+    const created=(warRoom.createdOrders as any[]).filter(order=>{
+      const status=String(order?.status || '').trim().toUpperCase();
+      return status!=='CANCELLED' && status!=='CANCELED';
+    });
+    const channelOf=(order:any):'pos'|'facebook'|'other'=>{
+      const value=String([order.salesChannel,order.channel,order.orderType,order.paymentMethod,order.paymentType].filter(Boolean).join(' '))
+        .toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'d');
+      if(/pos|ban le|retail|quay/.test(value))return 'pos';
+      if(/facebook|\bfb\b|meta|cod|giao hang|ship|delivery/.test(value))return 'facebook';
+      return 'other';
+    };
+    const amountOf=(order:any)=>num(order.finalAmount ?? order.totalAmount ?? order.amount);
+    const costOf=(order:any)=>{
+      const items=Array.isArray(order.items)?order.items:Array.isArray(order.orderItems)?order.orderItems:[];
+      return items.reduce((sum:number,item:any)=>{
+        const direct=num(item.lineCost ?? item.totalCost ?? item.costAmount ?? item.totalCostAmount ?? item.costTotal);
+        if(direct>0)return sum+direct;
+        const unit=num(item.costPrice ?? item.unitCost ?? item.cost ?? item.variant?.costPrice ?? item.productVariant?.costPrice ?? item.inventoryCost ?? item.importPrice);
+        return sum+unit*num(item.qty ?? item.quantity);
+      },0);
+    };
+    const pos=created.filter(x=>channelOf(x)==='pos');
+    const cod=created.filter(x=>channelOf(x)==='facebook');
+    const sum=(rows:any[], f:(x:any)=>number)=>rows.reduce((total,x)=>total+f(x),0);
+    const posRevenue=sum(pos,amountOf),codRevenue=sum(cod,amountOf);
+    const createdRevenue=posRevenue+codRevenue;
+    const directCreatedCost=sum([...pos,...cod],costOf);
+    // Match DashboardPage.tsx: direct cost if available, otherwise today's actual
+    // cost ratio, falling back to 42% when there is no usable actual cost ratio.
+    const successCostRate=revenue>0&&cost>0?cost/revenue:0;
+    const estimatedCost=directCreatedCost>0?directCreatedCost:
+      createdRevenue>0?Math.round(createdRevenue*(successCostRate || 0.42)):0;
+    const actualProfit=revenue-cost-ads-operating;
+    const estimatedProfit=createdRevenue-estimatedCost-ads-operating;
+    return {day:p.day,time:p.time,minutes:p.minutes,
+      orders:created.length,pos:pos.length,cod:cod.length,
+      createdRevenue:sum(created,amountOf),posRevenue,codRevenue,
+      successRevenue:revenue,actualProfit,estimatedProfit,
+      ads,operating,historical:daily,
     };
   }
   private format(s:any,c:ReportSettings) {
