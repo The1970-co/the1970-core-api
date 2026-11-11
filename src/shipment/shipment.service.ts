@@ -5525,6 +5525,82 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     return "Nội thành realtime";
   }
 
+
+  // Resolve sender location only on explicit promotion check; avoid misleading hardcoded coordinates.
+  private readonly ahamovePickupGeocodeCache = new Map<string, { lat: number; lng: number }>();
+
+  private async resolveAhamovePickupCoordinates(address: string) {
+    const key = String(address || "").trim();
+    if (!key) throw new BadRequestException("Kho lấy hàng AhaMove chưa có địa chỉ.");
+    const cached = this.ahamovePickupGeocodeCache.get(key);
+    if (cached) return cached;
+    const candidates = [key];
+    for (const q of candidates) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 6000);
+      try {
+        const url = new URL("https://nominatim.openstreetmap.org/search");
+        url.searchParams.set("q", q);
+        url.searchParams.set("format", "jsonv2");
+        url.searchParams.set("limit", "1");
+        url.searchParams.set("countrycodes", "vn");
+        const res = await fetch(url.toString(), {
+          headers: { "User-Agent": "The1970Operations/1.0 (Ahamove pickup location)", Accept: "application/json" },
+          signal: controller.signal,
+        });
+        if (!res.ok) continue;
+        const rows = await res.json();
+        const point = Array.isArray(rows) ? rows[0] : null;
+        const lat = Number(point?.lat), lng = Number(point?.lon);
+        if (Number.isFinite(lat) && Number.isFinite(lng) && lat >= 8 && lat <= 24 && lng >= 102 && lng <= 110) {
+          const coords = { lat, lng };
+          this.ahamovePickupGeocodeCache.set(key, coords);
+          return coords;
+        }
+      } catch { /* next candidate */ }
+      finally { clearTimeout(timeout); }
+    }
+    throw new BadRequestException("Không xác định được tọa độ kho lấy hàng. Hãy kiểm tra địa chỉ kho AhaMove.");
+  }
+
+  async findAhamovePromotionsForOrder(input: any) {
+    // Only probe with the account's Partner token; no consumer-session credentials.
+    const sender = await this.getAhamoveSenderConfig({ branchId: input?.branchId });
+    const pickupAddress = String(sender.fromAddress || "").trim();
+    if (!pickupAddress) throw new BadRequestException("Chi nhánh chưa cấu hình địa chỉ lấy hàng AhaMove.");
+    const { lat, lng } = await this.resolveAhamovePickupCoordinates(pickupAddress);
+    const result = await this.probeAhamovePromotions({
+      lat, lng,
+      serviceId: input?.serviceId,
+      serviceFee: input?.serviceFee,
+      distance: input?.distance,
+      orderFee: input?.orderFee,
+      paymentMethod: String(input?.paymentMethod || "balance").toLowerCase(),
+    });
+    return { ...result, pickupAddress, pickupCoordinates: { lat, lng } };
+  }
+
+  async probeAhamovePromotions(query: any) {
+    const lat = Number(query?.lat), lng = Number(query?.lng);
+    const serviceFee = Number(query?.serviceFee), distance = Number(query?.distance);
+    const orderFee = Number(query?.orderFee);
+    const serviceId = String(query?.serviceId || "").trim().toUpperCase();
+    const paymentMethod = String(query?.paymentMethod || "").trim().toLowerCase();
+    if (!Number.isFinite(lat) || lat < -90 || lat > 90 ||
+        !Number.isFinite(lng) || lng < -180 || lng > 180 ||
+        !Number.isFinite(serviceFee) || serviceFee < 0 || serviceFee > 10000000 ||
+        !Number.isFinite(distance) || distance < 0 || distance > 1000 ||
+        !Number.isFinite(orderFee) || orderFee < 0 || orderFee > 100000000 ||
+        !/^[A-Z0-9-]{2,50}$/.test(serviceId) ||
+        !/^[a-z_]{2,40}$/.test(paymentMethod)) {
+      throw new BadRequestException("Tham số kiểm tra khuyến mãi AhaMove không hợp lệ");
+    }
+    return this.ahamoveClient.probePromotions({
+      lat, lng, serviceId, serviceFee, distance, orderFee, paymentMethod,
+      deliveryTypes: "INSTANT",
+    });
+  }
+
   async listAhamoveServices(cityId = "HAN", deliveryType?: "INSTANT" | "TRUCK") {
     const city = String(cityId || "HAN").trim().toUpperCase();
     if (!/^[A-Z]{2,8}$/.test(city)) {

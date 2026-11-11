@@ -336,6 +336,28 @@ export class ShipmentController {
     return this.shipmentService.trackViettelPostByShipmentId(id);
   }
 
+  // Read-only diagnostic for AhaMove Partner API token permissions.
+  // Disabled unless AHAMOVE_PROMOTION_PROBE_ENABLED=true in backend env.
+  @Post("ahamove/promotions/for-order")
+  findAhamovePromotionsForOrder(@Body() body: any) {
+    return this.shipmentService.findAhamovePromotionsForOrder(body);
+  }
+
+  @Get("ahamove/promotions/probe")
+  probeAhamovePromotions(
+    @Query("lat") lat: string,
+    @Query("lng") lng: string,
+    @Query("serviceId") serviceId: string,
+    @Query("serviceFee") serviceFee: string,
+    @Query("distance") distance: string,
+    @Query("orderFee") orderFee: string,
+    @Query("paymentMethod") paymentMethod: string,
+  ) {
+    return this.shipmentService.probeAhamovePromotions({
+      lat, lng, serviceId, serviceFee, distance, orderFee, paymentMethod,
+    });
+  }
+
   @Get("ahamove/services")
   getAhamoveServices(
     @Query("cityId") cityId?: string,

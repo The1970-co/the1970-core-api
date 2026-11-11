@@ -169,6 +169,64 @@ export class AhamoveClient {
     return json;
   }
 
+  // Diagnostic only: the consumer promotion endpoint is not part of the
+  // documented Partner API. Never expose the bearer token or raw headers.
+  async probePromotions(query: {
+    lat: number; lng: number; serviceId: string; serviceFee: number;
+    distance: number; orderFee: number; paymentMethod: string;
+    deliveryTypes?: string;
+  }) {
+    if (process.env.AHAMOVE_PROMOTION_PROBE_ENABLED !== "true") {
+      return { supported: false, reason: "probe_disabled", message: "Set AHAMOVE_PROMOTION_PROBE_ENABLED=true to test." };
+    }
+
+    const params = new URLSearchParams({
+      lat: String(query.lat), lng: String(query.lng),
+      payment_method: query.paymentMethod,
+      service_id: query.serviceId,
+      service_fee: String(query.serviceFee),
+      distance: String(query.distance),
+      order_fee: String(query.orderFee),
+      delivery_types: query.deliveryTypes || "INSTANT",
+      app_source: "web_user",
+      page: "0",
+    });
+    const token = await this.getAccessToken();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch(
+        `https://api.ahamove.com/api/v3/private/promotion/list?${params.toString()}`,
+        { method: "GET", headers: { Authorization: `Bearer ${token}`, Accept: "application/json" }, signal: controller.signal },
+      );
+      const raw = await response.text();
+      let payload: any = null;
+      try { payload = raw ? JSON.parse(raw) : null; } catch { /* Do not expose upstream HTML or unexpected responses. */ }
+      const items = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.data) ? payload.data : null;
+      return {
+        supported: response.ok && items !== null,
+        httpStatus: response.status,
+        itemCount: items?.length ?? null,
+        // Only display non-sensitive promotion fields; never dump internal payloads.
+        promotions: items?.slice(0, 50).map((item: any) => ({
+          code: String(item?.promo_code || item?.code || ""),
+          title: String(item?.title || item?.name || ""),
+          description: String(item?.description || ""),
+          discount: item?.discount ?? item?.discount_amount ?? null,
+        })) ?? [],
+        reason: response.status === 401 || response.status === 403
+          ? "partner_token_not_authorized_for_consumer_promotions"
+          : response.status === 404 ? "endpoint_unavailable" :
+            response.ok && items === null ? "unexpected_response_shape" :
+            !response.ok ? "upstream_request_failed" : null,
+      };
+    } catch (error) {
+      return { supported: false, reason: error instanceof Error && error.name === "AbortError" ? "timeout" : "network_error" };
+    } finally { clearTimeout(timeout); }
+  }
+
   async listServices(cityId = "HAN", deliveryType?: "INSTANT" | "TRUCK") {
     const params = new URLSearchParams({ city_id: cityId });
     if (deliveryType) params.set("delivery_type", deliveryType);
