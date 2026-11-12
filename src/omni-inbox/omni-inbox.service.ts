@@ -69,7 +69,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
   private readonly profileNextCheckAt = new Map<string, number>();
   private readonly profileRefreshRunning = new Map<string, Promise<any>>();
   private readonly profileSuccessTtlMs = 24 * 60 * 60 * 1000;
-  private readonly profileMissingTtlMs = 60 * 60 * 1000;
+  private readonly profileMissingTtlMs = 5 * 60 * 1000;
 
   private async getWebhookPage(pageId: string) {
     const cached = this.webhookPageCache.get(pageId);
@@ -2205,11 +2205,16 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
         const profile = await this.getMessengerProfile(key);
         if (profile.isFallback && !profile.avatarUrl) return current;
         const nextName = profile.isFallback ? current.name : profile.name;
-        // For an existing Cloudinary avatar, keep it if Meta temporarily fails.
+        // Prefer a durable Cloudinary copy, but NEVER discard a valid Meta URL
+        // when downloading/archiving fails. The original implementation stored
+        // profile_pic directly; losing that fallback caused missing avatars.
         const newAvatar = profile.avatarUrl
           ? await this.persistMessengerAvatar(key, profile.avatarUrl)
           : null;
-        const nextAvatar = newAvatar || current.avatarUrl || null;
+        const cachedAvatar = safeText(current.avatarUrl);
+        const cachedIsDurable = cachedAvatar.includes("res.cloudinary.com");
+        const nextAvatar = newAvatar ||
+          (cachedIsDurable ? cachedAvatar : (profile.avatarUrl || cachedAvatar)) || null;
         if (nextName !== current.name || nextAvatar !== current.avatarUrl) {
           current = await this.prisma.omniCustomer.update({
             where: { id: current.id }, data: { name: nextName, avatarUrl: nextAvatar },
