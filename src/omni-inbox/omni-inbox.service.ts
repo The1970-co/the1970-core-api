@@ -64,6 +64,12 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
   private readonly webhookPageInFlight = new Map<string, Promise<any>>();
   // Cache restored customer names briefly to avoid repeated history scans.
   private readonly mappedCustomerNameCache = new Map<string, { expiresAt: number; name: string }>();
+  // Avatar/name are read from PostgreSQL immediately; Meta refreshes happen in the background.
+  // Throttle both successful and failed lookups, including missing-profile customers.
+  private readonly profileNextCheckAt = new Map<string, number>();
+  private readonly profileRefreshRunning = new Map<string, Promise<any>>();
+  private readonly profileSuccessTtlMs = 24 * 60 * 60 * 1000;
+  private readonly profileMissingTtlMs = 60 * 60 * 1000;
 
   private async getWebhookPage(pageId: string) {
     const cached = this.webhookPageCache.get(pageId);
@@ -566,6 +572,14 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
         }
 
         this.messengerHistoryBackfillDone.add(key);
+        // New history must appear without forcing staff to reopen the chat.
+        // Send one compact signal, not up to 200 individual SSE messages.
+        if (imported > 0) {
+          this.realtime.emit({
+            type: "conversation.history_synced",
+            payload: { conversationId, imported },
+          });
+        }
         this.logger.log(
           `[META_HISTORY_BACKFILL_OK] page=${pageId} psid=${last6(customerPsid)} thread=${metaConversationId} fetched=${rows.length} imported=${imported} skipped=${skipped}`,
         );
@@ -2104,55 +2118,108 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     return mappedName;
   }
 
-  private async refreshCustomerProfileIfNeeded(customer?: any | null) {
-    if (!customer?.providerUserId) return customer;
+  /**
+   * FB profile_pic URLs may expire. Archive their bytes to Cloudinary, not just the URL.
+   * This is only called from a background job / a one-time new-customer path.
+   * If Meta/CDN/Cloudinary fails we keep the last working avatar in PostgreSQL.
+   */
+  private async persistMessengerAvatar(psid: string, sourceUrl?: string | null): Promise<string | null> {
+    const raw = safeText(sourceUrl);
+    if (!raw) return null;
+    let url: URL;
+    try {
+      url = new URL(raw);
+      const host = url.hostname.toLowerCase();
+      if (url.protocol !== "https:" || !(host === "facebook.com" || host.endsWith(".facebook.com") || host.endsWith(".fbcdn.net"))) {
+        return null;
+      }
+    } catch { return null; }
 
-    const needsRefresh =
-      isFallbackCustomerName(customer.name) || !safeText(customer.avatarUrl);
-
-    if (!needsRefresh) return customer;
-
-    // 1) Ưu tiên map lại PSID -> tên thật đã từng lưu trong OmniMessage.
-    // Cách này phục hồi được tên ngay cả khi Graph API đang lỗi/tạm thiếu quyền.
-    const mappedName = isFallbackCustomerName(customer.name)
-      ? await this.getMappedCustomerNameFromMessages(customer.providerUserId)
-      : "";
-
-    if (mappedName) {
-      const repaired = await this.prisma.omniCustomer.update({
-        where: { id: customer.id },
-        data: { name: mappedName },
+    try {
+      // Avoid downloading oversized / unresponsive media inside the API process.
+      const response = await fetch(url.toString(), { signal: AbortSignal.timeout(8000) });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const size = Number(response.headers.get("content-length") || 0);
+      if (size > 2_000_000) throw new Error("avatar too large");
+      const mime = safeText(response.headers.get("content-type")).toLowerCase();
+      if (!mime.startsWith("image/")) throw new Error("invalid avatar content-type");
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (!bytes.length || bytes.length > 2_000_000) throw new Error("invalid avatar size");
+      const { createHash } = await import("crypto");
+      const digest = createHash("sha256").update(bytes).digest("hex").slice(0, 20);
+      const userKey = createHash("sha256").update(psid).digest("hex").slice(0, 20);
+      // Content-addressed URLs change only if image bytes change. Browser cache stays valid.
+      const publicId = `the1970/omni-inbox/avatars/${userKey}-${digest}`;
+      // Cloudinary image URLs embed the public id; avoid reuploading unchanged bytes.
+      const existing = await this.prisma.omniCustomer.findUnique({
+        where: { providerUserId: psid }, select: { avatarUrl: true },
       });
-      customer = repaired;
-      this.logger.log(
-        `[META_PROFILE_NAME_MAPPED] psid=${last6(customer.providerUserId)} name="${mappedName}"`,
-      );
+      if (safeText(existing?.avatarUrl).includes(`${userKey}-${digest}`)) {
+        return safeText(existing?.avatarUrl);
+      }
+      const result: any = await new Promise((resolve, reject) => {
+        const upload = cloudinary.uploader.upload_stream(
+          { public_id: publicId, resource_type: "image", overwrite: false },
+          (error, uploaded) => uploaded ? resolve(uploaded) : reject(error || new Error("avatar upload failed")),
+        );
+        Readable.from(bytes).pipe(upload);
+      });
+      return safeText(result?.secure_url || result?.url) || null;
+    } catch (error: any) {
+      this.logMetaDebug(`[META_AVATAR_ARCHIVE_SKIP] psid=${last6(psid)} | ${error?.message || error}`);
+      return null;
     }
+  }
 
-    // 2) Sau đó lấy profile mới từ Meta để bổ sung/cập nhật name + avatar.
-    const profile = await this.getMessengerProfile(customer.providerUserId);
-    if (profile.isFallback && !profile.avatarUrl) return customer;
+  private async refreshCustomerProfileIfNeeded(customer?: any | null, force = false) {
+    if (!customer?.providerUserId) return customer;
+    const key = safeText(customer.providerUserId);
+    const running = this.profileRefreshRunning.get(key);
+    if (running) return running;
+    if (!force && (this.profileNextCheckAt.get(key) || 0) > Date.now()) return customer;
 
-    const nextName = profile.isFallback ? customer.name : profile.name;
-    const nextAvatar = profile.avatarUrl || customer.avatarUrl || null;
-
-    if (nextName === customer.name && nextAvatar === customer.avatarUrl) {
-      return customer;
+    if (this.profileNextCheckAt.size > 10000) {
+      for (const [id, until] of this.profileNextCheckAt) {
+        if (until < Date.now()) this.profileNextCheckAt.delete(id);
+      }
     }
-
-    const updated = await this.prisma.omniCustomer.update({
-      where: { id: customer.id },
-      data: {
-        name: nextName,
-        avatarUrl: nextAvatar,
-      },
-    });
-
-    this.logger.log(
-      `[META_PROFILE_REFRESHED] psid=${last6(customer.providerUserId)} name="${updated.name}" avatar=${updated.avatarUrl ? "yes" : "no"}`,
-    );
-
-    return updated;
+    // Set cooldown before the async work to prevent a request stampede.
+    this.profileNextCheckAt.set(key, Date.now() + this.profileMissingTtlMs);
+    const job = (async () => {
+      let current = customer;
+      try {
+        if (isFallbackCustomerName(current.name)) {
+          const mappedName = await this.getMappedCustomerNameFromMessages(key);
+          if (mappedName && mappedName !== current.name) {
+            current = await this.prisma.omniCustomer.update({
+              where: { id: current.id }, data: { name: mappedName },
+            });
+          }
+        }
+        const profile = await this.getMessengerProfile(key);
+        if (profile.isFallback && !profile.avatarUrl) return current;
+        const nextName = profile.isFallback ? current.name : profile.name;
+        // For an existing Cloudinary avatar, keep it if Meta temporarily fails.
+        const newAvatar = profile.avatarUrl
+          ? await this.persistMessengerAvatar(key, profile.avatarUrl)
+          : null;
+        const nextAvatar = newAvatar || current.avatarUrl || null;
+        if (nextName !== current.name || nextAvatar !== current.avatarUrl) {
+          current = await this.prisma.omniCustomer.update({
+            where: { id: current.id }, data: { name: nextName, avatarUrl: nextAvatar },
+          });
+          this.logger.log(`[META_PROFILE_REFRESHED] psid=${last6(key)} avatar=${current.avatarUrl ? "yes" : "no"}`);
+        }
+        this.profileNextCheckAt.set(key, Date.now() + this.profileSuccessTtlMs);
+        return current;
+      } catch (error: any) {
+        this.logger.warn(`[META_PROFILE_REFRESH_SKIP] psid=${last6(key)} | ${error?.message || error}`);
+        return current;
+      }
+    })();
+    this.profileRefreshRunning.set(key, job);
+    try { return await job; }
+    finally { this.profileRefreshRunning.delete(key); }
   }
 
   private async enrichConversationCustomers<T extends Array<any>>(items: T): Promise<T> {
@@ -2380,7 +2447,8 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       this.prisma.omniConversation.count({ where }),
     ]);
 
-    await this.enrichConversationCustomers(items as any);
+    // Fast path: the inbox list must never wait for Meta profile requests.
+    // Missing profiles can be refreshed by webhook / the explicit refresh endpoint.
 
     // Performance telemetry only; never log phone numbers or customer searches.
     if (q && Date.now() - searchStartMs >= 1000) {
@@ -2696,19 +2764,8 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
 
     if (!item) throw new NotFoundException("Không tìm thấy hội thoại.");
 
-    try {
-      const updatedCustomer = await this.refreshCustomerProfileIfNeeded(
-        item.customer,
-      );
-      (item as any).customer = updatedCustomer;
-    } catch (error: any) {
-      this.logger.warn(
-        `[META_PROFILE_REFRESH_SKIP] conversation=${id} | ${error?.message || error}`,
-      );
-    }
-
-    // Nếu nhân viên mở thread ngay khi webhook vừa tới, chờ đúng job lazy backfill
-    // của khách này hoàn tất để lịch sử cũ xuất hiện ngay trong response đầu tiên.
+    // Serve persisted messages immediately. Meta profile/history requests can
+    // take seconds (and must not block the conversation API response).
     if (
       (item as any).channel === "FACEBOOK" &&
       !safeText((item as any).providerThreadId).startsWith("FACEBOOK_COMMENT:")
@@ -2719,19 +2776,37 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
         (item as any).customer?.providerUserId || parts.slice(2).join(":"),
       );
       if (pageProviderId && customerPsid) {
-        await this.backfillMessengerHistoryForCustomer({
+        // Deduplicated by the existing in-flight map; does not delay the response.
+        void this.backfillMessengerHistoryForCustomer({
           pageId: pageProviderId,
           customerPsid,
           conversationId: id,
           customerName: (item as any).customer?.name,
-        });
-        // Backfill có thể vừa thêm message cũ nên lấy lại list trước khi trả frontend.
-        (item as any).messages = await this.prisma.omniMessage.findMany({
-          where: { conversationId: id },
-          orderBy: { sentAt: "desc" },
-          take: 200,
-        });
+        }).catch((error: any) =>
+          this.logger.warn(`[META_HISTORY_BACKGROUND_SKIP] conversation=${id} | ${error?.message || error}`),
+        );
       }
+    }
+
+    // Profile refresh is also asynchronous; notify connected clients if changed.
+    if ((item as any).customer?.providerUserId && (item as any).channel === "FACEBOOK" &&
+        !safeText((item as any).providerThreadId).startsWith("FACEBOOK_COMMENT:")) {
+      void this.refreshCustomerProfileIfNeeded((item as any).customer)
+        .then(async (updatedCustomer) => {
+          if (!updatedCustomer) return;
+          if (
+            updatedCustomer.name === (item as any).customer.name &&
+            updatedCustomer.avatarUrl === (item as any).customer.avatarUrl
+          ) return;
+          const updated = await this.prisma.omniConversation.findUnique({
+            where: { id },
+            include: { customer: true, page: true, tags: true },
+          });
+          if (updated) this.realtime.emit({ type: "conversation.updated", payload: updated });
+        })
+        .catch((error: any) =>
+          this.logger.warn(`[META_PROFILE_BACKGROUND_SKIP] conversation=${id} | ${error?.message || error}`),
+        );
     }
 
     if (safeText((item as any).providerThreadId).startsWith("FACEBOOK_COMMENT:")) {
@@ -3214,7 +3289,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     if (!conversation) throw new NotFoundException("Không tìm thấy hội thoại.");
 
     const customer = await this.refreshCustomerProfileIfNeeded(
-      conversation.customer,
+      conversation.customer, true,
     );
 
     const updated = { ...conversation, customer };

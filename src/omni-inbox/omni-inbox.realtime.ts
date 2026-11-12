@@ -6,6 +6,7 @@ type InboxEvent = {
     | "conversation.created"
     | "conversation.updated"
     | "message.created"
+    | "conversation.history_synced"
     | "conversation.assigned"
     | "conversation.tagged"
     | "conversation.note_created"
