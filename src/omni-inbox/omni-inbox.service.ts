@@ -2025,10 +2025,15 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
           .trim();
 
       const name = fullName || fallbackName;
-
+      const avatarUrl = safeText(profile.profile_pic) || null;
+      // If Meta returns a name but no photo, this is NOT a frontend cache issue.
+      // Warn once per throttled refresh so Railway logs show the actual cause.
+      if (!avatarUrl) {
+        this.logger.warn(`[META_PROFILE_NO_PICTURE] psid=${last6(psid)} name=${name !== fallbackName ? "yes" : "no"}`);
+      }
       return {
         name,
-        avatarUrl: safeText(profile.profile_pic) || null,
+        avatarUrl,
         isFallback: !isUsableProfileName(name),
       };
     } catch (error: any) {
@@ -2166,7 +2171,8 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       });
       return safeText(result?.secure_url || result?.url) || null;
     } catch (error: any) {
-      this.logMetaDebug(`[META_AVATAR_ARCHIVE_SKIP] psid=${last6(psid)} | ${error?.message || error}`);
+      // This must remain visible in production; debug logging is disabled there.
+      this.logger.warn(`[META_AVATAR_ARCHIVE_FAILED] psid=${last6(psid)} | ${error?.message || error}`);
       return null;
     }
   }
@@ -2461,8 +2467,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
         const avatar = safeText(customer.avatarUrl).toLowerCase();
         return isFallbackCustomerName(customer.name) || !avatar ||
           avatar.includes("fbcdn.net") || avatar.includes("facebook.com");
-      })
-      .slice(0, 6);
+      });
 
     if (profileTargets.length) {
       void (async () => {
