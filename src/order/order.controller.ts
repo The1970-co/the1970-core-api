@@ -109,6 +109,20 @@ export class OrderController {
     @Query("createdByStaffIds") createdByStaffIds?: string,
     @Query("createdByStaffNames") createdByStaffNames?: string,
     @Query("quickStatus") quickStatus?: string,
+    @Query("branchIds") branchIds?: string,
+    @Query("orderStatuses") orderStatuses?: string,
+    @Query("paymentStatuses") paymentStatuses?: string,
+    @Query("fulfillmentStatuses") fulfillmentStatuses?: string,
+    @Query("deliveryStatuses") deliveryStatuses?: string,
+    @Query("salesChannels") salesChannels?: string,
+    @Query("shippingModes") shippingModes?: string,
+    @Query("shippingPartners") shippingPartners?: string,
+    @Query("trackingStatuses") trackingStatuses?: string,
+    @Query("codStatuses") codStatuses?: string,
+    @Query("amountDueStatuses") amountDueStatuses?: string,
+    @Query("itemCountStatuses") itemCountStatuses?: string,
+    @Query("productSkus") productSkus?: string,
+    @Query("assignedStaffNames") assignedStaffNames?: string,
     @Query("exportMode") exportMode?: string
   ) {
     return this.orderService.getOrders(
@@ -130,10 +144,29 @@ export class OrderController {
         createdByStaffIds: createdByStaffIds || "",
         createdByStaffNames: createdByStaffNames || "",
         quickStatus: quickStatus || "",
+        branchIds: branchIds || "",
+        orderStatuses: orderStatuses || "",
+        paymentStatuses: paymentStatuses || "",
+        fulfillmentStatuses: fulfillmentStatuses || "",
+        deliveryStatuses: deliveryStatuses || "",
+        salesChannels: salesChannels || "",
+        shippingModes: shippingModes || "",
+        shippingPartners: shippingPartners || "",
+        trackingStatuses: trackingStatuses || "",
+        codStatuses: codStatuses || "",
+        amountDueStatuses: amountDueStatuses || "",
+        itemCountStatuses: itemCountStatuses || "",
+        productSkus: productSkus || "",
+        assignedStaffNames: assignedStaffNames || "",
         exportMode: ["1", "true", "yes"].includes(String(exportMode || "").toLowerCase()),
       },
       req.user
     );
+  }
+
+  @Get("filter-options")
+  async getOrderFilterOptions(@Req() req: Request & { user?: any }) {
+    return this.orderService.getOrderFilterOptions(req.user);
   }
 
   @Get("quick-status-counts")

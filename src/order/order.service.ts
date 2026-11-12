@@ -47,6 +47,20 @@ type GetOrdersParams = {
   createdByStaffIds?: string;
   createdByStaffNames?: string;
   quickStatus?: string;
+  branchIds?: string;
+  orderStatuses?: string;
+  paymentStatuses?: string;
+  fulfillmentStatuses?: string;
+  deliveryStatuses?: string;
+  salesChannels?: string;
+  shippingModes?: string;
+  shippingPartners?: string;
+  trackingStatuses?: string;
+  codStatuses?: string;
+  amountDueStatuses?: string;
+  itemCountStatuses?: string;
+  productSkus?: string;
+  assignedStaffNames?: string;
   exportMode?: boolean;
 };
 
@@ -3110,6 +3124,108 @@ export class OrderService implements OnModuleInit {
     };
   }
 
+  async getOrderFilterOptions(user?: any) {
+    const scoped = this.buildOrderWhereByUser(user, {});
+    const [carriers, channels] = await Promise.all([
+      this.prisma.order.findMany({ where: { AND: [scoped, { shipment: { isNot: null } }] },
+        distinct: ["id"], select: { shipment: { select: { carrier: true } } }, take: 10000 }),
+      this.prisma.order.findMany({ where: scoped, distinct: ["salesChannel"], select: { salesChannel: true } }),
+    ]);
+    return {
+      shippingPartners: Array.from(new Set(carriers.map(row => String(row.shipment?.carrier || "").trim()).filter(Boolean))),
+      salesChannels: channels.map(row => String(row.salesChannel || "")).filter(Boolean),
+    };
+  }
+
+  /** Lọc trên database trước phân trang; giá trị trong từng nhóm là OR. */
+  private buildAdvancedListWhere(params: GetOrdersParams): Prisma.OrderWhereInput[] {
+    const split = (value?: string) => String(value || "").split(/[|,]/).map(v => v.trim()).filter(v => v && v !== "ALL");
+    const parts: Prisma.OrderWhereInput[] = [];
+    const branchIds = split(params.branchIds);
+    if (branchIds.length) parts.push({ branchId: { in: branchIds } });
+    const orderStatuses = split(params.orderStatuses);
+    if (orderStatuses.length) parts.push({ status: { in: orderStatuses as OrderStatus[] } });
+    const paymentStatuses = split(params.paymentStatuses);
+    if (paymentStatuses.length) parts.push({ paymentStatus: { in: paymentStatuses as PaymentStatus[] } });
+    const fulfillmentStatuses = split(params.fulfillmentStatuses);
+    if (fulfillmentStatuses.length) parts.push({ fulfillmentStatus: { in: fulfillmentStatuses as FulfillmentStatus[] } });
+    const channels = split(params.salesChannels);
+    if (channels.length) parts.push({ salesChannel: { in: channels as SalesChannel[] } });
+
+    const partners = split(params.shippingPartners);
+    if (partners.length) {
+      const groups: Record<string, string[]> = {
+        GHN: ["GHN", "GIAO HANG NHANH"], AHAMOVE: ["AHAMOVE", "AHA MOVE"],
+        VIETTEL_POST: ["VIETTEL", "VTP"], SPX: ["SPX", "SHOPEE"],
+        GHTK: ["GHTK", "GIAO HANG TIET KIEM"], GRAB: ["GRAB"],
+        INTERNAL_SHIPPER: ["SHIPPER", "INTERNAL"],
+      };
+      const matches: Prisma.OrderWhereInput[] = [];
+      for (const partner of partners) {
+        if (partner === "NONE") {
+          matches.push({ shipment: { is: null }, NOT: { note: { contains: "Đơn vị giao:", mode: "insensitive" } } });
+          continue;
+        }
+        const aliases = groups[partner] || [partner];
+        for (const alias of aliases) {
+          matches.push({ shipment: { is: { carrier: { contains: alias, mode: "insensitive" } } } });
+          matches.push({ note: { contains: `Đơn vị giao: ${alias}`, mode: "insensitive" } });
+        }
+      }
+      if (matches.length) parts.push({ OR: matches });
+    }
+    const modes = split(params.shippingModes);
+    if (modes.length) parts.push({ OR: modes.map(mode => ({ note: { contains: `Cách giao: ${mode}`, mode: "insensitive" } })) });
+    const tracking = split(params.trackingStatuses);
+    if (tracking.length) parts.push({ OR: tracking.map(v => v === "HAS"
+      ? { shipment: { is: { trackingCode: { not: "" } } } }
+      : { OR: [{ shipment: { is: null } }, { shipment: { is: { trackingCode: "" } } }] }) });
+    const cod = split(params.codStatuses);
+    if (cod.length) parts.push({ OR: cod.map(v => v === "HAS_COD"
+      ? { shipment: { is: { codAmount: { gt: 0 } } } }
+      : { OR: [{ shipment: { is: null } }, { shipment: { is: { codAmount: { lte: 0 } } } }, { shipment: { is: { codAmount: null } } }] }) });
+    const dues = split(params.amountDueStatuses);
+    if (dues.length) {
+      const unpaid: Prisma.OrderWhereInput = {
+        status: { not: OrderStatus.CANCELLED },
+        paymentStatus: { notIn: [PaymentStatus.PAID, PaymentStatus.REFUNDED] },
+        finalAmount: { gt: 0 },
+      };
+      parts.push({ OR: dues.map(v => v === "HAS_DUE" ? unpaid : { NOT: unpaid }) });
+    }
+    const itemCounts = split(params.itemCountStatuses);
+    if (itemCounts.length) parts.push({ OR: itemCounts.map(v => v === "HAS_ITEMS"
+      ? { items: { some: {} } } : { items: { none: {} } }) });
+    const skus = split(params.productSkus);
+    if (skus.length) parts.push({ items: { some: { OR: skus.map(sku => ({ sku: { equals: sku, mode: "insensitive" } })) } } });
+    const statuses = split(params.deliveryStatuses);
+    if (statuses.length) {
+      const contains = (values: string[]): Prisma.OrderWhereInput => this.shipmentStatusTextWhere(values);
+      const choices: Prisma.OrderWhereInput[] = [];
+      for (const label of statuses) {
+        switch (label) {
+          case "Giao thành công":
+            choices.push({ OR: [
+              { shipment: { is: { shippingStatus: { in: ["DELIVERED", "DELIVERY_SUCCESS", "COMPLETED", "SUCCESS", "delivered", "delivery_success"] } } } },
+              contains(["GIAO THANH CONG", "DELIVERY_SUCCESS", "DELIVERED", "GIAO THÀNH CÔNG"]),
+            ] }); break;
+          case "Chờ lấy hàng": choices.push({ OR: [contains(["READY_TO_PICK", "WAITING_PICK", "CREATED", "PENDING"]), { shipment: { is: { trackingCode: { not: "" }, shippingStatus: "" } } }] }); break;
+          case "Đang lấy hàng": choices.push(contains(["PICKING", "PICKED", "ACCEPTED"])); break;
+          case "Đang giao hàng": choices.push(contains(["IN_TRANSIT", "TRANSPORT", "STORING", "SORTING", "DELIVERING", "IN_PROCESS", "DANG GIAO"])); break;
+          case "Đang tìm tài xế": choices.push(contains(["ASSIGNING", "IDLE"])); break;
+          case "Đang hoàn hàng": choices.push({ AND: [contains(["RETURN", "HOAN HANG", "CHUYEN HOAN"]), { NOT: contains(["RETURNED", "RETURNED_TO_CLIENT"]) }] }); break;
+          case "Đã hoàn hàng": choices.push(contains(["RETURNED", "RETURNED_TO_CLIENT", "DA HOAN"])); break;
+          case "Đã nhận hàng hoàn": choices.push(contains(["RETURNED_TO_CLIENT", "RETURNED"])); break;
+          case "Đã huỷ vận đơn": choices.push(contains(["CANCEL", "HUY VAN DON"])); break;
+          case "Có sự cố": choices.push(contains(["FAILED", "FAIL", "EXCEPTION", "LOST", "DAMAGE", "THAT BAI", "TU CHOI"])); break;
+          default: choices.push({ shipment: { is: { shippingStatus: { equals: label, mode: "insensitive" } } } });
+        }
+      }
+      if (choices.length) parts.push({ OR: choices });
+    }
+    return parts;
+  }
+
   async getOrders(params: GetOrdersParams = {}, user?: any) {
     const {
       page = 1,
@@ -3184,12 +3300,34 @@ export class OrderService implements OnModuleInit {
       }
     }
 
+    let assignedStaffWhere: Prisma.OrderWhereInput | null = null;
+    const assignedValues = String(params.assignedStaffNames || "").split("|").map(v => v.trim()).filter(Boolean);
+    if (assignedValues.length) {
+      const wantUnassigned = assignedValues.includes("UNASSIGNED");
+      const names = assignedValues.filter(v => v !== "UNASSIGNED");
+      try {
+        const assignedIds = await this.prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+          SELECT "id" FROM "Order"
+          WHERE ${Prisma.join([
+            ...(names.length ? [Prisma.sql`"assignedStaffName" IN (${Prisma.join(names)})`] : []),
+            ...(wantUnassigned ? [Prisma.sql`("assignedStaffName" IS NULL OR "assignedStaffName" = '')`] : []),
+          ], ' OR ')}
+        `);
+        assignedStaffWhere = { id: { in: assignedIds.map(row => row.id) } };
+      } catch (error) {
+        console.warn("[ORDERS_ASSIGNED_FILTER]", error);
+        assignedStaffWhere = { id: { in: [] } };
+      }
+    }
+
     const quickStatusWhere = this.buildQuickStatusWhere(quickStatus);
     const filterParts = [
       baseWhere,
       createdByStaffWhere,
       searchWhere,
       quickStatusWhere,
+      assignedStaffWhere,
+      ...this.buildAdvancedListWhere(params),
     ].filter(Boolean) as Prisma.OrderWhereInput[];
 
     const scopedWhere = this.buildOrderWhereByUser(
