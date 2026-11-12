@@ -2210,7 +2210,10 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
           });
           this.logger.log(`[META_PROFILE_REFRESHED] psid=${last6(key)} avatar=${current.avatarUrl ? "yes" : "no"}`);
         }
-        this.profileNextCheckAt.set(key, Date.now() + this.profileSuccessTtlMs);
+        // An expired Facebook CDN URL is not a durable cached avatar.
+        const durableAvatar = safeText(current.avatarUrl).includes("res.cloudinary.com");
+        this.profileNextCheckAt.set(key, Date.now() +
+          (!durableAvatar ? this.profileMissingTtlMs : this.profileSuccessTtlMs));
         return current;
       } catch (error: any) {
         this.logger.warn(`[META_PROFILE_REFRESH_SKIP] psid=${last6(key)} | ${error?.message || error}`);
@@ -2447,8 +2450,44 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       this.prisma.omniConversation.count({ where }),
     ]);
 
-    // Fast path: the inbox list must never wait for Meta profile requests.
-    // Missing profiles can be refreshed by webhook / the explicit refresh endpoint.
+    // Return cached PostgreSQL profiles immediately; refresh missing or legacy
+    // FB-CDN avatars after the response, with a small per-request concurrency cap.
+    // Do not await Meta here: list latency must depend on PostgreSQL only.
+    const profileTargets = items
+      .filter((item: any) => {
+        const customer = item.customer;
+        if (!customer?.providerUserId || item.channel !== "FACEBOOK") return false;
+        if (safeText(item.providerThreadId).startsWith("FACEBOOK_COMMENT:")) return false;
+        const avatar = safeText(customer.avatarUrl).toLowerCase();
+        return isFallbackCustomerName(customer.name) || !avatar ||
+          avatar.includes("fbcdn.net") || avatar.includes("facebook.com");
+      })
+      .slice(0, 6);
+
+    if (profileTargets.length) {
+      void (async () => {
+        // Two concurrent Meta requests at most, without blocking list response.
+        for (let index = 0; index < profileTargets.length; index += 2) {
+          const batch = profileTargets.slice(index, index + 2);
+          await Promise.allSettled(batch.map(async (conversation: any) => {
+            const before = conversation.customer;
+            const updatedCustomer = await this.refreshCustomerProfileIfNeeded(before);
+            if (!updatedCustomer ||
+                (updatedCustomer.name === before.name &&
+                 updatedCustomer.avatarUrl === before.avatarUrl)) return;
+            const updatedConversation = await this.prisma.omniConversation.findUnique({
+              where: { id: conversation.id },
+              include: { customer: true, page: true, tags: true },
+            });
+            if (updatedConversation) {
+              this.realtime.emit({ type: "conversation.updated", payload: updatedConversation });
+            }
+          }));
+        }
+      })().catch((error: any) =>
+        this.logger.warn(`[META_PROFILE_LIST_BACKGROUND_SKIP] ${error?.message || error}`),
+      );
+    }
 
     // Performance telemetry only; never log phone numbers or customer searches.
     if (q && Date.now() - searchStartMs >= 1000) {
