@@ -247,10 +247,58 @@ export class OrderService implements OnModuleInit {
     return 0;
   }
 
+  // Nếu GHN đã giao một phần, tiền shop thu phải dựa vào COD ĐÃ CHỈNH,
+  // KHÔNG dựa vào tổng giá trị đơn ban đầu. Không sửa số COD/đối soát đã lưu.
+  // Fallback an toàn cho dữ liệu lịch sử có COD đã giảm nhưng cờ PDL không lên ở API list.
+  // Chỉ dùng khi Payment COD_GHN trạng thái PAID khớp COD của vận đơn và không có
+  // khoản thanh toán nguồn khác. Không suy luận từ codAmount đơn thuần.
+  private getVerifiedCollectedCod(order: any): number | null {
+    const rawCod = order?.shipment?.codAmount;
+    if (rawCod === null || rawCod === undefined || !Number.isFinite(Number(rawCod))) return null;
+    const cod = Number(rawCod);
+    const finalAmount = this.toNumber(order?.finalAmount);
+    if (cod <= 0 || cod >= finalAmount) return null;
+    const paid = (Array.isArray(order?.payments) ? order.payments : [])
+      .filter((p: any) => ["PAID", "PARTIAL"].includes(String(p.status || "").toUpperCase()));
+    const isCodPayment = (p: any) => {
+      const label = [p.method, p.paymentSource?.code, p.paymentSource?.name, p.sourceCode, p.sourceName]
+        .map((v: any) => String(v || "").toUpperCase()).join(" ");
+      return label.includes("COD_GHN") || (label.includes("COD") && label.includes("GHN"));
+    };
+    const codPaid = paid.filter(isCodPayment).reduce((sum: number, p: any) => sum + this.toNumber(p.amount), 0);
+    const otherPaid = paid.filter((p: any) => !isCodPayment(p)).reduce((sum: number, p: any) => sum + this.toNumber(p.amount), 0);
+    return Math.abs(codPaid - cod) < 1 && otherPaid === 0 ? cod : null;
+  }
+
+  private getEffectiveCustomerCollection(order: any) {
+    const originalTotal = Math.max(0, this.toNumber(order?.finalAmount));
+    // Danh sách đơn chỉ select một số trường và cờ isPartialDelivery có thể chưa được ghi.
+    // Ưu tiên COD phiếu giao một phần đã lưu, không phụ thuộc cờ trên Order.
+    if (order?.effectivePartialDeliveryCod !== null &&
+        order?.effectivePartialDeliveryCod !== undefined &&
+        Number.isFinite(Number(order.effectivePartialDeliveryCod))) {
+      return Math.max(0, Number(order.effectivePartialDeliveryCod));
+    }
+    const partialRecords = Array.isArray(order?.partialDeliveries) ? order.partialDeliveries : [];
+    const latestPartial = [...partialRecords]
+      .filter((r: any) => r?.adjustedCod !== null && r?.adjustedCod !== undefined)
+      .sort((a: any, b: any) => new Date(b.handledAt || b.createdAt || 0).getTime() - new Date(a.handledAt || a.createdAt || 0).getTime())[0];
+    if (latestPartial && Number.isFinite(Number(latestPartial.adjustedCod))) {
+      return Math.max(0, this.toNumber(latestPartial.adjustedCod));
+    }
+    const shippingCod = this.toNumber(order?.shipment?.codAmount);
+    if (order?.isPartialDelivery === true && order?.shipment?.codAmount != null && shippingCod >= 0) {
+      return Math.max(0, shippingCod);
+    }
+    const verifiedCod = this.getVerifiedCollectedCod(order);
+    if (verifiedCod !== null) return verifiedCod;
+    return originalTotal;
+  }
+
   private getShopActualReceived(order: any) {
-    const customerTotal = this.toNumber(order?.finalAmount);
+    const customerCollection = this.getEffectiveCustomerCollection(order);
     const carrierShippingFee = this.getCarrierShippingFee(order);
-    return Math.max(0, Math.round(customerTotal - carrierShippingFee));
+    return Math.max(0, Math.round(customerCollection - carrierShippingFee));
   }
 
   private normalizePhone(phone?: string | null) {
@@ -340,40 +388,58 @@ export class OrderService implements OnModuleInit {
       .filter((item: any) => String(item?.itemType || "").toUpperCase() === "EXCHANGE")
       .map((item: any) => this.normalizePartialReturnExchangeItem(item));
 
-    const returnedItems = returnTicketReturnedItems.length
-      ? returnTicketReturnedItems
-      : normalizedItems
-        .filter((item: any) => String(item.actionType || "") === "RETURNED" || Number(item.returnedQty || 0) > 0)
-        .map((item: any) => ({
-          ...item,
-          qty: Number(item.returnedQty || 0),
-          unitPrice: this.toNumber(item.unitPrice),
-          lineTotal: this.toNumber(item.lineTotal),
-        }));
+    // Dữ liệu giao/hoàn đã lưu trong PDL là nguồn chính xác nhất.
+    // Không cho một phiếu RTN khác (đặc biệt phiếu mới hơn) ghi đè.
+    const recordedReturnedItems = normalizedItems
+      .filter((item: any) => String(item.actionType || "").toUpperCase() === "RETURNED" || Number(item.returnedQty || 0) > 0)
+      .map((item: any) => ({
+        ...item,
+        qty: Number(item.returnedQty || 0),
+        unitPrice: this.toNumber(item.unitPrice),
+        lineTotal: this.toNumber(item.unitPrice) * Number(item.returnedQty || 0),
+        sourceType: "PARTIAL_DELIVERY_RECORD",
+      }));
 
-    const returnedQtyByKey = new Map<string, number>();
-    returnedItems.forEach((item: any) => {
-      const keys = [item.orderItemId, item.variantId, item.sku]
-        .map((value) => String(value || "").trim())
-        .filter(Boolean);
-      keys.forEach((key) => returnedQtyByKey.set(key, Math.max(returnedQtyByKey.get(key) || 0, Number(item.qty || item.returnedQty || 0))));
-    });
+    const returnedItems = normalizedItems.length
+      ? recordedReturnedItems
+      : returnTicketReturnedItems;
 
-    const keptItems = normalizedItems
-      .filter(
-        (item: any) =>
-          String(item.actionType || "").toUpperCase() === "KEPT" &&
-          Number(item.deliveredQty || item.qty || 0) > 0,
-      )
+    const keptFromRecord = normalizedItems
+      .filter((item: any) => String(item.actionType || "").toUpperCase() === "KEPT" && Number(item.deliveredQty || item.qty || 0) > 0)
       .map((item: any) => ({
         ...item,
         qty: Number(item.deliveredQty || item.qty || 0),
         unitPrice: this.toNumber(item.unitPrice),
-        lineTotal:
-          this.toNumber(item.unitPrice) *
-          Number(item.deliveredQty || item.qty || 0),
+        lineTotal: this.toNumber(item.unitPrice) * Number(item.deliveredQty || item.qty || 0),
         sourceType: "PARTIAL_DELIVERY_RECORD",
       }));
+
+    // Phiếu PDL cũ đôi khi không lưu dòng hàng: chỉ khôi phục hàng khách giữ
+    // khi một phiếu RTN đã được đối chiếu đáng tin cậy và đủ dữ liệu đơn gốc.
+    const keptItems = normalizedItems.length || !returnExchange || !returnTicketReturnedItems.length
+      ? keptFromRecord
+      : sourceOrderItems.flatMap((item: any) => {
+          const matching = returnTicketReturnedItems.filter((returned: any) =>
+            (returned.orderItemId && String(returned.orderItemId) === String(item.id)) ||
+            (returned.sku && item.sku && String(returned.sku) === String(item.sku))
+          );
+          const returnedQty = matching.reduce((sum: number, row: any) => sum + Number(row.qty || 0), 0);
+          const keptQty = Math.max(0, Number(item.qty || 0) - returnedQty);
+          if (!keptQty) return [];
+          return [{
+            orderItemId: item.id,
+            variantId: item.variantId || null,
+            productName: item.productName,
+            sku: item.sku,
+            color: item.color || null,
+            size: item.size || null,
+            qty: keptQty,
+            deliveredQty: keptQty,
+            unitPrice: this.toNumber(item.unitPrice),
+            lineTotal: this.toNumber(item.unitPrice) * keptQty,
+            sourceType: "ORDER_ITEMS_DERIVED",
+          }];
+        });
 
     return {
       ...record,
@@ -521,83 +587,88 @@ export class OrderService implements OnModuleInit {
     }
   }
 
+  // Chọn phiếu trả đúng lần giao 1 phần theo dữ liệu nghiệp vụ và lịch sử.
+  // Không chọn `createdAt: desc`: cùng đơn gốc có thể có nhiều lần trả/đổi.
+  private async findMatchingReturnExchange(record: any, sourceOrder?: any) {
+    const candidates = Array.from(new Set(
+      [record?.orderId, record?.orderCode, sourceOrder?.id, sourceOrder?.orderCode]
+        .map((value) => String(value || "").trim()).filter(Boolean),
+    ));
+    if (!candidates.length) return null;
+
+    const tickets = await (this.prisma as any).returnExchange.findMany({
+      where: {
+        OR: candidates.map((value) => ({ originalOrderId: value })),
+        status: { not: "CANCELLED" },
+      },
+      include: { items: true },
+      orderBy: { createdAt: "asc" },
+    });
+    if (!tickets.length) return null;
+
+    const recordedReturns = (Array.isArray(record?.items) ? record.items : [])
+      .filter((item: any) => String(item.actionType || "").toUpperCase() === "RETURNED" || Number(item.returnedQty || 0) > 0);
+    const expectedAmount = Math.max(0, this.toNumber(record?.originalCod) - this.toNumber(record?.adjustedCod));
+    const eventDate = record?.handledAt || record?.createdAt || null;
+    const eventTime = eventDate ? new Date(eventDate).getTime() : NaN;
+
+    const results = tickets.map((ticket: any) => {
+      const returned = (ticket.items || []).filter((item: any) => String(item.itemType || "RETURN").toUpperCase() === "RETURN");
+      const amount = this.toNumber(ticket.returnAmount);
+      const matchesRecorded = recordedReturns.length > 0 && recordedReturns.every((line: any) =>
+        returned.some((item: any) =>
+          (line.orderItemId && item.orderItemId && String(line.orderItemId) === String(item.orderItemId)) ||
+          (line.sku && item.sku && String(line.sku) === String(item.sku))
+        )
+      );
+      const exactAmount = expectedAmount > 0 && Math.abs(amount - expectedAmount) < 1;
+      const ticketTime = ticket.createdAt ? new Date(ticket.createdAt).getTime() : NaN;
+      const timeDistance = Number.isFinite(eventTime) && Number.isFinite(ticketTime)
+        ? Math.abs(eventTime - ticketTime) : Number.POSITIVE_INFINITY;
+      return { ticket, matchesRecorded, exactAmount, timeDistance };
+    });
+
+    // Có PDL lưu sản phẩm: chỉ ghép RTN khi SKU/mã dòng hàng khớp.
+    if (recordedReturns.length) {
+      const matching = results.filter((row: any) => row.matchesRecorded);
+      if (!matching.length) return null;
+      matching.sort((a: any, b: any) => Number(b.exactAmount) - Number(a.exactAmount) || a.timeDistance - b.timeDistance);
+      return matching[0].ticket;
+    }
+
+    // PDL lịch sử rỗng: COD giảm đúng bằng số tiền hàng trả là bằng chứng
+    // tốt hơn ngày tạo phiếu, do PDL có thể được lập sau ngày nhận trả hàng.
+    const exact = results.filter((row: any) => row.exactAmount);
+    if (!exact.length) return null; // Không đoán phiếu nếu không đủ căn cứ.
+    exact.sort((a: any, b: any) => a.timeDistance - b.timeDistance);
+    return exact[0].ticket;
+  }
+
   private async attachPartialReturnExchange(record: any, sourceOrder?: any) {
     if (!record) return record;
-    const orderId = String(record?.orderId || sourceOrder?.id || "").trim();
-    if (!orderId) return record;
-
     try {
-      const orderCode = String(record?.orderCode || sourceOrder?.orderCode || "").trim();
-      const originalOrderCandidates = Array.from(
-        new Set(
-          [orderId, orderCode]
-            .map((value) => String(value || "").trim())
-            .filter(Boolean),
-        ),
-      );
-
-      const returnExchange = await (this.prisma as any).returnExchange.findFirst({
-        where: {
-          OR: originalOrderCandidates.map((value) => ({ originalOrderId: value })),
-        },
-        include: { items: true },
-        orderBy: { createdAt: "desc" },
-      });
-
-      if (!returnExchange) return record;
+      // Projection đã ghép đúng RTN tại bước dựng dữ liệu.
+      const returnExchange = record._returnExchange ||
+        await this.findMatchingReturnExchange(record, sourceOrder);
+      if (!returnExchange) return { ...record, order: record.order || sourceOrder || null };
 
       const nextStatus = this.mapPartialReturnStatus(
         String(returnExchange.status || "").toUpperCase() === "COMPLETED"
-          ? "RETURNED"
-          : record.returnStatus,
+          ? "RETURNED" : record.returnStatus,
       );
-
-      if (nextStatus === "RETURNED" && record.id) {
-        await this.prisma.partialDeliveryRecord.update({
-          where: { id: record.id },
-          data: {
-            returnStatus: nextStatus,
-            returnReceivedAt: record.returnReceivedAt || new Date(),
-          },
-        }).catch(() => null);
-      }
-
+      // Chỉ biểu diễn trạng thái trong response; đọc đơn không được âm thầm
+      // cập nhật DB hoặc tự đặt ngày nhận hoàn bằng thời điểm người dùng mở trang.
       return {
         ...record,
         order: record.order || sourceOrder || null,
         _returnExchange: returnExchange,
         returnStatus: nextStatus,
-        returnReceivedAt:
-          nextStatus === "RETURNED"
-            ? record.returnReceivedAt || new Date()
-            : record.returnReceivedAt || null,
+        returnReceivedAt: nextStatus === "RETURNED"
+          ? record.returnReceivedAt || returnExchange.updatedAt || null
+          : record.returnReceivedAt || null,
       };
     } catch {
-      return record;
-    }
-  }
-
-  private async findReturnExchangeForSourceOrder(sourceOrder?: any) {
-    const candidates = Array.from(
-      new Set(
-        [sourceOrder?.id, sourceOrder?.orderCode]
-          .map((value) => String(value || "").trim())
-          .filter(Boolean),
-      ),
-    );
-
-    if (!candidates.length) return null;
-
-    try {
-      return await (this.prisma as any).returnExchange.findFirst({
-        where: {
-          OR: candidates.map((value) => ({ originalOrderId: value })),
-        },
-        include: { items: true },
-        orderBy: { createdAt: "desc" },
-      });
-    } catch {
-      return null;
+      return { ...record, order: record.order || sourceOrder || null };
     }
   }
 
@@ -605,7 +676,14 @@ export class OrderService implements OnModuleInit {
     if (!sourceOrder) return null;
 
     const returnTrackingCode = this.extractPartialReturnTrackingCode(sourceOrder);
-    const returnExchange = await this.findReturnExchangeForSourceOrder(sourceOrder);
+    const projectionRecord = {
+      orderId: sourceOrder.id,
+      orderCode: sourceOrder.orderCode,
+      originalCod: this.toNumber(sourceOrder.finalAmount),
+      adjustedCod: this.toNumber(sourceOrder?.shipment?.codAmount ?? 0),
+      items: [],
+    };
+    const returnExchange = await this.findMatchingReturnExchange(projectionRecord, sourceOrder);
 
     // Nếu không có mã hoàn GHN và cũng không có phiếu đổi/trả thì không dựng response.
     // Đây không phải insert DB, chỉ là projection runtime từ dữ liệu thật đang có.
@@ -1171,6 +1249,7 @@ export class OrderService implements OnModuleInit {
       shippingFee: this.toNumber(order.shippingFee),
       finalAmount: this.toNumber(order.finalAmount),
       shopActualReceived: this.getShopActualReceived(order),
+      effectiveCustomerCollection: this.getEffectiveCustomerCollection(order),
       createdAt: new Date(order.createdAt).toLocaleString("vi-VN"),
       updatedAt: new Date(order.updatedAt).toLocaleString("vi-VN"),
       soldAt: order.soldAt ? new Date(order.soldAt).toLocaleString("vi-VN") : null,
@@ -2693,6 +2772,47 @@ export class OrderService implements OnModuleInit {
     }
   }
 
+  // Ghép COD giao một phần theo orderId ở API danh sách (1 query cho cả trang).
+  // Không ghi lại COD GHN, không sửa phiếu PDL hoặc chứng từ đối soát.
+  private async attachPartialDeliveryCodToList<T extends any>(orders: T[]): Promise<T[]> {
+    if (!orders.length) return orders;
+    const orderIds = orders.map((order: any) => String(order.id || "")).filter(Boolean);
+    const orderCodes = orders.map((order: any) => String(order.orderCode || "")).filter(Boolean);
+    if (!orderIds.length) return orders;
+    try {
+      // Đối chiếu bằng cả ID và mã đơn: các phiếu PDL cũ có thể lưu khóa
+      // không đồng nhất nhưng vẫn giữ orderCode chuẩn của đơn gốc.
+      const records = await this.prisma.partialDeliveryRecord.findMany({
+        where: { OR: [{ orderId: { in: orderIds } }, { orderCode: { in: orderCodes } }] },
+        select: { orderId: true, orderCode: true, originalCod: true, adjustedCod: true, createdAt: true },
+        orderBy: { createdAt: "desc" },
+      });
+      const latestByKey = new Map<string, number>();
+      for (const record of records) {
+        const adjusted = Number(record.adjustedCod);
+        const original = Number(record.originalCod);
+        if (!Number.isFinite(adjusted) || adjusted < 0 ||
+            !Number.isFinite(original) || original < adjusted) continue;
+        for (const key of [String(record.orderId || ""), String(record.orderCode || "")]) {
+          if (key && !latestByKey.has(key)) latestByKey.set(key, adjusted);
+        }
+      }
+      return orders.map((order: any) => {
+        const adjusted = latestByKey.get(String(order.id)) ?? latestByKey.get(String(order.orderCode));
+        if (adjusted === undefined) return order;
+        return {
+          ...order,
+          isPartialDelivery: true, // Chỉ đánh dấu trong dữ liệu trả về, không update DB.
+          effectivePartialDeliveryCod: adjusted,
+          shopActualReceived: Math.max(0, Math.round(adjusted - this.getCarrierShippingFee(order))),
+        };
+      });
+    } catch (error) {
+      console.warn("[ORDERS_PARTIAL_COD_LIST_SKIP]", error instanceof Error ? error.message : error);
+      return orders;
+    }
+  }
+
   private async attachCodReconciliationFields<T extends any>(orders: T[]): Promise<T[]> {
     if (!orders.length) return orders;
 
@@ -2771,6 +2891,53 @@ export class OrderService implements OnModuleInit {
     }
   }
 
+  // Danh sách đơn: đối chiếu theo lô, tránh N+1 và tuyệt đối không ghi tiền/kho.
+  // Chỉ cấn trừ khi duy nhất một RTN hoàn tất khớp số COD giảm của phiếu PDL.
+  private async attachReturnSettlementToList<T extends any>(orders: T[]): Promise<T[]> {
+    const partialOrders = orders.filter((o: any) => o.isPartialDelivery === true);
+    if (!partialOrders.length) return orders;
+    const ids = partialOrders.map((o: any) => String(o.id));
+    try {
+      const [records, returns] = await Promise.all([
+        this.prisma.partialDeliveryRecord.findMany({
+          where: { orderId: { in: ids } },
+          select: { orderId: true, originalCod: true, adjustedCod: true, createdAt: true },
+        }),
+        this.prisma.returnExchange.findMany({
+          where: { originalOrderId: { in: ids }, status: "COMPLETED" },
+          select: { id: true, originalOrderId: true, returnAmount: true },
+        }),
+      ]);
+      const returnsByOrder = new Map<string, typeof returns>();
+      for (const rtn of returns) {
+        const key = String(rtn.originalOrderId);
+        returnsByOrder.set(key, [...(returnsByOrder.get(key) || []), rtn]);
+      }
+      const credits = new Map<string, number>();
+      const usedReturnIds = new Set<string>();
+      for (const record of [...records].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())) {
+        const difference = Math.max(0, this.toNumber(record.originalCod) - this.toNumber(record.adjustedCod));
+        if (!difference) continue;
+        const candidates = (returnsByOrder.get(String(record.orderId)) || []).filter(
+          rtn => !usedReturnIds.has(rtn.id) && Math.abs(this.toNumber(rtn.returnAmount) - difference) <= 1,
+        );
+        if (candidates.length !== 1) continue;
+        usedReturnIds.add(candidates[0].id);
+        credits.set(String(record.orderId), (credits.get(String(record.orderId)) || 0) + difference);
+      }
+      return orders.map((order: any) => {
+        if (!credits.has(String(order.id))) return order;
+        const paid = Array.isArray(order.payments) ? order.payments.reduce((sum: number, p: any) =>
+          sum + (["PAID", "PARTIAL"].includes(String(p.status || "").toUpperCase()) ? Math.max(0, this.toNumber(p.amount)) : 0), 0) : 0;
+        const before = Math.max(0, this.toNumber(order.finalAmount) - paid);
+        return { ...order, remainingDueAfterReturns: Math.max(0, before - (credits.get(String(order.id)) || 0)) };
+      });
+    } catch (error) {
+      console.warn("[ORDERS_SETTLEMENT_LIST_SKIP]", error instanceof Error ? error.message : error);
+      return orders;
+    }
+  }
+
   private buildFastOrderListSelect(): Prisma.OrderSelect {
     return {
       id: true,
@@ -2786,6 +2953,7 @@ export class OrderService implements OnModuleInit {
       discountAmount: true,
       shippingFee: true,
       finalAmount: true,
+      isPartialDelivery: true,
       paymentStatus: true,
       fulfillmentStatus: true,
       status: true,
@@ -2853,6 +3021,7 @@ export class OrderService implements OnModuleInit {
       shippingFee: this.toNumber(order.shippingFee),
       finalAmount: this.toNumber(order.finalAmount),
       shopActualReceived: this.getShopActualReceived(order),
+      effectiveCustomerCollection: this.getEffectiveCustomerCollection(order),
       createdAt: order.createdAt,
       updatedAt: order.updatedAt,
       soldAt: order.soldAt || null,
@@ -3349,8 +3518,11 @@ export class OrderService implements OnModuleInit {
     ]);
 
     const ordersWithAssignedStaff = await this.attachAssignedStaffFields(orders);
-    const ordersWithCodReconciliation = await this.attachCodReconciliationFields(ordersWithAssignedStaff);
-    const data = ordersWithCodReconciliation.map((order) => this.mapOrderListResponse(order));
+    // Phải gắn PDL trước đối soát để cả shopActualReceived và cảnh báo sai lệch dùng COD thực.
+    const ordersWithPartialCod = await this.attachPartialDeliveryCodToList(ordersWithAssignedStaff);
+    const ordersWithCodReconciliation = await this.attachCodReconciliationFields(ordersWithPartialCod);
+    const ordersWithSettlement = await this.attachReturnSettlementToList(ordersWithCodReconciliation);
+    const data = ordersWithSettlement.map((order) => this.mapOrderListResponse(order));
 
     return {
       data,
@@ -3364,6 +3536,70 @@ export class OrderService implements OnModuleInit {
         q: keyword,
         exact: exactSearchHit,
       },
+    };
+  }
+
+  // Bảng đối chiếu chỉ để HIỂN THỊ, tuyệt đối không tạo Payment/CashVoucher hay thay đổi công nợ sổ cái.
+  // Chỉ cấn trừ phiếu RTN đã được liên kết đúng với PDL và có giá trị tương ứng mức giảm COD.
+  private async buildReturnSettlementPreview(order: any, partialDeliveries: any[]) {
+    const originalTotal = Math.max(0, this.toNumber(order.finalAmount));
+    const payments = Array.isArray(order.payments) ? order.payments : [];
+    const paid = payments.reduce((sum: number, payment: any) => {
+      const status = String(payment.status || "").toUpperCase();
+      return sum + (["PAID", "PARTIAL"].includes(status) ? Math.max(0, this.toNumber(payment.amount)) : 0);
+    }, 0);
+    const dueBefore = Math.max(0, originalTotal - paid);
+    const creditedIds = new Set<string>();
+    const creditLines: any[] = [];
+    let remaining = dueBefore;
+
+    for (const record of [...partialDeliveries].sort((a: any, b: any) =>
+      new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime())) {
+      const rtn = record._returnExchange || record.returnExchange || null;
+      const rtnId = String(rtn?.id || "");
+      if (!rtnId || creditedIds.has(rtnId) || String(rtn.status).toUpperCase() !== "COMPLETED") continue;
+      const difference = Math.max(0, this.toNumber(record.originalCod) - this.toNumber(record.adjustedCod));
+      const returned = Math.max(0, this.toNumber(rtn.returnAmount));
+      // Nếu COD giảm khác giá hàng trả, đây có thể là giảm giá hoặc điều chỉnh tay: không tự cấn trừ.
+      if (!difference || Math.abs(difference - returned) > 1) continue;
+      const credit = Math.min(remaining, returned);
+      if (!credit) continue;
+      creditedIds.add(rtnId);
+      remaining -= credit;
+      creditLines.push({
+        returnId: rtnId,
+        returnCode: rtn.code,
+        amount: credit,
+        returnAmount: returned,
+        date: rtn.createdAt,
+        source: "MATCHED_PARTIAL_DELIVERY",
+      });
+    }
+
+    const returns = await (this.prisma as any).returnExchange.findMany({
+      where: { originalOrderId: order.id, status: { not: "CANCELLED" } },
+      select: {
+        id: true, code: true, status: true, returnAmount: true,
+        cashVouchers: { select: { id: true, code: true, direction: true, status: true, amount: true, voucherType: true } },
+      },
+      orderBy: { createdAt: "asc" },
+    });
+    const warningVouchers = returns.flatMap((rtn: any) => (rtn.cashVouchers || [])
+      .filter((v: any) => String(v.direction).toUpperCase() === "OUT" && String(v.status).toUpperCase() === "CONFIRMED")
+      .map((v: any) => ({ returnCode: rtn.code, voucherCode: v.code, amount: this.toNumber(v.amount) })));
+    const unlinkedReturns = returns.filter((rtn: any) => !creditedIds.has(String(rtn.id)))
+      .map((rtn: any) => ({ returnCode: rtn.code, returnAmount: this.toNumber(rtn.returnAmount) }));
+    return {
+      originalTotal,
+      paidAmount: paid,
+      dueBeforeReturns: dueBefore,
+      returnCreditAmount: dueBefore - remaining,
+      remainingDuePreview: remaining,
+      creditLines,
+      unlinkedReturns,
+      confirmedRefundVouchers: warningVouchers,
+      status: warningVouchers.length ? "REVIEW_REFUND_VOUCHER" : (remaining === 0 ? "PREVIEW_SETTLED" : "PREVIEW_DUE"),
+      note: "Đối chiếu hiển thị; chưa ghi giảm công nợ hoặc xác nhận giao dịch tiền mặt trong sổ cái.",
     };
   }
 
@@ -3443,10 +3679,14 @@ export class OrderService implements OnModuleInit {
       orderWithAssignedStaff,
     );
 
-    return this.mapOrderResponse({
-      ...orderWithAssignedStaff,
-      partialDeliveries,
-    });
+    const settlementPreview = await this.buildReturnSettlementPreview(orderWithAssignedStaff, partialDeliveries);
+    return {
+      ...this.mapOrderResponse({
+        ...orderWithAssignedStaff,
+        partialDeliveries,
+      }),
+      settlementPreview,
+    };
   }
 
   async updateOrder(orderId: string, body: any, user?: any) {

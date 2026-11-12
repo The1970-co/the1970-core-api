@@ -2266,7 +2266,7 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     return items;
   }
 
-  async listConversations(query: ListConversationsDto & { tag?: string; unread?: string | boolean }, staff?: any) {
+  async listConversations(query: ListConversationsDto & { tag?: string; unread?: string | boolean; readUnanswered?: string | boolean }, staff?: any) {
     const page = Number(query.page || 1);
     const limit = Math.min(Math.max(Number(query.limit || 30), 10), 100);
     const skip = (page - 1) * limit;
@@ -2311,6 +2311,34 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
     const unreadRaw = safeText(query.unread).toLowerCase();
     if (["1", "true", "yes"].includes(unreadRaw)) {
       where.unreadCount = { gt: 0 };
+    }
+
+    // Read but not answered: user read state and reply state are independent.
+    // Determine the actual latest message direction from OmniMessage; OPEN/PENDING
+    // alone cannot tell whether the shop already replied. Filter in PostgreSQL
+    // BEFORE pagination to include older conversations beyond the first 40 rows.
+    const readUnanswered = ["1", "true", "yes"].includes(
+      safeText(query.readUnanswered).toLowerCase(),
+    );
+    if (readUnanswered) {
+      const rows: Array<{ id: string }> = await (this.prisma as any).$queryRawUnsafe(`
+        SELECT c."id"
+          FROM "OmniConversation" c
+          JOIN LATERAL (
+            SELECT m."direction"
+              FROM "OmniMessage" m
+             WHERE m."conversationId" = c."id"
+             ORDER BY m."sentAt" DESC, m."id" DESC
+             LIMIT 1
+          ) latest ON TRUE
+         WHERE c."unreadCount" = 0
+           AND latest."direction" = 'IN'
+      `);
+      const ids = rows.map((row) => row.id);
+      where.AND = [
+        ...(Array.isArray(where.AND) ? where.AND : []),
+        { id: { in: ids } },
+      ];
     }
 
     const q = safeText(query.q);
@@ -2445,21 +2473,100 @@ export class OmniInboxService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    const [items, total] = await this.prisma.$transaction([
+    // Sort by actual conversation activity, NEVER by updatedAt (avatar, tags,
+    // assignment or read status must not promote a September thread to today).
+    // A thread with only a referral has no lastMessageAt; use its createdAt
+    // as activity time WITHOUT fabricating a message timestamp in the database.
+    // Merge the two sorted streams BEFORE pagination so September referrals
+    // appear in September, not first or artificially last.
+    const fetchCount = skip + limit;
+    const include = {
+      customer: true,
+      page: true,
+      tags: true,
+      _count: { select: { messages: true, notes: true } },
+    } as const;
+    const [withMessages, withoutMessages, total] = await this.prisma.$transaction([
       this.prisma.omniConversation.findMany({
-        where,
-        orderBy: [{ lastMessageAt: "desc" }, { updatedAt: "desc" }],
-        skip,
-        take: limit,
-        include: {
-          customer: true,
-          page: true,
-          tags: true,
-          _count: { select: { messages: true, notes: true } },
-        },
+        where: { AND: [where, { lastMessageAt: { not: null } }] },
+        orderBy: [{ lastMessageAt: "desc" }, { createdAt: "desc" }],
+        take: fetchCount,
+        include,
+      }),
+      this.prisma.omniConversation.findMany({
+        where: { AND: [where, { lastMessageAt: null }] },
+        orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+        take: fetchCount,
+        include,
       }),
       this.prisma.omniConversation.count({ where }),
     ]);
+    const activityMs = (row: any) => {
+      const stamp = row.lastMessageAt || row.createdAt;
+      const timestamp = stamp ? new Date(stamp).getTime() : 0;
+      return Number.isFinite(timestamp) ? timestamp : 0;
+    };
+    const items = [...withMessages, ...withoutMessages]
+      .sort((a: any, b: any) =>
+        activityMs(b) - activityMs(a) || String(a.id).localeCompare(String(b.id)),
+      )
+      .slice(skip, skip + limit);
+
+    // "Waiting" is independent from "Unread": the last persisted message
+    // must be IN, even when a staff member has already marked it read.
+    // Referral-only threads have no direction and must not become waiting.
+    if (items.length) {
+      try {
+        const latestRows: any[] = await (this.prisma as any).$queryRawUnsafe(
+          `SELECT ids.id AS "conversationId", latest."direction", latest."text", latest."type", latest."sentAt"
+             FROM unnest($1::text[]) AS ids(id)
+             LEFT JOIN LATERAL (
+               SELECT "direction", "text", "type", "sentAt"
+                 FROM "OmniMessage"
+                WHERE "conversationId" = ids.id
+                ORDER BY "sentAt" DESC LIMIT 1
+             ) latest ON TRUE`,
+          items.map((item: any) => item.id),
+        );
+        const latestById = new Map(latestRows.map((row: any) => [row.conversationId, row]));
+        for (const item of items as any[]) {
+          const latest: any = latestById.get(item.id);
+          item.lastMessageDirection = latest?.direction || null;
+          const latestAt = latest?.sentAt ? new Date(latest.sentAt) : null;
+          const previousAt = item.lastMessageAt ? new Date(item.lastMessageAt) : null;
+          const latestIsNewer = Boolean(latestAt && Number.isFinite(latestAt.getTime()) &&
+            (!previousAt || latestAt.getTime() > previousAt.getTime()));
+          if (latestIsNewer || (latestAt && !safeText(item.lastMessageText))) {
+            item.lastMessageText = safeText(latest.text) ||
+              (latest.type === "IMAGE" ? "[Ảnh]" :
+               latest.type === "FILE" ? "[Tệp đính kèm]" :
+               latest.type === "STICKER" ? "[Nhãn dán]" : "[Tin nhắn]");
+            if (latestIsNewer) item.lastMessageAt = latestAt;
+            // Repair stale legacy preview without waiting on Facebook.
+            // Only update if the DB still has an older timestamp (avoid a race
+            // with a new webhook that arrived while this list was loading).
+            void this.prisma.omniConversation.updateMany({
+              where: {
+                id: item.id,
+                OR: [
+                  { lastMessageAt: null },
+                  ...(latestIsNewer ? [{ lastMessageAt: { lt: latestAt! } }] : []),
+                  { lastMessageText: null },
+                ],
+              },
+              data: {
+                lastMessageText: item.lastMessageText,
+                ...(latestIsNewer ? { lastMessageAt: latestAt! } : {}),
+              },
+            }).catch((error: any) =>
+              this.logger.warn(`[OMNI_PREVIEW_REPAIR_SKIP] id=${item.id} ${error?.message || error}`),
+            );
+          }
+        }
+      } catch (error: any) {
+        this.logger.warn(`[OMNI_LAST_DIRECTION_SKIP] ${error?.message || error}`);
+      }
+    }
 
     // Return cached PostgreSQL profiles immediately; refresh missing or legacy
     // FB-CDN avatars after the response, with a small per-request concurrency cap.

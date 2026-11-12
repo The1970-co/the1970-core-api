@@ -70,8 +70,9 @@ export class OmniInboxController {
     @Query() query: ListConversationsDto,
     @Query("tag") tag?: string,
     @Query("unread") unread?: string,
+    @Query("readUnanswered") readUnanswered?: string,
   ) {
-    return this.service.listConversations({ ...query, tag, unread });
+    return this.service.listConversations({ ...query, tag, unread, readUnanswered });
   }
 
   @UseGuards(JwtGuard, PermissionGuard)
