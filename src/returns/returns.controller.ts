@@ -40,6 +40,28 @@ export class ReturnsController {
     return this.returnsService.createReturnAndShipExchange(body, req.user);
   }
 
+  @Post("manual-collection")
+  @RequirePermissions("returns.create")
+  createManualCollection(@Body() body: any, @Req() req: Request & { user?: any }) {
+    return this.returnsService.createManualCollection(body, req.user);
+  }
+
+  @Post("link-existing-exchange")
+  @RequirePermissions("returns.create")
+  linkExistingExchange(@Body() body: any, @Req() req: Request & { user?: any }) {
+    return this.returnsService.linkExistingReturnToOrder(body, req.user);
+  }
+
+  @Post(":id/confirm-collected")
+  @RequirePermissions("returns.create")
+  confirmCollected(
+    @Param("id") id: string,
+    @Body() body: { condition: "OK" | "ISSUE"; note?: string },
+    @Req() req: Request & { user?: any },
+  ) {
+    return this.returnsService.confirmCollectedExchangeReturn(id, body, req.user);
+  }
+
   @Get()
   @RequirePermissions("returns.view")
   getReturns(

@@ -58,6 +58,7 @@ type GetOrdersParams = {
   trackingStatuses?: string;
   codStatuses?: string;
   amountDueStatuses?: string;
+  exchangeReturnStatus?: string;
   itemCountStatuses?: string;
   productSkus?: string;
   assignedStaffNames?: string;
@@ -1685,24 +1686,30 @@ export class OrderService implements OnModuleInit {
 
     await this.ensureOrderCashVoucherTable(tx);
 
+    // Một đơn có thể thu nhiều lần cùng nguồn và cùng số tiền.
+    // Đếm theo thứ tự xuất hiện để ghi đủ phiếu thu và vẫn tránh tạo trùng
+    // khi đồng bộ lại sau một lần lỗi giữa chừng.
+    const processedVoucherOccurrences = new Map<string, number>();
     for (const payment of payments) {
-      const existed = await tx.$queryRawUnsafe(
+      const key = JSON.stringify([payment.paymentSourceId, Math.round(payment.amount)]);
+      const occurrence = (processedVoucherOccurrences.get(key) || 0) + 1;
+      processedVoucherOccurrences.set(key, occurrence);
+      const existingRows = (await tx.$queryRawUnsafe(
         `
-          SELECT "id"
+          SELECT COUNT(*)::bigint AS "count"
           FROM "CashVoucher"
           WHERE "refType" = 'ORDER'
             AND "refId" = $1
             AND "paymentSourceId" = $2
             AND ROUND(("amount")::numeric, 0) = ROUND(($3)::numeric, 0)
             AND COALESCE("status", 'DRAFT') != 'CANCELLED'
-          LIMIT 1
         `,
         input.order.id,
         payment.paymentSourceId,
         payment.amount,
-      );
+      )) as Array<{ count: bigint }>;
 
-      if (existed.length) continue;
+      if (Number(existingRows[0]?.count || 0) >= occurrence) continue;
 
       const voucherCode = await this.generateOrderCashVoucherCode(tx, "RECEIPT");
       const id = `cv_pos_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
@@ -3443,6 +3450,26 @@ export class OrderService implements OnModuleInit {
       };
     }
 
+    // Bộ lọc server-side trạng thái nhận hàng cũ của đơn đổi.
+    // Chỉ lọc những RTN có mode thu hồi cùng chuyến và liên kết exchangeOrderId thật.
+    const returnReceiveFilter = String(params.exchangeReturnStatus || "").toUpperCase();
+    if (["PENDING", "RECEIVED", "ALL_EXCHANGE"].includes(returnReceiveFilter)) {
+      const tickets = await this.prisma.returnExchange.findMany({
+        where: {
+          exchangeOrderId: { not: null },
+          note: { contains: "[EXCHANGE_COLLECT_ON_DELIVERY]" },
+          status: returnReceiveFilter === "PENDING" ? "PENDING" : returnReceiveFilter === "RECEIVED" ? "COMPLETED" : { in: ["PENDING", "COMPLETED"] },
+        },
+        select: { exchangeOrderId: true },
+      });
+      const ids = tickets.map((ticket) => ticket.exchangeOrderId).filter((id): id is string => Boolean(id));
+      // AND with any previous COD filter, never overwrite it.
+      const oldIdFilter = baseWhere.id;
+      baseWhere.AND = [...(Array.isArray(baseWhere.AND) ? baseWhere.AND : baseWhere.AND ? [baseWhere.AND] : []),
+        ...(oldIdFilter ? [{ id: oldIdFilter }] : []), { id: { in: ids.length ? ids : ["__NO_MATCHING_EXCHANGE__"] } }];
+      delete baseWhere.id;
+    }
+
     let searchWhere: Prisma.OrderWhereInput | null = null;
     let exactSearchHit = false;
     const createdByStaffWhere = this.buildCreatedByStaffWhere(
@@ -3586,7 +3613,7 @@ export class OrderService implements OnModuleInit {
     });
     const warningVouchers = returns.flatMap((rtn: any) => (rtn.cashVouchers || [])
       .filter((v: any) => String(v.direction).toUpperCase() === "OUT" && String(v.status).toUpperCase() === "CONFIRMED")
-      .map((v: any) => ({ returnCode: rtn.code, voucherCode: v.code, amount: this.toNumber(v.amount) })));
+      .map((v: any) => ({ returnId: rtn.id, returnCode: rtn.code, voucherCode: v.code, amount: this.toNumber(v.amount), status: "CONFIRMED", isCredited: creditedIds.has(String(rtn.id)) })));
     const unlinkedReturns = returns.filter((rtn: any) => !creditedIds.has(String(rtn.id)))
       .map((rtn: any) => ({ returnCode: rtn.code, returnAmount: this.toNumber(rtn.returnAmount) }));
     return {
@@ -3598,8 +3625,54 @@ export class OrderService implements OnModuleInit {
       creditLines,
       unlinkedReturns,
       confirmedRefundVouchers: warningVouchers,
-      status: warningVouchers.length ? "REVIEW_REFUND_VOUCHER" : (remaining === 0 ? "PREVIEW_SETTLED" : "PREVIEW_DUE"),
+      status: remaining === 0 ? "PREVIEW_SETTLED" : "PREVIEW_DUE",
       note: "Đối chiếu hiển thị; chưa ghi giảm công nợ hoặc xác nhận giao dịch tiền mặt trong sổ cái.",
+    };
+  }
+
+  // Hiển thị luồng đổi hàng đã tạo thành đơn riêng: không ghi nhận lại tiền/kho.
+  // Ưu tiên khóa liên kết exchangeOrderId; chỉ gợi ý ghép bằng số điện thoại + chênh lệch
+  // khi có DUY NHẤT một phiếu trả phù hợp (không tự ghi quan hệ vào DB).
+  private async findExchangeContextForOrder(order: any) {
+    const cod = this.toNumber(order?.shipment?.codAmount);
+    const total = this.toNumber(order?.finalAmount);
+    if (!order?.id || !order?.items?.length) return null;
+
+    // CHỈ HIỂN THỊ TRAO ĐỔI KHI CÓ KHÓA LIÊN KẾT THẬT.
+    // Tuyệt đối không ghép theo SĐT / mức COD: hai giao dịch có thể hoàn toàn độc lập.
+    const candidates: any[] = await (this.prisma as any).returnExchange.findMany({
+      where: { exchangeOrderId: order.id, status: { not: "CANCELLED" } },
+      include: { items: true },
+    });
+    const linkMethod: "EXPLICIT" = "EXPLICIT";
+
+    if (candidates.length !== 1) return null;
+    const rtn = candidates[0];
+    const returnedItems = (rtn.items || [])
+      .filter((item: any) => String(item.itemType || "RETURN").toUpperCase() === "RETURN")
+      .map((item: any) => ({
+        sku: item.sku || null, productName: item.productName || null,
+        qty: this.toNumber(item.qty), amount: this.toNumber(item.lineTotal),
+      }));
+    if (!returnedItems.length) return null;
+    const source = await this.prisma.order.findUnique({
+      where: { id: rtn.originalOrderId }, select: { orderCode: true },
+    });
+    return {
+      returnId: rtn.id, returnCode: rtn.code,
+      sourceOrderCode: source?.orderCode || null,
+      linkMethod, returnStatus: rtn.status,
+      manualCollection: /\[MANUAL_COLLECTION\]|\[MANUAL_EXCHANGE_LINK\]/.test(String(rtn.note || "")),
+      returnedItems,
+      returnedAmount: this.toNumber(rtn.returnAmount),
+      deliveredItems: order.items.map((item: any) => ({
+        sku: item.sku || null, productName: item.productName || null,
+        qty: this.toNumber(item.qty), amount: this.toNumber(item.lineTotal),
+      })),
+      goodsAmount: this.toNumber(rtn.exchangeAmount) || (order.items || []).reduce((sum: number, item: any) => sum + this.toNumber(item.lineTotal), 0),
+      shippingFee: this.toNumber(order.shippingFee),
+      customerCod: cod,
+      remainingDifference: (this.toNumber(rtn.exchangeAmount) || (order.items || []).reduce((sum: number, item: any) => sum + this.toNumber(item.lineTotal), 0)) + this.toNumber(rtn.shippingFee) - this.toNumber(rtn.returnAmount) - cod,
     };
   }
 
@@ -3679,13 +3752,17 @@ export class OrderService implements OnModuleInit {
       orderWithAssignedStaff,
     );
 
-    const settlementPreview = await this.buildReturnSettlementPreview(orderWithAssignedStaff, partialDeliveries);
+    const [settlementPreview, exchangeContext] = await Promise.all([
+      this.buildReturnSettlementPreview(orderWithAssignedStaff, partialDeliveries),
+      this.findExchangeContextForOrder(orderWithAssignedStaff),
+    ]);
     return {
       ...this.mapOrderResponse({
         ...orderWithAssignedStaff,
         partialDeliveries,
       }),
       settlementPreview,
+      exchangeContext,
     };
   }
 

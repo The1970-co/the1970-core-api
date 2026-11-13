@@ -1911,10 +1911,15 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     const previousReceivedByName = previousMeta.returnReceivedByName || previousMeta.return_received_by_name || null;
 
     const status = String(shippingStatus || "").toUpperCase();
+    // Giữ liên kết đổi hàng khi GHN cron ghi đè metadata bằng raw tracking.
+    const exchangeMeta = previousMeta.exchangeCollection ? { exchangeCollection: previousMeta.exchangeCollection } : {};
+    const exchangeCarrierMode = previousMeta.ghnPartialDelivery === true ? { ghnPartialDelivery: true } : {};
 
     if (status === "RETURNED") {
       return {
         ...rawMeta,
+        ...exchangeMeta,
+        ...exchangeCarrierMode,
         returnReceiveStatus: previousReturnReceiveStatus === "RECEIVED" ? "RECEIVED" : "WAITING_CONFIRM",
         returnReceivedAt: previousReceivedAt,
         returnReceivedById: previousReceivedById,
@@ -1925,6 +1930,8 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     if (status === "RETURNING") {
       return {
         ...rawMeta,
+        ...exchangeMeta,
+        ...exchangeCarrierMode,
         returnReceiveStatus: previousReturnReceiveStatus === "RECEIVED" ? "RECEIVED" : "RETURNING",
         returnReceivedAt: previousReceivedAt,
         returnReceivedById: previousReceivedById,
@@ -1934,6 +1941,8 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
 
     return {
       ...rawMeta,
+      ...exchangeMeta,
+      ...exchangeCarrierMode,
       ...(previousReturnReceiveStatus ? { returnReceiveStatus: previousReturnReceiveStatus } : {}),
       ...(previousReceivedAt ? { returnReceivedAt: previousReceivedAt } : {}),
       ...(previousReceivedById ? { returnReceivedById: previousReceivedById } : {}),

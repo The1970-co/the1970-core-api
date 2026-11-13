@@ -355,7 +355,8 @@ export class ReturnsService {
     const refundAmount = differenceAmount > 0 ? differenceAmount : 0;
     const extraChargeAmount = customerPayableAmount;
 
-    if (refundAmount > 0 && !body.refundPaymentSourceId) {
+    const pendingReceipt = String(body?.status || "").toUpperCase() === "PENDING";
+    if (!pendingReceipt && refundAmount > 0 && !body.refundPaymentSourceId) {
       throw new BadRequestException("Thiếu nguồn tiền hoàn khách.");
     }
 
@@ -364,16 +365,17 @@ export class ReturnsService {
     if (
       extraChargeAmount > 0 &&
       !deferExtraChargeToShipment &&
+      !pendingReceipt &&
       !body.extraChargePaymentSourceId
     ) {
       throw new BadRequestException("Thiếu nguồn tiền khách bù thêm.");
     }
 
-    if (refundAmount > 0) {
+    if (!pendingReceipt && refundAmount > 0) {
       await this.ensurePaymentSourceExists(body.refundPaymentSourceId);
     }
 
-    if (extraChargeAmount > 0 && !deferExtraChargeToShipment) {
+    if (!pendingReceipt && extraChargeAmount > 0 && !deferExtraChargeToShipment) {
       await this.ensurePaymentSourceExists(body.extraChargePaymentSourceId);
     }
 
@@ -401,7 +403,8 @@ export class ReturnsService {
           exchangeAmount: new Prisma.Decimal(exchangeAmount),
           differenceAmount: new Prisma.Decimal(differenceAmount),
 
-          refundAmount: new Prisma.Decimal(refundAmount),
+          // Yêu cầu thu hồi riêng chưa phát sinh hoàn tiền, dù giá trị hàng trả lớn hơn hàng đổi.
+          refundAmount: new Prisma.Decimal(pendingReceipt ? 0 : refundAmount),
           extraChargeAmount: new Prisma.Decimal(extraChargeAmount),
           shippingFee: new Prisma.Decimal(shippingFee),
           customerPayableAmount: new Prisma.Decimal(customerPayableAmount),
@@ -533,7 +536,7 @@ export class ReturnsService {
         }
       }
 
-      if (refundAmount > 0) {
+      if (record.status === "COMPLETED" && refundAmount > 0) {
         await tx.cashVoucher.create({
           data: {
             code: this.voucherCode("OUT"),
@@ -558,7 +561,7 @@ export class ReturnsService {
         });
       }
 
-      if (extraChargeAmount > 0 && !deferExtraChargeToShipment) {
+      if (record.status === "COMPLETED" && extraChargeAmount > 0 && !deferExtraChargeToShipment) {
         await tx.cashVoucher.create({
           data: {
             code: this.voucherCode("IN"),
@@ -1020,6 +1023,7 @@ export class ReturnsService {
       codAmount,
       clientOrderCode: order.orderCode,
       note,
+      ...(input.body?.collectOldOnDelivery === true ? ({ ghnPartialDelivery: true } as Record<string, any>) : {}),
       content: `Đơn đổi/trả ${order.orderCode}`,
       requiredNote: this.normalizeGhnRequiredNote(note),
       weight: dims.weight,
@@ -1041,6 +1045,33 @@ export class ReturnsService {
   }
 
   async createReturnAndShipExchange(body: any, user?: any) {
+    // Giai đoạn 2 của thu hồi riêng: tái sử dụng RTN đã được kho xác nhận.
+    // Không tạo RTN thứ hai, không nhập kho hoặc lập phiếu thu/chi lần nữa.
+    const existingReturnId = String(body?.existingReturnId || "").trim();
+    const existing = existingReturnId
+      ? await this.prisma.returnExchange.findFirst({ where: { OR: [{ id: existingReturnId }, { code: existingReturnId }] }, include: { items: true } })
+      : null;
+    if (existingReturnId) {
+      if (!existing || !String(existing.note || "").includes("[SEPARATE_COLLECTION]"))
+        throw new BadRequestException("Không tìm thấy yêu cầu thu hồi riêng hợp lệ.");
+      this.ensureBranch(user, existing.returnReceiveBranchId || existing.handledAtBranchId);
+      if (existing.exchangeOrderId) throw new BadRequestException(`Phiếu ${existing.code} đã có đơn đổi; không tạo trùng.`);
+      if (existing.status !== "COMPLETED" || !String(existing.note || "").includes("Kho đã nhận hàng cũ:"))
+        throw new BadRequestException("Kho chưa xác nhận nhận đủ hàng cũ. Không được gửi hàng mới.");
+      if (String(body?.originalOrderId || "") !== String(existing.originalOrderId))
+        throw new BadRequestException("Đơn gốc không khớp phiếu thu hồi.");
+      // Hàng trả lấy theo RTN đã kho xác nhận; chỉ nhận danh sách hàng MỚI từ bước 2.
+      const confirmedOldItems = existing.items.filter((i: any) => String(i.itemType).toUpperCase() === "RETURN");
+      if (!confirmedOldItems.length) throw new BadRequestException("Phiếu không có hàng cũ đã nhận.");
+      const newExchangeItems = (Array.isArray(body?.items) ? body.items : []).filter((i: any) => String(i.itemType).toUpperCase() === "EXCHANGE");
+      if (!newExchangeItems.length) throw new BadRequestException("Chọn sản phẩm mới gửi khách sau khi đã nhận hàng cũ.");
+      body = { ...body, items: [
+        ...confirmedOldItems.map((i: any) => ({ itemType: "RETURN", orderItemId: i.orderItemId, variantId: i.variantId,
+          sku: i.sku, productName: i.productName, qty: this.n(i.qty), unitPrice: this.n(i.unitPrice),
+          refundPrice: this.n(i.refundPrice), reason: i.reason })),
+        ...newExchangeItems,
+      ] };
+    }
     const items = Array.isArray(body?.items) ? body.items : [];
     const exchangeItems = items.filter(
       (item: any) => String(item?.itemType || "").toUpperCase() === "EXCHANGE",
@@ -1084,16 +1115,57 @@ export class ReturnsService {
       ),
     );
 
-    const record = await this.createReturn(
+    // CO-DELIVERY: hàng cũ chưa nhập kho khi mới tạo vận đơn.
+    // Không cho phép ghi nhận phiếu đã hoàn tất trước khi kho thực nhận.
+    const collectOldOnDelivery = body?.collectOldOnDelivery === true;
+    if (collectOldOnDelivery) {
+      if (body?.ghnCollectionConfirmed !== true) throw new BadRequestException("Cần xác nhận đã thống nhất nghiệp vụ thu hồi cùng chuyến với GHN/shipper.");
+      const returnItems = items.filter((item: any) => String(item?.itemType || "RETURN").toUpperCase() === "RETURN");
+      if (!returnItems.length) throw new BadRequestException("Thiếu sản phẩm cũ cần thu hồi.");
+      if (shippingPartner !== "GHN") throw new BadRequestException("Chế độ giao kèm thu hồi hiện chỉ hỗ trợ GHN.");
+      const returnValue = returnItems.reduce((sum: number, item: any) => sum + this.n(item.refundPrice ?? item.unitPrice) * this.n(item.qty), 0);
+      const newValue = exchangeItems.reduce((sum: number, item: any) => sum + this.n(item.refundPrice ?? item.unitPrice) * this.n(item.qty), 0);
+      if (returnValue > newValue + shippingFee) throw new BadRequestException("Chênh lệch phải hoàn tiền: chưa hỗ trợ tự động cho thu hồi cùng chuyến.");
+    }
+
+    const record = existing || await this.createReturn(
       {
         ...body,
-        status: body?.status || "COMPLETED",
+        // Không cộng tồn kho và không tạo phiếu chi cho hàng chưa thu hồi.
+        status: collectOldOnDelivery ? "PENDING" : (body?.status || "COMPLETED"),
+        note: [body?.note, collectOldOnDelivery ? "[EXCHANGE_COLLECT_ON_DELIVERY] Chờ kho xác nhận hàng cũ" : ""].filter(Boolean).join(" | "),
         shippingFee,
         shippingPartner,
         deferExtraChargeToShipment: true,
       },
       user,
     );
+
+    if (existing) {
+      const exchangeAmount = exchangeItems.reduce((sum: number, i: any) => sum + this.n(i.refundPrice ?? i.unitPrice) * this.n(i.qty), 0);
+      const returnAmount = this.n(existing.returnAmount);
+      if (exchangeAmount + shippingFee < returnAmount)
+        throw new BadRequestException("Hàng đổi có giá trị nhỏ hơn hàng cũ: cần xử lý hoàn tiền riêng, chưa cho gửi tự động.");
+      await this.prisma.$transaction(async (tx) => {
+        await tx.returnExchangeItem.deleteMany({ where: { returnExchangeId: existing.id, itemType: "EXCHANGE" } });
+        await tx.returnExchangeItem.createMany({ data: exchangeItems.map((i: any) => ({
+          returnExchangeId: existing.id, itemType: "EXCHANGE", orderItemId: null,
+          variantId: String(i.variantId || i.id || ""), sku: i.sku || null, productName: i.productName || null,
+          qty: this.n(i.qty), unitPrice: new Prisma.Decimal(this.n(i.unitPrice)),
+          refundPrice: new Prisma.Decimal(this.n(i.refundPrice ?? i.unitPrice)),
+          lineTotal: new Prisma.Decimal(this.n(i.refundPrice ?? i.unitPrice) * this.n(i.qty)), reason: "Hàng đổi chọn sau khi kho nhận",
+        })) });
+        await tx.returnExchange.update({ where: { id: existing.id }, data: {
+          type: "RETURN_EXCHANGE", exchangeAmount: new Prisma.Decimal(exchangeAmount),
+          shippingFee: new Prisma.Decimal(shippingFee),
+          differenceAmount: new Prisma.Decimal(returnAmount - exchangeAmount - shippingFee),
+          customerPayableAmount: new Prisma.Decimal(Math.max(0, exchangeAmount + shippingFee - returnAmount)),
+          extraChargeAmount: new Prisma.Decimal(Math.max(0, exchangeAmount + shippingFee - returnAmount)),
+          refundAmount: new Prisma.Decimal(0),
+          note: [existing.note, `Chọn hàng đổi sau khi nhận hàng: ${exchangeItems.map((i: any) => `${i.sku || i.productName} x${this.n(i.qty)}`).join(", ")}`].filter(Boolean).join(" | "),
+        } });
+      });
+    }
 
     const freshRecord = await this.prisma.returnExchange.findUnique({
       where: { id: record.id },
@@ -1110,6 +1182,8 @@ export class ReturnsService {
       0,
       exchangeAmount + shippingFee - returnAmount,
     );
+    if (existing && exchangeAmount + shippingFee < returnAmount)
+      throw new BadRequestException("Phiếu thu hồi riêng phát sinh tiền phải hoàn: cần xử lý hoàn tiền riêng trước khi gửi hàng đổi.");
 
     const originalAddress = this.buildFullAddress(originalOrder);
     const originalNote = String(originalOrder.note || "");
@@ -1122,12 +1196,16 @@ export class ReturnsService {
     const originalShippingNote =
       this.parseStructuredNoteValue(originalNote, "Ghi chú giao hàng:") ||
       "Cho xem hàng, không cho thử";
+    const pickupNote = collectOldOnDelivery
+      ? `YEU CAU THU HOI HANG CU: ${items.filter((i: any) => String(i.itemType || "RETURN").toUpperCase() === "RETURN").map((i: any) => `${i.sku || i.productName || "SP"} x${this.n(i.qty)}`).join(", ")}. Lien he shop de xac nhan; KHONG tu dong giam COD.`
+      : "";
+    const carrierShippingNote = [originalShippingNote, pickupNote].filter(Boolean).join(" | ");
     const exchangeOrderNote = [
       `Ghi chú: Đơn đổi/trả từ phiếu ${freshRecord.code}`,
       originalAddress ? `Địa chỉ: ${originalAddress}` : "",
       `Cách giao: ${originalShippingMode}`,
       `Đơn vị giao: ${originalShippingPartner}`,
-      `Ghi chú giao hàng: ${originalShippingNote}`,
+      `Ghi chú giao hàng: ${carrierShippingNote}`,
       `Phí ship: ${shippingFee.toLocaleString("vi-VN")}đ`,
       `Còn phải trả: ${customerPayableAmount.toLocaleString("vi-VN")}đ`,
       `Đơn gốc: ${originalOrder.orderCode}`,
@@ -1226,7 +1304,7 @@ export class ReturnsService {
         shippingFee,
         body,
         selectedQuote,
-        shippingNote: originalShippingNote,
+        shippingNote: carrierShippingNote,
         user,
       });
     } catch (error) {
@@ -1249,6 +1327,29 @@ export class ReturnsService {
 
     const shipment = shipmentResult?.shipment || null;
 
+    // Liên kết có cấu trúc, không suy luận từ SĐT hoặc chênh lệch COD.
+    // Metadata giữ nguyên dữ liệu GHN để tracking đồng bộ bình thường.
+    if (collectOldOnDelivery && shipment?.id) {
+      const existingMeta = shipment.metadata && typeof shipment.metadata === "object" && !Array.isArray(shipment.metadata) ? shipment.metadata : {};
+      await this.prisma.$transaction(async (tx) => {
+        await tx.shipment.update({ where: { id: shipment.id }, data: {
+          metadata: { ...existingMeta, exchangeCollection: {
+            mode: "DELIVER_AND_COLLECT_OLD", returnExchangeId: freshRecord.id,
+            originalOrderId, exchangeOrderId, returnItemSkus: items.filter((i: any) => String(i.itemType || "RETURN").toUpperCase() === "RETURN").map((i: any) => ({ sku: i.sku || null, variantId: i.variantId || null, qty: this.n(i.qty) })),
+            carrierCollectionConfirmed: true, warehouseReceived: false,
+          } },
+        } });
+        await tx.shipmentTimelineEvent.create({ data: {
+          shipmentId: shipment.id, orderId: originalOrderId,
+          carrier: "GHN", trackingCode: shipment.trackingCode || null,
+          status: "EXCHANGE_COLLECTION_REQUESTED",
+          title: "Tạo đơn đổi hàng kèm thu hồi hàng cũ",
+          description: `Phiếu ${freshRecord.code} · đơn giao ${exchangeOrder.orderCode} · COD ${customerPayableAmount.toLocaleString("vi-VN")}đ · hàng cũ ${returnAmount.toLocaleString("vi-VN")}đ chờ thu hồi`,
+          source: "the1970-exchange", eventTime: new Date(),
+        } });
+      });
+    }
+
     const updated = await this.prisma.returnExchange.update({
       where: { id: freshRecord.id },
       data: {
@@ -1260,6 +1361,7 @@ export class ReturnsService {
         exchangeTrackingCode:
           shipment?.trackingCode || shipmentResult?.ghn?.order_code || null,
         exchangeCarrier: shipment?.carrier || shippingPartner || "GHN",
+        note: [freshRecord.note, collectOldOnDelivery ? `Giao kèm thu hồi · đơn ${exchangeOrder.orderCode} · GHN ${shipment?.trackingCode || "chưa có mã"}` : ""].filter(Boolean).join(" | "),
       },
       include: {
         items: true,
@@ -1272,6 +1374,170 @@ export class ReturnsService {
       exchangeOrder,
       shipment: shipmentResult,
     };
+  }
+
+  /** Xác nhận kho thực nhận hàng cũ của luồng giao kèm thu hồi.
+   *  Không dựa trên trạng thái GHN giao hàng mới, không tạo phiếu chi, không trừ hàng đổi lần 2.
+   */
+  async confirmCollectedExchangeReturn(id: string, body: any, user?: any) {
+    const record = await this.prisma.returnExchange.findUnique({ where: { id }, include: { items: true } });
+    if (!record) throw new BadRequestException("Không tìm thấy phiếu đổi trả.");
+    if (!["[EXCHANGE_COLLECT_ON_DELIVERY]", "[MANUAL_COLLECTION]", "[SEPARATE_COLLECTION]"].some(tag => String(record.note || "").includes(tag)))
+      throw new BadRequestException("Phiếu không thuộc luồng thu hồi có xác nhận kho.");
+    if (!record.exchangeOrderId && !String(record.note || "").includes("[SEPARATE_COLLECTION]")) throw new BadRequestException("Phiếu chưa liên kết đơn giao mới.");
+    if (record.status === "COMPLETED") throw new BadRequestException("Phiếu đã xác nhận nhận hàng trước đó.");
+    if (record.status !== "PENDING") throw new BadRequestException("Trạng thái phiếu không cho phép nhận hàng.");
+    const branchId = record.returnReceiveBranchId || record.handledAtBranchId;
+    this.ensureBranch(user, branchId);
+    if (!branchId) throw new BadRequestException("Thiếu chi nhánh nhận hàng.");
+    const returnItems = record.items.filter((item: any) => String(item.itemType).toUpperCase() === "RETURN");
+    if (!returnItems.length || returnItems.some((item: any) => !item.variantId || this.n(item.qty) <= 0))
+      throw new BadRequestException("Thiếu biến thể hoặc số lượng của hàng thu hồi.");
+    if (body?.condition !== "OK") throw new BadRequestException("Hàng lỗi hoặc thiếu phải xử lý bằng quy trình kiểm hàng riêng, không tự nhập kho.");
+    return this.prisma.$transaction(async (tx) => {
+      // Conditional update gives one winner under concurrent confirmation.
+      const locked = await tx.returnExchange.updateMany({ where: { id, status: "PENDING" }, data: { status: "COMPLETED", note: [record.note, `Kho đã nhận hàng cũ: ${user?.name || user?.fullName || user?.email || "Nhân viên"} (${new Date().toISOString()})`, body?.note].filter(Boolean).join(" | ") } });
+      if (locked.count !== 1) throw new BadRequestException("Phiếu đã được người khác xử lý; tải lại dữ liệu.");
+      for (const item of returnItems) {
+        const qty = this.n(item.qty);
+        await tx.inventoryItem.upsert({
+          where: { variantId_branchId: { variantId: String(item.variantId), branchId: String(branchId) } },
+          update: { availableQty: { increment: qty } },
+          create: { variantId: String(item.variantId), branchId: String(branchId), availableQty: qty },
+        });
+        await tx.inventoryMovement.create({ data: {
+          variantId: String(item.variantId), branchId: String(branchId), type: InventoryMovementType.RETURN,
+          qty, refType: "RETURN_EXCHANGE", refId: record.id,
+          note: `Kho xác nhận nhận hàng cũ đổi ${record.code} · đơn giao ${record.exchangeOrderCode || ""}`,
+        } });
+      }
+      if (record.exchangeShipmentId) {
+        await tx.shipmentTimelineEvent.create({ data: {
+          shipmentId: record.exchangeShipmentId, orderId: record.originalOrderId,
+          carrier: record.exchangeCarrier || "GHN", trackingCode: record.exchangeTrackingCode || null,
+          status: "EXCHANGE_OLD_GOODS_RECEIVED", title: "Kho xác nhận đã nhận hàng cũ đổi/trả",
+          description: `Phiếu ${record.code} · ${returnItems.map((i: any) => `${i.sku || i.productName || "SP"} x${this.n(i.qty)}`).join(", ")} · ${user?.name || user?.username || "Nhân viên"}`,
+          source: "the1970-exchange", eventTime: new Date(),
+        } });
+        const shipmentRow = await tx.shipment.findUnique({ where: { id: record.exchangeShipmentId } });
+        const oldMeta = shipmentRow?.metadata && typeof shipmentRow.metadata === "object" && !Array.isArray(shipmentRow.metadata) ? shipmentRow.metadata : {};
+        await tx.shipment.update({ where: { id: record.exchangeShipmentId }, data: {
+          metadata: { ...oldMeta, exchangeCollection: { ...((oldMeta as any).exchangeCollection || {}), warehouseReceived: true, warehouseReceivedAt: new Date().toISOString(), warehouseReceivedById: user?.id || null } },
+        } });
+      }
+      return { id: record.id, code: record.code, status: "COMPLETED", receivedItems: returnItems.map((i: any) => ({ sku: i.sku, qty: this.n(i.qty) })) };
+    });
+  }
+
+  /** Nhân viên xác nhận liên kết một phiếu RTN đã có với đơn giao độc lập.
+   * Không thay đổi COD, payment, kho, không tự xác nhận hàng đã nhận.
+   */
+  /** Ghi nhận yêu cầu thu hồi mới phát sinh sau khi vận đơn giao mới đã được tạo.
+   *  KHÔNG giảm COD, KHÔNG hoàn tiền, KHÔNG tự nhập kho hoặc chuyển đơn sang hoàn thành.
+   *  Đơn gốc + sản phẩm cũ phải được chọn tường minh bởi nhân viên.
+   */
+  async createManualCollection(body: any, user?: any) {
+    const originalOrderId = String(body?.originalOrderId || "").trim();
+    const exchangeOrderId = String(body?.exchangeOrderId || "").trim();
+    const selected = Array.isArray(body?.items) ? body.items : [];
+    if (!originalOrderId || !exchangeOrderId || !selected.length) {
+      throw new BadRequestException("Phải chọn đơn gốc, đơn đang giao và hàng cũ cần thu hồi.");
+    }
+    const [original, exchange] = await Promise.all([
+      this.prisma.order.findFirst({ where: { OR: [{ id: originalOrderId }, { orderCode: originalOrderId }] } }),
+      this.prisma.order.findFirst({ where: { OR: [{ id: exchangeOrderId }, { orderCode: exchangeOrderId }] }, include: { shipment: true } }),
+    ]);
+    if (!original || !exchange || original.id === exchange.id) throw new BadRequestException("Không tìm thấy hai đơn hợp lệ.");
+    this.ensureBranch(user, original.branchId);
+    this.ensureBranch(user, exchange.branchId);
+    const normalize = (v: any) => String(v || "").replace(/\D/g, "");
+    const phonesA = [original.customerPhone, original.shippingPhone].map(normalize).filter(Boolean);
+    const phonesB = [exchange.customerPhone, exchange.shippingPhone].map(normalize).filter(Boolean);
+    if (!phonesA.some(v => phonesB.includes(v))) throw new BadRequestException("SĐT hai đơn khác nhau; cần quản trị viên xác minh.");
+    const picked = new Map<string, number>();
+    for (const row of selected) {
+      const id = String(row.orderItemId || ""); const qty = Number(row.qty);
+      if (!id || !Number.isInteger(qty) || qty <= 0 || picked.has(id)) throw new BadRequestException("Danh sách hàng thu hồi không hợp lệ.");
+      picked.set(id, qty);
+    }
+    const orderItems = await this.prisma.orderItem.findMany({ where: { orderId: original.id, id: { in: Array.from(picked.keys()) } } });
+    if (orderItems.length !== picked.size) throw new BadRequestException("Có sản phẩm không thuộc đơn gốc.");
+    await this.validateReturnQuantity(original.id, orderItems.map(i => ({ orderItemId: i.id, qty: picked.get(i.id) })));
+    const qtyAmount = orderItems.reduce((sum, item) => sum + this.n(item.unitPrice) * (picked.get(item.id) || 0), 0);
+    if (!original.branchId) throw new BadRequestException("Đơn gốc chưa xác định chi nhánh nhận hàng.");
+    const userLabel = user?.name || user?.username || user?.id || "Nhân viên";
+    return this.prisma.$transaction(async (tx) => {
+      const currentLink = await tx.returnExchange.findFirst({ where: { exchangeOrderId: exchange.id, status: { not: "CANCELLED" } }, select: { code: true } });
+      if (currentLink) throw new BadRequestException(`Đơn giao đã liên kết ${currentLink.code}; không tạo phiếu thứ hai.`);
+      const created = await tx.returnExchange.create({ data: {
+        code: this.code(), originalOrderId: original.id, originalBranchId: original.branchId,
+        originalStaffId: original.createdByStaffId || null, originalStaffName: original.createdByStaffName || null,
+        handledByStaffId: user?.id || null, handledByStaffName: String(userLabel),
+        handledAtBranchId: original.branchId, returnReceiveBranchId: original.branchId,
+        exchangeIssueBranchId: exchange.branchId || null,
+        type: "RETURN", status: "PENDING",
+        returnAmount: new Prisma.Decimal(qtyAmount), exchangeAmount: new Prisma.Decimal(0),
+        differenceAmount: new Prisma.Decimal(qtyAmount), refundAmount: new Prisma.Decimal(0), extraChargeAmount: new Prisma.Decimal(0),
+        shippingFee: new Prisma.Decimal(0), customerPayableAmount: new Prisma.Decimal(0),
+        exchangeOrderId: exchange.id, exchangeOrderCode: exchange.orderCode,
+        exchangeShipmentId: exchange.shipment?.id || null,
+        exchangeTrackingCode: exchange.shipment?.trackingCode || null,
+        exchangeCarrier: exchange.shipment?.carrier || null,
+        note: `[MANUAL_COLLECTION] Hàng khách phát sinh trả sau khi tạo đơn giao. Chờ kho nhận; CHƯA cấn trừ COD hoặc công nợ. Nhân viên: ${userLabel}. ${String(body?.note || "").slice(0, 300)}`,
+        items: { create: orderItems.map(item => ({
+          itemType: "RETURN", orderItemId: item.id, variantId: item.variantId || null,
+          sku: item.sku || null, productName: item.productName || null,
+          qty: picked.get(item.id) || 0,
+          unitPrice: new Prisma.Decimal(this.n(item.unitPrice)),
+          refundPrice: new Prisma.Decimal(this.n(item.unitPrice)),
+          lineTotal: new Prisma.Decimal(this.n(item.unitPrice) * (picked.get(item.id) || 0)),
+          reason: "Thu hồi phát sinh sau khi tạo vận đơn giao hàng",
+        })) },
+      }});
+      return { id: created.id, code: created.code, status: "PENDING", originalOrderCode: original.orderCode,
+        exchangeOrderCode: exchange.orderCode, warning: "CHƯA tự cấn trừ công nợ, đổi COD hay nhập kho. Phải xác nhận hàng về và xử lý tiền riêng." };
+    });
+  }
+
+  async linkExistingReturnToOrder(body: any, user?: any) {
+    const returnId = String(body?.returnId || "").trim();
+    const exchangeOrderId = String(body?.exchangeOrderId || "").trim();
+    if (!returnId || !exchangeOrderId) throw new BadRequestException("Thiếu phiếu RTN hoặc đơn giao mới.");
+    const [rtn, exchange] = await Promise.all([
+      this.prisma.returnExchange.findFirst({ where: { OR: [{ id: returnId }, { code: returnId }] }, include: { items: true } }),
+      this.prisma.order.findFirst({ where: { OR: [{ id: exchangeOrderId }, { orderCode: exchangeOrderId }] }, include: { shipment: true } }),
+    ]);
+    if (!rtn || !exchange) throw new BadRequestException("Không tìm thấy phiếu RTN hoặc đơn giao mới.");
+    if (rtn.status === "CANCELLED") throw new BadRequestException("Phiếu RTN đã hủy.");
+    if (rtn.originalOrderId === exchange.id) throw new BadRequestException("Đơn giao và đơn gốc không được trùng nhau.");
+    if (rtn.exchangeOrderId && rtn.exchangeOrderId !== exchange.id) throw new BadRequestException("Phiếu đã liên kết với đơn giao khác.");
+    if (!(rtn.items || []).some(i => i.itemType === "RETURN")) throw new BadRequestException("Phiếu không có hàng khách trả.");
+    const original = await this.prisma.order.findUnique({ where: { id: rtn.originalOrderId } });
+    if (!original) throw new BadRequestException("Không tìm thấy đơn gốc.");
+    this.ensureBranch(user, rtn.returnReceiveBranchId || rtn.originalBranchId || original.branchId);
+    this.ensureBranch(user, exchange.branchId);
+    const normalize = (v: any) => String(v || "").replace(/\D/g, "");
+    const originalPhones = [original.customerPhone, original.shippingPhone].map(normalize).filter(Boolean);
+    const exchangePhones = [exchange.customerPhone, exchange.shippingPhone].map(normalize).filter(Boolean);
+    if (!originalPhones.some(p => exchangePhones.includes(p))) {
+      throw new BadRequestException("SĐT hai đơn không khớp. Không thể tự liên kết; cần kiểm tra thủ công với quản trị viên.");
+    }
+    const confirmedBy = user?.name || user?.fullName || user?.username || user?.id || "Nhân viên";
+    return this.prisma.$transaction(async tx => {
+      const other = await tx.returnExchange.findFirst({ where: { exchangeOrderId: exchange.id, id: { not: rtn.id }, status: { not: "CANCELLED" } }, select: { code: true } });
+      if (other) throw new BadRequestException(`Đơn giao đã có phiếu liên kết ${other.code}.`);
+      const updated = await tx.returnExchange.updateMany({
+        where: { id: rtn.id, exchangeOrderId: null },
+        data: { exchangeOrderId: exchange.id, exchangeOrderCode: exchange.orderCode,
+          exchangeShipmentId: exchange.shipment?.id || null,
+          exchangeTrackingCode: exchange.shipment?.trackingCode || null,
+          exchangeCarrier: exchange.shipment?.carrier || null,
+          note: [rtn.note, `[MANUAL_EXCHANGE_LINK] ${confirmedBy} (${new Date().toISOString()}) liên kết đơn ${exchange.orderCode}; không thay đổi COD/kho/công nợ`].filter(Boolean).join(" | ") },
+      });
+      if (updated.count !== 1) throw new BadRequestException("Phiếu vừa được người khác liên kết hoặc đã có đơn giao.");
+      return { ok: true, returnCode: rtn.code, originalOrderCode: original.orderCode, exchangeOrderCode: exchange.orderCode,
+        warning: "Chỉ liên kết lịch sử; không điều chỉnh COD, công nợ hoặc tồn kho. Cần đối chiếu riêng." };
+    });
   }
 
   async getReturns(params: any, user?: any) {
