@@ -1,4 +1,4 @@
-import { BadRequestException, Controller, Headers, Post, Body, UnauthorizedException } from "@nestjs/common";
+import { BadRequestException, Controller, Headers, HttpCode, Post, Body, UnauthorizedException } from "@nestjs/common";
 import { timingSafeEqual } from "crypto";
 import { ShipmentService } from "./shipment.service";
 
@@ -8,6 +8,7 @@ export class ViettelPostWebhookController {
   constructor(private readonly shipments: ShipmentService) {}
 
   @Post()
+  @HttpCode(200)
   async receive(@Body() body: any, @Headers("authorization") authorization?: string) {
     const secret = String(process.env.VIETTELPOST_WEBHOOK_SECRET || "").trim();
     if (secret.length < 24) throw new UnauthorizedException("Webhook not configured");
