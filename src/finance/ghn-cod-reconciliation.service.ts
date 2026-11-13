@@ -165,9 +165,14 @@ export class GhnCodReconciliationService {
       orderBy: { createdAt: "asc" },
     });
 
+    const shipmentIds = Array.from(new Set(rows.map((row: any) => row.shipmentId).filter(Boolean)));
+    const shipments = shipmentIds.length
+      ? await this.prisma.shipment.findMany({ where: { id: { in: shipmentIds as string[] } }, select: { id: true, codAmount: true } })
+      : [];
+    const systemCodByShipment = new Map(shipments.map((shipment) => [shipment.id, Number(shipment.codAmount || 0)]));
     return {
       batch: this.buildHistoryBatchSummary(batch, rows),
-      rows: rows.map((row: any) => this.mapHistoryRow(row)),
+      rows: rows.map((row: any) => this.mapHistoryRow(row, systemCodByShipment)),
     };
   }
 
@@ -218,7 +223,7 @@ export class GhnCodReconciliationService {
     };
   }
 
-  private mapHistoryRow(row: any) {
+  private mapHistoryRow(row: any, systemCodByShipment: Map<string, number> = new Map()) {
     return {
       id: row.id,
       batchId: row.batchId || null,
@@ -229,6 +234,7 @@ export class GhnCodReconciliationService {
       customerOrderCode: row.customerOrderCode || null,
       ghnStatus: row.ghnStatus || null,
       codAmount: Number(row.codAmount || 0),
+      systemCodAmount: row.shipmentId && systemCodByShipment.has(row.shipmentId) ? systemCodByShipment.get(row.shipmentId) : null,
       serviceFee: Number(row.serviceFee || 0),
       totalReconcileAmount: Number(row.totalReconcileAmount || 0),
       reconciliationStatus: row.reconciliationStatus || null,
@@ -282,6 +288,7 @@ export class GhnCodReconciliationService {
       MATCHED_BY_PARTIAL_DELIVERY: "Khớp qua giao 1 phần",
       PARTIAL_RETURN_NOT_RECEIVED: "Chưa nhập kho hoàn",
       COD_MISMATCH: "Lệch COD",
+      MISSING_PARTNER_COD: "Chưa có COD đối tác",
       FEE_MISMATCH: "Lệch phí",
       MISMATCH: "Lệch đối soát",
       NOT_FOUND: "Không tìm thấy đơn",
@@ -620,25 +627,41 @@ export class GhnCodReconciliationService {
 
 
   async parseManual(body: any = {}) {
-    const codes = this.extractManualCodes(
-      body?.codesText || body?.text || body?.orderCodes || body?.codes || "",
-    );
-
-    if (!codes.length) {
-      throw new BadRequestException(
-        "Chưa có mã đơn để đối soát. Dán mã đơn nội bộ hoặc mã vận đơn GHN trước.",
-      );
+    // Mỗi dòng: MÃ_VẬN_ĐƠN [TAB hoặc | hoặc ;] COD_GHN [TAB hoặc | hoặc ;] PHÍ_GHN.
+    // Chỉ có mã: không được giả định COD đối tác bằng COD nội bộ.
+    const rawManual = String(body?.codesText || body?.text || body?.orderCodes || body?.codes || "");
+    const manualAmountByCode = new Map<string, { cod: number; fee: number | null }>();
+    for (const line of rawManual.split(/\r?\n/)) {
+      const parts = line.split(/[\t|;]/).map((part) => part.trim()).filter(Boolean);
+      if (parts.length < 2 || !/^[A-Z0-9_-]{5,}$/i.test(parts[0])) continue;
+      const parseAmount = (value: string): number | null => {
+        const normalized = value.replace(/(?:đ|vnd|\s)/gi, "").replace(/[.,]/g, "");
+        return /^-?\d+$/.test(normalized) ? Number(normalized) : null;
+      };
+      const cod = parseAmount(parts[1]);
+      if (cod === null || cod < 0) throw new BadRequestException(`COD GHN không hợp lệ tại mã ${parts[0]}`);
+      const fee = parts[2] ? parseAmount(parts[2]) : null;
+      if (parts[2] && (fee === null || fee < 0)) throw new BadRequestException(`Phí GHN không hợp lệ tại mã ${parts[0]}`);
+      manualAmountByCode.set(parts[0].toUpperCase(), { cod, fee });
     }
-
+    // Tránh lấy các số tiền thành mã đơn khi dán nhiều cột từ Excel.
+    const parsedManualCodes = rawManual.split(/\r?\n/).flatMap((line) => {
+      const parts = line.split(/[\t|;]/).map((part) => part.trim()).filter(Boolean);
+      return parts.length >= 2 && /^[A-Z0-9_-]{5,}$/i.test(parts[0]) ? [parts[0]] : this.extractManualCodes(line);
+    });
+    const actualCodes = Array.from(new Set(parsedManualCodes)).slice(0, 500);
+    if (!actualCodes.length) {
+      throw new BadRequestException("Chưa có mã đơn hợp lệ để đối soát.");
+    }
     const transferCode = body?.transferCode || `MANUAL_${Date.now()}`;
     const transferDate = body?.transferDate || null;
 
     const batch = await this.prisma.ghnCodReconciliationBatch.create({
       data: {
-        fileName: `Đối soát nhập tay ${codes.length} đơn`,
+        fileName: `Đối soát nhập tay ${actualCodes.length} đơn`,
         transferCode,
         transferDate,
-        totalRows: codes.length,
+        totalRows: actualCodes.length,
         totalAmount: 0,
         transferFee: 0,
         netAmount: 0,
@@ -650,7 +673,7 @@ export class GhnCodReconciliationService {
     });
 
     const enrichedRows = await Promise.all(
-      codes.map(async (code, index) => {
+      actualCodes.map(async (code, index) => {
         const issueTypes: string[] = [];
         const isPartialReturn = /_PR$/i.test(code);
         const baseCode = isPartialReturn ? code.replace(/_PR$/i, "") : code;
@@ -727,9 +750,22 @@ export class GhnCodReconciliationService {
 
         const systemCodAmount = Number((shipment as any)?.codAmount || 0);
         const systemShippingFee = Number((shipment as any)?.shippingFee || 0);
-        const codAmount = systemCodAmount;
-        const serviceFee = systemShippingFee;
+        const entered = manualAmountByCode.get(code.toUpperCase());
+        const codAmount = entered?.cod ?? 0;
+        const serviceFee = entered?.fee ?? systemShippingFee;
         const totalReconcileAmount = codAmount - serviceFee;
+        if (!entered) {
+          issueTypes.push("MISSING_PARTNER_COD");
+        } else if (finalOrder && codAmount !== systemCodAmount) {
+          if (partialRecord && Number(partialRecord.adjustedCod || 0) === codAmount) {
+            issueTypes.push("MATCHED_BY_PARTIAL_DELIVERY");
+          } else {
+            issueTypes.push("COD_MISMATCH");
+          }
+        }
+        if (entered?.fee !== null && entered?.fee !== undefined && entered.fee !== systemShippingFee) {
+          issueTypes.push("FEE_MISMATCH");
+        }
         const adjustedCod = Number(partialRecord?.adjustedCod || 0);
         const originalCod = Number(partialRecord?.originalCod || 0);
         const returnReceivedAt = partialRecord?.returnReceivedAt || null;
@@ -861,7 +897,7 @@ export class GhnCodReconciliationService {
     return {
       batch: {
         id: batch.id,
-        fileName: `Đối soát nhập tay ${codes.length} đơn`,
+        fileName: `Đối soát nhập tay ${actualCodes.length} đơn`,
         transferCode,
         transferDate,
         totalRows: enrichedRows.length,
@@ -882,7 +918,7 @@ export class GhnCodReconciliationService {
         notFoundOrder: enrichedRows.filter((r) =>
           r.issueTypes.includes("NOT_FOUND_INTERNAL_ORDER"),
         ).length,
-        codMismatch: 0,
+        codMismatch: enrichedRows.filter((r) => r.issueTypes.includes("COD_MISMATCH")).length,
         feeMismatch: 0,
         partialReturn: enrichedRows.filter((r) =>
           r.issueTypes.includes("PARTIAL_RETURN"),
@@ -949,6 +985,10 @@ export class GhnCodReconciliationService {
 
     if (!rows.length) {
       throw new BadRequestException("Không có dòng đối soát để xác nhận.");
+    }
+
+    if (rows.some((row: any) => this.rowIssues(row).includes("MISSING_PARTNER_COD"))) {
+      throw new BadRequestException("Có đơn chưa nhập COD GHN thực tế. Không thể xác nhận thanh toán bằng COD mặc định của hệ thống.");
     }
 
     const now = new Date();
