@@ -9,12 +9,13 @@ import { SpxService } from "./spx.service";
 import { CarrierInventoryService } from "./carrier-inventory.service";
 import { AuthTotpModule } from "../auth-totp/auth-totp.module";
 import { AhamoveWebhookController } from "./ahamove-webhook.controller";
+import { ViettelPostWebhookController } from "./viettelpost-webhook.controller";
 
 @Module({
   imports: [
     AuthTotpModule,
   ],
-  controllers: [ShipmentController, AhamoveWebhookController],
+  controllers: [ShipmentController, AhamoveWebhookController, ViettelPostWebhookController],
   providers: [
     ShipmentService,
     GhnClient,

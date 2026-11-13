@@ -77,7 +77,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
   private viettelPostTrackingSyncTimer: NodeJS.Timeout | null = null;
   private viettelPostTrackingSyncRunning = false;
   private readonly viettelPostTrackingSyncCronEnabled = !["0", "false", "off", "no"].includes(
-    String(process.env.SHIPMENT_VIETTELPOST_SYNC_CRON_ENABLED || "true").toLowerCase(),
+    String(process.env.SHIPMENT_VIETTELPOST_SYNC_CRON_ENABLED || "false").toLowerCase(),
   );
   private readonly viettelPostTrackingSyncIntervalMs = Math.max(
     60_000,
@@ -1519,33 +1519,14 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     const isViettelPost = carrierUpper.includes("VIETTEL");
 
     if (isViettelPost) {
-      try {
-        await this.trackViettelPostByShipmentId(shipment.id);
-      } catch (error) {
-        this.logger.warn(
-          `[TRACKING_PENDING] ${shipment.id} | ${error instanceof Error ? error.message : error
-          }`
-        );
-
-        return {
-          source: "pending_sync",
-          cached: false,
-          shipment: {
-            id: shipment.id,
-            trackingCode: shipment.trackingCode,
-            carrier: "VIETTELPOST",
-            shippingStatus: shipment.shippingStatus || "CREATED",
-            partnerStatus: "ViettelPost đang đồng bộ hành trình",
-          },
-          tracking: {
-            carrier: "VIETTELPOST",
-            trackingCode: shipment.trackingCode,
-            shippingStatus: shipment.shippingStatus || "CREATED",
-            partnerStatus: "ViettelPost đang đồng bộ hành trình",
-            timeline: [],
-          },
-          timeline: [],
-        };
+      // Once Partner webhook is configured, API polling is not an authoritative
+      // source and currently returns WAF 403. Show the persisted webhook state.
+      if (!process.env.VIETTELPOST_WEBHOOK_SECRET) {
+        try {
+          await this.trackViettelPostByShipmentId(shipment.id);
+        } catch (error) {
+          this.logger.warn(`[TRACKING_PENDING] ${shipment.id} | ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
 
       const updated = await this.prisma.shipment.findUnique({ where: { id: shipment.id } });
@@ -1559,7 +1540,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       const expiresAt = new Date(now.getTime() + this.trackingCacheMinutes * 60 * 1000);
 
       return {
-        source: "viettelpost_live",
+        source: process.env.VIETTELPOST_WEBHOOK_SECRET ? "viettelpost_webhook_cache" : "viettelpost_live",
         cached: false,
         fetchedAt: now,
         expiresAt,
@@ -1911,15 +1892,10 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     const previousReceivedByName = previousMeta.returnReceivedByName || previousMeta.return_received_by_name || null;
 
     const status = String(shippingStatus || "").toUpperCase();
-    // Giữ liên kết đổi hàng khi GHN cron ghi đè metadata bằng raw tracking.
-    const exchangeMeta = previousMeta.exchangeCollection ? { exchangeCollection: previousMeta.exchangeCollection } : {};
-    const exchangeCarrierMode = previousMeta.ghnPartialDelivery === true ? { ghnPartialDelivery: true } : {};
 
     if (status === "RETURNED") {
       return {
         ...rawMeta,
-        ...exchangeMeta,
-        ...exchangeCarrierMode,
         returnReceiveStatus: previousReturnReceiveStatus === "RECEIVED" ? "RECEIVED" : "WAITING_CONFIRM",
         returnReceivedAt: previousReceivedAt,
         returnReceivedById: previousReceivedById,
@@ -1930,8 +1906,6 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     if (status === "RETURNING") {
       return {
         ...rawMeta,
-        ...exchangeMeta,
-        ...exchangeCarrierMode,
         returnReceiveStatus: previousReturnReceiveStatus === "RECEIVED" ? "RECEIVED" : "RETURNING",
         returnReceivedAt: previousReceivedAt,
         returnReceivedById: previousReceivedById,
@@ -1941,8 +1915,6 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
 
     return {
       ...rawMeta,
-      ...exchangeMeta,
-      ...exchangeCarrierMode,
       ...(previousReturnReceiveStatus ? { returnReceiveStatus: previousReturnReceiveStatus } : {}),
       ...(previousReceivedAt ? { returnReceivedAt: previousReceivedAt } : {}),
       ...(previousReceivedById ? { returnReceivedById: previousReceivedById } : {}),
@@ -3819,8 +3791,24 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
   }
 
   private mapViettelPostShippingStatus(input?: string | null) {
-    const status = this.mapShippingStatus(input);
-    return status === "NOT_CREATED" ? "CREATED" : status;
+    const raw = String(input ?? "").trim();
+    // Viettel Post reports numeric ORDER_STATUS codes, not just English labels.
+    // Keep carrier delivery separate from COD settlement / order payment.
+    const codes: Record<string, string> = {
+      "100": "CREATED", "102": "CREATED", "103": "CREATED", "104": "PICKING",
+      "105": "PICKING", "200": "PICKING", "202": "IN_TRANSIT",
+      "300": "IN_TRANSIT", "400": "IN_TRANSIT", "509": "IN_TRANSIT",
+      "500": "DELIVERING", "506": "DELIVERING", "507": "DELIVERING",
+      "508": "DELIVERING", "550": "DELIVERING", "570": "DELIVERING",
+      "501": "DELIVERED", "505": "FAILED", "502": "RETURNING",
+      "515": "RETURNING", "504": "RETURNED",
+      "101": "CANCELLED", "107": "CANCELLED", "201": "CANCELLED",
+      "503": "FAILED",
+    };
+    if (Object.prototype.hasOwnProperty.call(codes, raw)) return codes[raw];
+    const status = this.mapShippingStatus(raw);
+    // Do not turn an empty/unrecognized carrier response into a new order.
+    return status;
   }
 
   private getViettelPostOrderNumber(raw: any) {
@@ -3855,19 +3843,27 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
   }
 
   private getViettelPostStatus(raw: any) {
-    return String(
-      raw?.ORDER_STATUS ||
-      raw?.ORDER_STATUS_NAME ||
-      raw?.STATUS_NAME ||
-      raw?.status_name ||
-      raw?.status ||
-      raw?.data?.ORDER_STATUS ||
-      raw?.data?.ORDER_STATUS_NAME ||
-      raw?.data?.STATUS_NAME ||
-      raw?.data?.status_name ||
-      raw?.data?.status ||
-      "CREATED"
-    );
+    // Never use HTTP wrapper `status` (e.g. 200) as an order status.
+    // GET getOrderDetailV3 can wrap details under body/data/order.
+    const roots: any[] = [raw];
+    for (let i = 0; i < roots.length && i < 20; i += 1) {
+      const row = roots[i];
+      if (!row || typeof row !== "object") continue;
+      if (Array.isArray(row)) {
+        roots.push(...row.slice(0, 3));
+        continue;
+      }
+      for (const key of ["ORDER_STATUS", "order_status", "orderStatus", "ORDER_STATUS_CODE", "STATUS_CODE", "trangThai"]) {
+        const value = row[key];
+        if (value !== null && value !== undefined && String(value).trim() !== "") {
+          return String(value).trim();
+        }
+      }
+      for (const key of ["data", "body", "order", "orderInfo", "result", "content"]) {
+        if (row[key] && typeof row[key] === "object") roots.push(row[key]);
+      }
+    }
+    throw new BadRequestException("ViettelPost không trả ORDER_STATUS trong chi tiết vận đơn; giữ nguyên trạng thái cũ.");
   }
 
   private buildViettelPostTrackingUrl(orderNumber: string) {
@@ -5318,6 +5314,113 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  /**
+   * Viettel Post Partner webhook: DATA.ORDER_NUMBER / DATA.ORDER_STATUS.
+   * Called only after the controller authenticates Authorization and TOKEN.
+   * Never trusts ORDER_REFERENCE as a lookup key and never marks COD settled.
+   */
+  async receiveViettelPostWebhook(payload: any) {
+    const data = payload?.DATA;
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new BadRequestException("Webhook ViettelPost thiếu DATA");
+    }
+    const trackingCode = String(data.ORDER_NUMBER ?? "").trim();
+    const code = String(data.ORDER_STATUS ?? "").trim();
+    if (!trackingCode || trackingCode.length > 100 || !/^\d+$/.test(code)) {
+      throw new BadRequestException("Webhook ViettelPost thiếu mã vận đơn hoặc trạng thái hợp lệ");
+    }
+    // Do not normalize unknown carrier status to CREATED.
+    const knownCodes = new Set([
+      "100","101","102","103","104","105","107","200","201","202","300","400",
+      "500","501","502","503","504","505","506","507","508","509","515","550","570",
+    ]);
+    if (!knownCodes.has(code)) {
+      this.logger.warn(`[VIETTELPOST_WEBHOOK] unsupported status=${code} tracking=${trackingCode}`);
+      return { ok: true, ignored: "unknown_status" };
+    }
+    const parsedDate = (() => {
+      const str = String(data.ORDER_STATUSDATE ?? "").trim();
+      const match = /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})$/.exec(str);
+      if (!match) return null;
+      const [_, d, m, y, h, min, sec] = match;
+      const dt = new Date(Date.UTC(+y, +m - 1, +d, +h - 7, +min, +sec));
+      // round-trip by Vietnam offset to catch invalid dates
+      const local = new Date(dt.getTime() + 7 * 3600_000);
+      if (local.getUTCDate() !== +d || local.getUTCMonth() !== +m - 1 || local.getUTCFullYear() !== +y ||
+          local.getUTCHours() !== +h || local.getUTCMinutes() !== +min || local.getUTCSeconds() !== +sec) return null;
+      return dt;
+    })();
+    if (!parsedDate) throw new BadRequestException("ORDER_STATUSDATE không đúng dd/MM/yyyy HH:mm:ss");
+    if (parsedDate.getTime() > Date.now() + 10 * 60_000) {
+      throw new BadRequestException("Thời điểm trạng thái nằm trong tương lai");
+    }
+    const reportedStatus = this.mapViettelPostShippingStatus(code);
+    // Never persist the TOKEN (same secret as the Authorization header).
+    const safePayload = { DATA: { ...data } };
+    delete safePayload.DATA.TOKEN;
+    return this.prisma.$transaction(async (tx) => {
+      const shipment = await tx.shipment.findFirst({ where: { carrier: "VIETTELPOST", trackingCode } });
+      if (!shipment) {
+        this.logger.warn(`[VIETTELPOST_WEBHOOK] unknown tracking=${trackingCode}`);
+        return { ok: true, ignored: "unknown_tracking" };
+      }
+      // Compare carrier event timestamps, not lastSyncedAt (which is polling time).
+      const latest = await tx.shipmentTimelineEvent.findFirst({
+        where: { shipmentId: shipment.id, source: "viettelpost_webhook" },
+        orderBy: { eventTime: "desc" },
+      });
+      if (latest && new Date(latest.eventTime).getTime() > parsedDate.getTime()) {
+        return { ok: true, ignored: "stale_event" };
+      }
+      const exists = await tx.shipmentTimelineEvent.findFirst({
+        where: { shipmentId: shipment.id, source: "viettelpost_webhook", eventTime: parsedDate, partnerStatus: code },
+      });
+      if (exists) return { ok: true, ignored: "duplicate" };
+      const prior = String(shipment.shippingStatus || "").toUpperCase();
+      // Never regress a terminal carrier status due to a late/reordered webhook.
+      const terminal = ["DELIVERED", "RETURNED", "CANCELLED"];
+      const shippingStatus = terminal.includes(prior) && reportedStatus !== prior ? prior : reportedStatus;
+      const metadata = (shipment.metadata && typeof shipment.metadata === "object" && !Array.isArray(shipment.metadata))
+        ? shipment.metadata as Record<string, any> : {};
+      await tx.shipment.update({
+        where: { id: shipment.id },
+        data: {
+          shippingStatus,
+          partnerStatus: shippingStatus === prior && reportedStatus !== prior ? shipment.partnerStatus : code,
+          lastSyncedAt: new Date(),
+          metadata: { ...metadata, carrier: "VIETTELPOST", lastWebhookStatus: code,
+            lastWebhookAt: parsedDate.toISOString(), lastWebhookStatusName: String(data.STATUS_NAME || "").slice(0, 150) },
+        },
+      });
+      await this.appendShipmentTimelineEvent(tx, {
+        shipmentId: shipment.id,
+        orderId: shipment.orderId,
+        carrier: "VIETTELPOST",
+        trackingCode,
+        status: reportedStatus,
+        partnerStatus: code,
+        title: String(data.STATUS_NAME || this.timelineTitle(reportedStatus, "VIETTELPOST")).slice(0, 150),
+        description: String(data.NOTE || "").slice(0, 500) || null,
+        eventTime: parsedDate,
+        raw: safePayload,
+        source: "viettelpost_webhook",
+        locationText: String(data.LOCALION_CURRENTLY || "").slice(0, 150) || null,
+      });
+      // Physical delivery does NOT settle COD, and does NOT close the order.
+      // Retain payment/return workflow as source of truth for COMPLETED.
+      if (shippingStatus === "DELIVERED") {
+        await tx.order.update({ where: { id: shipment.orderId }, data: { fulfillmentStatus: "FULFILLED" } });
+      } else if (["PICKING", "IN_TRANSIT", "DELIVERING", "FAILED", "RETURNING"].includes(shippingStatus)) {
+        const order = await tx.order.findUnique({ where: { id: shipment.orderId }, select: { status: true } });
+        if (order && order.status !== "COMPLETED" && order.status !== "CANCELLED") {
+          await tx.order.update({ where: { id: shipment.orderId }, data: { status: "SHIPPED", fulfillmentStatus: "PROCESSING" } });
+        }
+      }
+      this.logger.log(`[VIETTELPOST_WEBHOOK] tracking=${trackingCode} code=${code} shipping=${shippingStatus}`);
+      return { ok: true, shipmentId: shipment.id, status: shippingStatus };
+    });
+  }
+
   async trackViettelPostByShipmentId(id: string, source = "manual_refresh") {
     const shipment = await this.prisma.shipment.findUnique({
       where: { id },
@@ -5335,8 +5438,13 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
 
     const raw = await this.viettelPostClient.trackOrder(trackingCode);
     const partnerStatus = this.getViettelPostStatus(raw);
-    const shippingStatus = this.mapViettelPostShippingStatus(partnerStatus);
+    const reportedStatus = this.mapViettelPostShippingStatus(partnerStatus);
+    const shippingStatus = String(shipment.shippingStatus || "").toUpperCase() === "DELIVERED" &&
+      reportedStatus !== "DELIVERED" ? "DELIVERED" : reportedStatus;
     const trackingUrl = this.buildViettelPostTrackingUrl(trackingCode);
+    if (!["CREATED", "PICKING", "IN_TRANSIT", "DELIVERING", "DELIVERED", "FAILED", "RETURNING", "RETURNED", "CANCELLED"].includes(shippingStatus)) {
+      throw new BadRequestException(`Chưa nhận diện được trạng thái ViettelPost: ${partnerStatus}. Giữ nguyên dữ liệu cũ.`);
+    }
 
     const previousShippingStatus = String(shipment.shippingStatus || "").toUpperCase();
     const previousPartnerStatus = String(shipment.partnerStatus || "").toUpperCase();
@@ -5385,6 +5493,15 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       codReconciliationStatus: (shipment as any).codReconciliationStatus,
     });
     if (Object.keys(orderSyncData).length > 0) {
+      // Delivery success is not the same as payment cleared. Keep COD orders
+      // pending until a separate payment/reconciliation flow confirms them.
+      if (shippingStatus === "DELIVERED" && this.shouldMarkPendingCod({
+        codAmount: Number(shipment.codAmount || 0),
+        paymentStatus: orderForSync?.paymentStatus,
+        codReconciliationStatus: (shipment as any).codReconciliationStatus,
+      })) {
+        (orderSyncData as any).status = "SHIPPED";
+      }
       await this.prisma.order.update({
         where: { id: shipment.orderId },
         data: orderSyncData as any,

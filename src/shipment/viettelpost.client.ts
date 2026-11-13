@@ -129,10 +129,14 @@ export class ViettelPostClient {
     }
 
     if (!res.ok) {
+      // Never dump an entire HTML WAF challenge or any token fragments to logs.
+      const diagnostic = typeof data === "string"
+        ? (data.includes("Cloudflare") || data.includes("cloudflare")
+          ? "HTML/WAF challenge"
+          : "non-JSON response")
+        : String(data?.message || data?.Message || data?.error || "HTTP error").slice(0, 180);
       this.logger.error(
-        `[VIETTELPOST ERROR] ${path} | status=${res.status} | tokenTail=${
-          token ? token.slice(-6) : "none"
-        } | response=${text}`
+        `[VIETTELPOST ERROR] ${method} ${path.split("?")[0]} | http=${res.status} | ${diagnostic}`
       );
 
       throw new BadRequestException(
@@ -434,19 +438,64 @@ export class ViettelPostClient {
     });
   }
 
-  trackOrder(orderNumber: string) {
-    const cleanOrderNumber = String(orderNumber || "").trim();
+  /**
+   * VTP's documented partner endpoint /order/order-filter is POST. The GET
+   * /order/getOrderDetailV3 endpoint returned an HTML 403 WAF challenge in
+   * our real environment. Never treat a successful HTTP response as a
+   * successfully tracked order: require an exact order number and status.
+   *
+   * FilterForm schema: { filter, from_date?, to_date?, list_inventory?,
+   * list_status? }; `page` is a required query integer.
+   */
+  async trackOrder(orderNumber: string) {
+    const trackingCode = String(orderNumber || "").trim();
+    if (!trackingCode) throw new BadRequestException("Thiếu mã vận đơn ViettelPost");
 
-    if (!cleanOrderNumber) {
-      throw new BadRequestException("Thiếu mã vận đơn ViettelPost");
+    const filterPath = this.endpoint("TRACK_FILTER", "/order/order-filter");
+    const separator = filterPath.includes("?") ? "&" : "?";
+    const path = `${filterPath}${separator}page=0`;
+    const payload = await this.request<any>(path, {
+      method: "POST",
+      body: { filter: trackingCode, list_status: [], list_inventory: [] },
+    });
+
+    // Partner installations can return either a bare array or a paginated
+    // envelope. Only inspect plausible result collections; never synthesize
+    // a delivery status from an HTTP status or an unrelated order.
+    const candidates: any[] = [payload];
+    const inspected = new Set<any>();
+    const records: any[] = [];
+    for (let i = 0; i < candidates.length && i < 32; i += 1) {
+      const value = candidates[i];
+      if (!value || typeof value !== "object" || inspected.has(value)) continue;
+      inspected.add(value);
+      if (Array.isArray(value)) {
+        records.push(...value.slice(0, 200).filter((v: any) => v && typeof v === "object" && !Array.isArray(v)));
+        continue;
+      }
+      // A non-paginated direct order detail is also valid if it matches.
+      if (value.ORDER_NUMBER || value.orderNumber || value.order_number) records.push(value);
+      for (const key of ["data", "orders", "list", "items", "rows", "content", "result", "results", "orderList", "listOrder", "listOrders", "records"]) {
+        if (value[key] && typeof value[key] === "object") candidates.push(value[key]);
+      }
     }
 
-    return this.request<any>(this.endpoint("TRACK", "/order/getOrderStatus"), {
-      method: "POST",
-      body: {
-        ORDER_NUMBER: cleanOrderNumber,
-      },
-    });
+    const matched = records.find((row: any) =>
+      String(row.ORDER_NUMBER ?? row.orderNumber ?? row.order_number ?? "").trim() === trackingCode
+    );
+    if (!matched) {
+      throw new BadRequestException(
+        `ViettelPost order-filter không trả bản ghi khớp vận đơn ${trackingCode}; chưa đồng bộ.`,
+      );
+    }
+    const carrierStatus = matched.ORDER_STATUS ?? matched.orderStatus ?? matched.order_status ?? matched.trangThai;
+    if (carrierStatus === undefined || carrierStatus === null || String(carrierStatus).trim() === "") {
+      throw new BadRequestException(
+        `ViettelPost đã tìm thấy ${trackingCode} nhưng thiếu ORDER_STATUS; giữ nguyên trạng thái.`,
+      );
+    }
+    this.logger.log(`[VIETTELPOST_TRACK] verified ${trackingCode} status=${carrierStatus} via order-filter`);
+    return matched;
   }
 
   cancelOrder(orderNumber: string) {
