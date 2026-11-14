@@ -36,6 +36,8 @@ export class GhnClient {
   // are NEVER retried through a second route.
   private readonly gatewayUrl = (process.env.GHN_GATEWAY_URL || "").replace(/\/$/, "");
   private readonly gatewaySecret = process.env.GHN_GATEWAY_SECRET || "";
+  // Test-only override. Never silently fall back to direct when force mode is on.
+  private readonly forceGateway = (process.env.GHN_FORCE_GATEWAY || "").toLowerCase() === "true";
   private readonly directTimeoutMs = Math.max(1000, Number(process.env.GHN_DIRECT_TIMEOUT_MS || 6500));
   private readonly gatewayTimeoutMs = Math.max(1000, Number(process.env.GHN_GATEWAY_TIMEOUT_MS || 12000));
   private readonly circuitMs = Math.max(5000, Number(process.env.GHN_CIRCUIT_MS || 120000));
@@ -107,8 +109,12 @@ export class GhnClient {
     includeShopId = false
   ) {
     const readOnly = this.isReadOnly(method, path);
+    if (this.forceGateway && !this.gatewayEnabled) {
+      this.logger.error("[GHN_FORCE_GATEWAY] enabled but GHN_GATEWAY_URL or GHN_GATEWAY_SECRET is missing");
+      throw new ServiceUnavailableException("GHN_FORCE_GATEWAY bật nhưng chưa cấu hình GHN Gateway");
+    }
     let route: "direct" | "gateway" =
-      this.gatewayEnabled && Date.now() < this.circuitUntil ? "gateway" : "direct";
+      this.forceGateway || (this.gatewayEnabled && Date.now() < this.circuitUntil) ? "gateway" : "direct";
     let response: Response;
     const started = Date.now();
     try {
