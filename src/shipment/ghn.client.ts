@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, ServiceUnavailableException, GatewayTimeoutException } from "@nestjs/common";
 
 @Injectable()
 export class GhnClient {
@@ -32,40 +32,142 @@ export class GhnClient {
     return headers;
   }
 
+  // Network-only failover: GHN application errors (401, invalid address, etc.)
+  // are NEVER retried through a second route.
+  private readonly gatewayUrl = (process.env.GHN_GATEWAY_URL || "").replace(/\/$/, "");
+  private readonly gatewaySecret = process.env.GHN_GATEWAY_SECRET || "";
+  private readonly directTimeoutMs = Math.max(1000, Number(process.env.GHN_DIRECT_TIMEOUT_MS || 6500));
+  private readonly gatewayTimeoutMs = Math.max(1000, Number(process.env.GHN_GATEWAY_TIMEOUT_MS || 12000));
+  private readonly circuitMs = Math.max(5000, Number(process.env.GHN_CIRCUIT_MS || 120000));
+  private circuitUntil = 0;
+
+  private get gatewayEnabled() {
+    return !!(this.gatewayUrl && this.gatewaySecret);
+  }
+
+  // Mutations must NOT be automatically retried after an ambiguous network error.
+  // A create may succeed at GHN even when its response is lost.
+  private isReadOnly(method: "GET" | "POST", path: string) {
+    if (method === "GET") return true;
+    return [
+      "/master-data/ward",
+      "/v2/shipping-order/available-services",
+      "/v2/shipping-order/fee",
+      "/v2/shipping-order/leadtime",
+      "/v2/shipping-order/detail",
+    ].includes(path.split("?")[0]);
+  }
+
+  private async networkFetch(url: string, init: RequestInit, timeoutMs: number) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async directRequest(
+    method: "GET" | "POST",
+    path: string,
+    body?: Record<string, unknown>,
+    includeShopId = false,
+  ) {
+    return this.networkFetch(`${this.baseUrl}${path}`, {
+      method,
+      headers: this.getHeaders(includeShopId),
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    }, this.directTimeoutMs);
+  }
+
+  private async gatewayRequest(
+    method: "GET" | "POST",
+    path: string,
+    body?: Record<string, unknown>,
+    includeShopId = false,
+  ) {
+    if (!this.gatewayEnabled) throw new ServiceUnavailableException("GHN gateway chưa cấu hình");
+    if (!this.gatewayUrl.startsWith("https://")) throw new ServiceUnavailableException("GHN_GATEWAY_URL phải dùng HTTPS");
+    return this.networkFetch(`${this.gatewayUrl}/proxy`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.gatewaySecret}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ method, path, body: body ?? null, includeShopId }),
+      redirect: "error",
+    }, this.gatewayTimeoutMs);
+  }
+
   private async request(
     method: "GET" | "POST",
     path: string,
     body?: Record<string, unknown>,
     includeShopId = false
   ) {
-    const url = `${this.baseUrl}${path}`;
-
-    this.logger.log(
-      `[GHN] ${method} ${path} | shopId=${this.shopId} | body=${JSON.stringify(
-        body || {}
-      )}`
-    );
-
-    const res = await fetch(url, {
-      method,
-      headers: this.getHeaders(includeShopId),
-      ...(body ? { body: JSON.stringify(body) } : {}),
-    });
-
-    const json = await res.json().catch(() => null);
-
-    if (!res.ok || json?.code !== 200) {
-      this.logger.error(
-        `[GHN ERROR] ${path} | status=${res.status} | response=${JSON.stringify(
-          json
-        )}`
-      );
-
-      throw new BadRequestException(
-        json?.message || `GHN request failed: ${path}`
-      );
+    const readOnly = this.isReadOnly(method, path);
+    let route: "direct" | "gateway" =
+      this.gatewayEnabled && Date.now() < this.circuitUntil ? "gateway" : "direct";
+    let response: Response;
+    const started = Date.now();
+    try {
+      response = route === "gateway"
+        ? await this.gatewayRequest(method, path, body, includeShopId)
+        : await this.directRequest(method, path, body, includeShopId);
+    } catch (error: any) {
+      const message = String(error?.cause?.code || error?.name || "NETWORK_ERROR");
+      if (route === "direct" && this.gatewayEnabled) {
+        this.circuitUntil = Date.now() + this.circuitMs;
+        this.logger.warn(`[GHN_DIRECT_NETWORK_FAIL] method=${method} path=${path.split("?")[0]} reason=${message} circuitMs=${this.circuitMs}`);
+        if (readOnly) {
+          route = "gateway";
+          try {
+            response = await this.gatewayRequest(method, path, body, includeShopId);
+          } catch (gatewayError: any) {
+            this.logger.error(`[GHN_GATEWAY_NETWORK_FAIL] path=${path.split("?")[0]} reason=${String(gatewayError?.cause?.code || gatewayError?.name || "NETWORK_ERROR")}`);
+            throw new GatewayTimeoutException("Không kết nối được GHN qua cả Railway và gateway");
+          }
+        } else {
+          // No automatic replay of create/cancel/updateCOD/update/re-delivery.
+          // Check GHN by client_order_code or order_code before any manual retry.
+          throw new ServiceUnavailableException(
+            "Kết nối GHN gián đoạn; chưa rõ thao tác đã được GHN xử lý chưa. Kiểm tra mã đơn trên GHN trước khi thử lại. Các yêu cầu tiếp theo sẽ dùng gateway."
+          );
+        }
+      } else {
+        this.logger.error(`[GHN_${route.toUpperCase()}_NETWORK_FAIL] path=${path.split("?")[0]} reason=${message}`);
+        throw new GatewayTimeoutException("Không kết nối được GHN");
+      }
     }
 
+    // HTTP 502/503/504 may be a broken upstream route, not a business rejection.
+    // Safe reads can use the alternative path; writes must not be replayed.
+    if (route === "direct" && this.gatewayEnabled &&
+        [502, 503, 504].includes(response.status)) {
+      this.circuitUntil = Date.now() + this.circuitMs;
+      this.logger.warn(`[GHN_DIRECT_HTTP_FAIL] path=${path.split("?")[0]} status=${response.status} readOnly=${readOnly}`);
+      if (!readOnly) {
+        throw new ServiceUnavailableException(
+          "GHN trả lỗi gateway khi thực hiện thao tác cập nhật. Chưa rõ GHN đã xử lý chưa; kiểm tra mã đơn trước khi thử lại. Lần gọi tiếp theo sẽ dùng gateway."
+        );
+      }
+      try {
+        response = await this.gatewayRequest(method, path, body, includeShopId);
+        route = "gateway";
+      } catch (error: any) {
+        throw new GatewayTimeoutException("Không kết nối được GHN qua gateway");
+      }
+    }
+
+    // Proxy and direct responses both retain original GHN status and JSON shape.
+    const json: any = await response.json().catch(() => null);
+    if (!response.ok || json?.code !== 200) {
+      this.logger.warn(`[GHN_API_ERROR] route=${route} method=${method} path=${path.split("?")[0]} status=${response.status} ghnCode=${String(json?.code ?? "unknown")}`);
+      throw new BadRequestException(json?.message || `GHN request failed: ${path.split("?")[0]}`);
+    }
+    if (route === "direct") this.circuitUntil = 0;
+    this.logger.log(`[GHN_OK] route=${route} method=${method} path=${path.split("?")[0]} ms=${Date.now() - started}`);
     return json.data;
   }
 
