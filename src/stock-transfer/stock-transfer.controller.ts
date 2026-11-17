@@ -146,6 +146,18 @@ export class StockTransferController {
     return this.stockTransferService.runAutoRebalanceNow();
   }
 
+  @Post("pos-yesterday/preview")
+  @RequirePermissions("stock_transfer.view")
+  previewYesterdayPos(@Body() body: { toBranchIds?: string[]; branchMinTargets?: Record<string, number>; maxPerVariant?: number }) {
+    return this.stockTransferService.previewYesterdayPosReplenishment(body);
+  }
+
+  @Post("pos-yesterday/create")
+  @RequirePermissions("stock_transfer.create")
+  createYesterdayPos(@Body() body: { toBranchIds?: string[]; branchMinTargets?: Record<string, number>; maxPerVariant?: number }) {
+    return this.stockTransferService.createYesterdayPosTransfers(body);
+  }
+
   @Post("suggestions/outbound")
   @RequirePermissions("stock_transfer.view")
   async previewOutboundSuggestionsLegacy(@Body() body: GenerateOutboundSuggestionsDto) {

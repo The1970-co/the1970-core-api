@@ -296,7 +296,9 @@ private async nextCode(direction: StockTransferDirection) {
     return transfer;
   }
 private getDateKey(date = new Date()) {
-  return date.toISOString().slice(0, 10);
+  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Ho_Chi_Minh", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+  const part = (name: string) => parts.find((item) => item.type === name)?.value || "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
 }
 
 private async getOrCreateAutoConfig() {
@@ -354,9 +356,150 @@ async updateAutoRebalanceConfig(dto: UpdateAutoRebalanceConfigDto) {
   });
 }
 
+
+  // Mode marker lives in existing JSON configuration to avoid a schema migration.
+  // Other category filters remain unchanged when this mode is not selected.
+  private readonly posYesterdayMarker = "__POS_YESTERDAY__";
+
+  async previewYesterdayPosReplenishment(params: {
+    toBranchIds?: string[];
+    branchMinTargets?: Record<string, number>;
+    maxPerVariant?: number;
+  } = {}) {
+    const config = await this.getOrCreateAutoConfig();
+    const targets = params.branchMinTargets ?? (config.branchMinTargets as Record<string, number>) ?? { TH: 2, CL: 1, XD: 1 };
+    const requested = params.toBranchIds?.length ? params.toBranchIds : config.toBranchIds;
+    const branches = ["TH", "CL", "XD"].filter((id) => requested.includes(id));
+    const maxPerVariant = Math.max(1, Math.min(100, Number(params.maxPerVariant ?? config.maxPerVariant ?? 5)));
+    const today = this.getDateKey();
+    const start = new Date(`${today}T00:00:00+07:00`);
+    const from = new Date(start.getTime() - 86400000);
+    const until = start;
+    const salesDate = this.getDateKey(from);
+    if (!branches.length) return { date: salesDate, total: 0, suggestions: [] };
+
+    // Only POS sales created yesterday; exclude cancelled orders, preserve exact variant/size.
+    const soldItems = await this.prisma.orderItem.findMany({
+      where: {
+        order: {
+          branchId: { in: branches },
+          salesChannel: "POS",
+          status: { not: "CANCELLED" },
+          createdAt: { gte: from, lt: until },
+        },
+      },
+      select: { variantId: true, qty: true, order: { select: { branchId: true } } },
+    });
+    const sold = new Map<string, number>();
+    for (const item of soldItems) {
+      if (!item.variantId) continue;
+      const key = `${item.order.branchId}:${item.variantId}`;
+      sold.set(key, (sold.get(key) || 0) + Number(item.qty || 0));
+    }
+    const variantIds = [...new Set(soldItems.map((x) => x.variantId).filter((x): x is string => Boolean(x)))];
+    if (!variantIds.length) return { date: salesDate, total: 0, suggestions: [] };
+
+    const [inventories, variants, pending] = await Promise.all([
+      this.prisma.inventoryItem.findMany({ where: { variantId: { in: variantIds }, branchId: { in: ["QO", ...branches] } } }),
+      this.prisma.productVariant.findMany({ where: { id: { in: variantIds } }, include: { product: true } }),
+      this.prisma.stockTransferItem.findMany({
+        where: { variantId: { in: variantIds }, transfer: { status: { notIn: [TransferStatus.COMPLETED, TransferStatus.CANCELLED] } } },
+        include: { transfer: { select: { fromBranchId: true, toBranchId: true } } },
+      }),
+    ]);
+    const stock = new Map(inventories.map((i) => [`${i.branchId}:${i.variantId}`, Number(i.availableQty || 0)]));
+    const variantMap = new Map(variants.map((v) => [v.id, v]));
+    // Reserve all pending outbound stock; don't recommend the same item twice to the same branch.
+    const reservations = new Map<string, number>();
+    const pendingDestinations = new Set<string>();
+    for (const item of pending) {
+      if (item.transfer.fromBranchId === "QO") {
+        reservations.set(item.variantId, (reservations.get(item.variantId) || 0) + Number(item.qty || 0));
+        pendingDestinations.add(`${item.transfer.toBranchId}:${item.variantId}`);
+      }
+    }
+    const remaining = new Map<string, number>();
+    for (const variantId of variantIds) {
+      remaining.set(variantId, Math.max(0, (stock.get(`QO:${variantId}`) || 0) - (reservations.get(variantId) || 0)));
+    }
+    const suggestions: any[] = [];
+    // TH first, then CL and XD when QO stock is limited.
+    for (const branch of branches) {
+      for (const variantId of variantIds) {
+        const soldQty = sold.get(`${branch}:${variantId}`) || 0;
+        if (!soldQty || pendingDestinations.has(`${branch}:${variantId}`)) continue;
+        const current = stock.get(`${branch}:${variantId}`) || 0;
+        const target = Math.max(0, Math.min(100, Number(targets[branch] ?? 1)));
+        if (current >= target) continue;
+        const available = remaining.get(variantId) || 0;
+        const suggestedQty = Math.min(available, maxPerVariant, Math.max(0, target - Math.max(0, current)));
+        if (suggestedQty <= 0) continue;
+        remaining.set(variantId, available - suggestedQty);
+        const variant = variantMap.get(variantId);
+        if (!variant) continue;
+        suggestions.push({
+          fromBranchId: "QO", toBranchId: branch, toBranchName: branch,
+          variantId, sku: variant.sku, productName: variant.product?.name || "",
+          color: variant.color, size: variant.size,
+          soldQty, salesVelocityDays: 1, storeAvailableQty: current,
+          qoAvailableQty: stock.get(`QO:${variantId}`) || 0,
+          branchMinTarget: target, suggestedQty,
+          priority: current <= 0 ? "HIGH" : "MEDIUM", aiScore: current <= 0 ? 80 : 60,
+          aiReason: `POS ${salesDate} bán ${soldQty}, tồn cửa hàng ${current}, mục tiêu ${target}, QO khả dụng sau giữ hàng ${available}`,
+        });
+      }
+    }
+    return { date: salesDate, total: suggestions.length, suggestions };
+  }
+
+  async createYesterdayPosTransfers(params: {
+    toBranchIds?: string[]; branchMinTargets?: Record<string, number>;
+    maxPerVariant?: number;
+  } = {}) {
+    const preview = await this.previewYesterdayPosReplenishment(params);
+    const grouped = new Map<string, typeof preview.suggestions>();
+    for (const item of preview.suggestions) {
+      if (!grouped.has(item.toBranchId)) grouped.set(item.toBranchId, []);
+      grouped.get(item.toBranchId)!.push(item);
+    }
+    const transfers: any[] = [];
+    for (const [toBranchId, items] of grouped) {
+      transfers.push(await this.create({
+        direction: StockTransferDirection.OUTBOUND_TO_BRANCH,
+        sourceType: StockTransferSourceType.AUTO,
+        fromBranchId: "QO", toBranchId,
+        note: `Gợi ý bổ sung từ POS ${preview.date} – cần kho duyệt`,
+        createdById: "system-pos", createdByName: "POS Yesterday Replenishment",
+        items: items.map((item) => ({ variantId: item.variantId, qty: item.suggestedQty })),
+      }));
+    }
+    return { success: true, date: preview.date, createdCount: transfers.length, transfers };
+  }
+
+  // Cron only executes POS mode; the classic rebalance remains manual.
+  @Cron("*/1 * * * *", { timeZone: "Asia/Ho_Chi_Minh" })
+  async handleYesterdayPosCron() {
+    const config = await this.getOrCreateAutoConfig();
+    if (!config.isEnabled || !config.categoryNames.includes(this.posYesterdayMarker)) return;
+    const now = new Date();
+    const clock = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Ho_Chi_Minh", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(now);
+    if (clock !== `${String(config.runHour).padStart(2, "0")}:${String(config.runMinute).padStart(2, "0")}`) return;
+    const today = this.getDateKey(now);
+    if (config.lastRunDateKey === today) return;
+    try {
+      await this.createYesterdayPosTransfers();
+      await this.prisma.stockTransferAutoConfig.update({
+        where: { id: config.id }, data: { lastRunAt: now, lastRunDateKey: today },
+      });
+    } catch (err) { console.error("POS yesterday replenishment failed", err); }
+  }
+
 async runAutoRebalanceNow() {
   const config = await this.getOrCreateAutoConfig();
 
+  if (config.categoryNames.includes(this.posYesterdayMarker)) {
+    return this.createYesterdayPosTransfers();
+  }
   return this.createOutboundTransfersFromSuggestions({
     maxPerVariant: config.maxPerVariant,
     toBranchIds: config.toBranchIds,
