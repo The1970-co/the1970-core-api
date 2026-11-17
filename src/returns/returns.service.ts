@@ -1541,52 +1541,99 @@ export class ReturnsService {
   }
 
   async getReturns(params: any, user?: any) {
-    const filters: any[] = [];
+    const filters: Prisma.ReturnExchangeWhereInput[] = [];
+    const status = String(params?.status || "ALL").trim().toUpperCase();
+    const type = String(params?.type || "ALL").trim().toUpperCase();
+    const branchId = String(params?.branchId || "ALL").trim();
+    const q = String(params?.q || "").trim();
 
-    if (params.status && params.status !== "ALL") {
-      filters.push({ status: params.status });
+    if (status !== "ALL") filters.push({ status });
+    if (type !== "ALL") filters.push({ type });
+    if (branchId && branchId !== "ALL") {
+      filters.push({ returnReceiveBranchId: branchId });
     }
 
-    if (params.branchId && params.branchId !== "ALL") {
-      filters.push({ returnReceiveBranchId: params.branchId });
+    // Dùng mốc đầu ngày và cuối ngày theo YYYY-MM-DD của người dùng.
+    // Giá trị không hợp lệ bị từ chối để tránh trả về kết quả sai.
+    const parseDate = (value: any, endOfDay = false) => {
+      if (!value) return null;
+      const raw = String(value);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+        throw new BadRequestException("Ngày lọc phải có dạng YYYY-MM-DD.");
+      }
+      const date = new Date(`${raw}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}+07:00`);
+      if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== new Date(`${raw}T12:00:00+07:00`).toISOString().slice(0, 10)) {
+        throw new BadRequestException("Ngày lọc không hợp lệ.");
+      }
+      return date;
+    };
+    const from = parseDate(params?.from);
+    const to = parseDate(params?.to, true);
+    if (from && to && from > to) {
+      throw new BadRequestException("Ngày bắt đầu không được lớn hơn ngày kết thúc.");
     }
+    if (from || to) filters.push({ createdAt: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } });
 
-    if (params.q) {
-      filters.push({
-        OR: [
-          { code: { contains: params.q, mode: "insensitive" } },
-          { note: { contains: params.q, mode: "insensitive" } },
-          { originalOrderId: { contains: params.q, mode: "insensitive" } },
-        ],
-      });
+    if (q) {
+      // Mã đơn / tên / điện thoại thuộc Order, mã SKU thuộc ReturnExchangeItem.
+      const [orders, items] = await Promise.all([
+        this.prisma.order.findMany({
+          where: { OR: [
+            { orderCode: { contains: q, mode: "insensitive" } },
+            { customerName: { contains: q, mode: "insensitive" } },
+            { customerPhone: { contains: q, mode: "insensitive" } },
+          ] },
+          select: { id: true },
+          take: 500,
+        }),
+        this.prisma.returnExchangeItem.findMany({
+          where: { OR: [
+            { sku: { contains: q, mode: "insensitive" } },
+            { productName: { contains: q, mode: "insensitive" } },
+          ] },
+          select: { returnExchangeId: true },
+          take: 500,
+        }),
+      ]);
+      filters.push({ OR: [
+        { code: { contains: q, mode: "insensitive" } },
+        { note: { contains: q, mode: "insensitive" } },
+        { originalOrderId: { contains: q, mode: "insensitive" } },
+        { originalOrderId: { in: orders.map((o) => o.id) } },
+        { id: { in: items.map((i) => i.returnExchangeId) } },
+      ] });
     }
 
     if (!this.isOwner(user)) {
-      const ub = this.userBranch(user) || "__NO_BRANCH__";
-
-      filters.push({
-        OR: [
-          { handledAtBranchId: ub },
-          { returnReceiveBranchId: ub },
-          { originalBranchId: ub },
-        ],
-      });
+      const branches = this.userBranchCandidates(user);
+      if (!branches.length) throw new ForbiddenException("Tài khoản chưa được gán chi nhánh.");
+      filters.push({ OR: [
+        { handledAtBranchId: { in: branches } },
+        { returnReceiveBranchId: { in: branches } },
+        { originalBranchId: { in: branches } },
+      ] });
     }
 
-    const where = filters.length ? { AND: filters } : {};
-
+    const where: Prisma.ReturnExchangeWhereInput = filters.length ? { AND: filters } : {};
     const rows = await this.prisma.returnExchange.findMany({
       where,
       orderBy: { createdAt: "desc" },
-      take: 100,
-      include: {
-        items: true,
-        cashVouchers: true,
-      },
+      take: 500,
+      include: { items: true, cashVouchers: true },
     });
-
+    const ids = [...new Set(rows.map((r) => r.originalOrderId))];
+    const originals = ids.length ? await this.prisma.order.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, orderCode: true, customerName: true, customerPhone: true },
+    }) : [];
+    const orderById = new Map(originals.map((o) => [o.id, o]));
     return {
-      data: rows.map((row) => this.map(row)),
+      data: rows.map((row) => ({
+        ...this.map(row),
+        createdAtIso: row.createdAt?.toISOString() || null,
+        originalOrder: orderById.get(row.originalOrderId) || null,
+      })),
+      limit: 500,
     };
   }
 

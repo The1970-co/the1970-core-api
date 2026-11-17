@@ -1289,16 +1289,22 @@ export class FinanceService {
     paymentStatus?: string;
     q?: string;
   }, user?: any) {
-    const { from, to, dateFrom, dateTo } = this.makeDateRange(
-      params.dateFrom,
-      params.dateTo
-    );
+    // Không truyền ngày: lấy các đơn gần nhất, thay vì mặc định chỉ lấy hôm nay.
+    const hasDateFilter = Boolean(params.dateFrom || params.dateTo);
+    const from = params.dateFrom
+      ? new Date(`${params.dateFrom}T00:00:00.000+07:00`)
+      : null;
+    const to = params.dateTo
+      ? new Date(`${params.dateTo}T23:59:59.999+07:00`)
+      : null;
+    const dateFrom = params.dateFrom || "";
+    const dateTo = params.dateTo || "";
 
     const where: Prisma.ShipmentWhereInput = {
-      createdAt: {
-        gte: from,
-        lte: to,
-      },
+      ...(hasDateFilter ? { createdAt: {
+        ...(from ? { gte: from } : {}),
+        ...(to ? { lte: to } : {}),
+      } } : {}),
       NOT: [
         { carrier: { equals: "GHN", mode: "insensitive" } },
         { carrier: { equals: "", mode: "insensitive" } },
@@ -1461,7 +1467,9 @@ export class FinanceService {
         }
 
         return true;
-      });
+      })
+      // Chế độ mặc định trả đúng 50 đơn mới nhất; khi lọc theo ngày vẫn trả dữ liệu trong khoảng đã chọn.
+      .slice(0, hasDateFilter ? undefined : 50);
 
     const summary = rows.reduce(
       (acc, row) => {

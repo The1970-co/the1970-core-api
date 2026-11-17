@@ -68,10 +68,13 @@ export class ReturnsController {
     @Query("q") q: string,
     @Query("status") status: string,
     @Query("branchId") branchId: string,
+    @Query("type") type: string,
+    @Query("from") from: string,
+    @Query("to") to: string,
     @Req() req: Request & { user?: any },
   ) {
     return this.returnsService.getReturns(
-      { q, status, branchId },
+      { q, status, branchId, type, from, to },
       req.user,
     );
   }
