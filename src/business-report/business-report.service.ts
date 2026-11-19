@@ -26,7 +26,7 @@ const defaults: ReportSettings = {
   posTarget: 20_000_000, codTarget: 30_000_000, revenueTarget: 50_000_000,
   growthPct: 0, declinePct: 20, recordDays: 7,
   operatingCostEnabled: true, dailyOperatingCost: 7_000_000,
-  productReport: { enabled: false, slots: [{time:'21:00',enabled:true}], topN: 6 },
+  productReport: { enabled: false, slots: [{time:'21:00',enabled:true}], topN: 20 },
 };
 
 // Convert a local wall-clock date/time to UTC; no dependence on Railway's TZ.
@@ -102,7 +102,7 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
       productReport:{
         enabled:input.productReport?.enabled===undefined?prev.productReport.enabled:Boolean(input.productReport.enabled),
         slots:productSlots,
-        topN:Math.min(10,Math.max(1,Math.floor(safeNum(input.productReport?.topN,prev.productReport.topN,10)))),
+        topN:Math.min(20,Math.max(1,Math.floor(safeNum(input.productReport?.topN,prev.productReport.topN,20)))),
       },
     };
     await this.prisma.systemSetting.upsert({where:{key:KEY_PREFIX+id},create:{key:KEY_PREFIX+id,value:next as any},update:{value:next as any}});
@@ -185,8 +185,12 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
   // Product report uses the same fundamental fields as Dashboard product-created report:
   // Order.createdAt, cancellation by INTERNAL Order.status, OrderItem.qty/lineTotal,
   // and ProductVariant.productId to combine sizes/colors into the main product.
-  async productSnapshot(now = new Date()) {
-    const {day,time} = vnParts(now);
+  async productSnapshot(now = new Date(), requestedDay?: string) {
+    const current=vnParts(now);
+    const day = requestedDay || current.day;
+    const time = current.time;
+    // Validate requested day; the endpoint supports viewing the report's original date.
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || Number.isNaN(Date.parse(`${day}T00:00:00Z`))) throw new BadRequestException('Ngày báo cáo không hợp lệ');
     const orders = await this.prisma.order.findMany({
       where:{createdAt:{gte:vnUtc(day),lt:vnUtc(shiftDay(day,1))},status:{not:'CANCELLED'}},
       select:{
@@ -220,15 +224,22 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
   }
 
   private productPushBody(s:Awaited<ReturnType<BusinessReportService['productSnapshot']>>,topN:number){
+    // Compact each line to fit APNs 4 KB payload; iOS banner can still truncate
+    // independently of payload size. The app detail page is authoritative.
+    const count=Math.min(20,Math.max(1,topN));
     const head=`${s.productCount} SP · ${s.orderCount} đơn · ${fmt(s.quantity)} cái · ${fmt(s.revenue)}đ`;
-    const lines=s.products.slice(0,topN).map((p,i)=>`${i+1}. ${p.name}: ${p.quantity} cái (POS ${p.pos}, FB/COD ${p.facebook}${p.other?`, khác ${p.other}`:''}) · ${fmt(p.revenue)}đ`);
-    const remaining=s.products.length-topN;
-    return [head,...lines,remaining>0?`+${remaining} sản phẩm khác. Mở Báo cáo & cảnh báo để xem đầy đủ.`:''].filter(Boolean).join('\n');
+    const lines=s.products.slice(0,count).map((p,i)=>{
+      const name=p.name.length>42?`${p.name.slice(0,41)}…`:p.name;
+      return `${i+1}. ${name} · ${p.quantity}c (P${p.pos}/F${p.facebook}${p.other?`/K${p.other}`:''}) · ${fmt(p.revenue)}đ`;
+    });
+    const remaining=Math.max(0,s.products.length-count);
+    const footer=remaining?`Còn ${remaining} SP. Chạm để xem đầy đủ trong App.`:'Chạm để xem chi tiết trong App.';
+    return [head,...lines,footer].join('\n');
   }
 
-  async productPreview(user:any){
+  async productPreview(user:any, requestedDay?:string){
     this.owner(user);
-    const s=await this.productSnapshot();
+    const s=await this.productSnapshot(new Date(),requestedDay);
     const body=this.productPushBody(s,s.products.length);
     return {title:`Sản phẩm tạo đơn ${s.day} · ${s.time}`,body,snapshot:s};
   }
@@ -236,7 +247,7 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
     const id=this.owner(user);
     const c=await this.settings(user);
     const s=await this.productSnapshot();
-    return this.push.notifyReport(id,'[Thử] Báo cáo sản phẩm',this.productPushBody(s,c.productReport.topN),{kind:'product_test',day:s.day},tokenId);
+    return this.push.notifyReport(id,'[Thử] Báo cáo sản phẩm',this.productPushBody(s,c.productReport.topN),{kind:'product_test',day:s.day,reportPath:'/mobile/reports/products'},tokenId);
   }
 
   private format(s:any,c:ReportSettings) {
@@ -263,7 +274,7 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
     try {await this.prisma.businessReportDelivery.create({data:{key,userId,kind,title,body}});}
     catch(e:any){if(e?.code==='P2002')return;throw e;}
     try {
-      const result=await this.push.notifyReport(userId,title,body,{kind,day});
+      const result=await this.push.notifyReport(userId,title,body,{kind,day,...(kind==='product'?{reportPath:'/mobile/reports/products'}:{})});
       await this.prisma.businessReportDelivery.update({where:{key},data:{status:result.sent?'SENT':result.failed?'FAILED':'NO_DEVICE',sent:result.sent,failed:result.failed}});
     } catch(e:any) {await this.prisma.businessReportDelivery.update({where:{key},data:{status:'FAILED',error:String(e?.message||e).slice(0,500)}});}
   }
