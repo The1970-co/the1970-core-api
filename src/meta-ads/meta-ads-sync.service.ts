@@ -903,7 +903,7 @@ export class MetaAdsSyncService {
     };
   }
 
-  async setAdStatus(metaAdId: string, status: 'PAUSED' | 'ACTIVE') {
+  async setAdStatus(metaAdId: string, status: 'PAUSED' | 'ACTIVE', actor: 'MANUAL' | 'AUTOPILOT_INVENTORY' = 'MANUAL') {
     const adId = String(metaAdId || '').trim();
     if (!adId) throw new Error('Thiếu metaAdId');
     if (status !== 'PAUSED' && status !== 'ACTIVE') throw new Error('Meta ad status không hợp lệ');
@@ -924,7 +924,58 @@ export class MetaAdsSyncService {
       this.logger.warn(`[META_AD_STATUS_DB_CACHE] ${adId}: ${error?.message || error}`);
     }
 
+    if (result?.success !== false) {
+      this.autopilotActiveAdsCache = null;
+      try {
+        await (this.prisma as any).metaSyncLog.create({ data: {
+          metaAccountId: null, syncType: 'META_AUTOPILOT_AD_STATUS_ACTION', status: 'SUCCESS',
+          range: actor, startedAt: new Date(), finishedAt: new Date(), durationMs: 0,
+          scanned: 1, upserted: 1, failed: 0,
+          message: `${actor} ${status} ad ${adId}`,
+          errorJson: { metaAdId: adId, action: status, actor },
+        } });
+      } catch (error: any) { this.logger.warn(`[META_AD_STATUS_AUDIT] ${error?.message || error}`); }
+    }
     return { ok: result?.success !== false, metaAdId: adId, status };
+  }
+
+  async setAutopilotEntityStatus(level: 'campaign' | 'adset', metaId: string, status: 'PAUSED' | 'ACTIVE') {
+    const id = String(metaId || '').trim();
+    if (!/^\d+$/.test(id)) throw new Error('ID Meta không hợp lệ');
+    if (status !== 'PAUSED' && status !== 'ACTIVE') throw new Error('Trạng thái không hợp lệ');
+    const result = await this.graphPost<{ success?: boolean }>(`/${id}`, { status });
+    if (result?.success === false) throw new Error('Meta không chấp nhận thay đổi trạng thái');
+    try {
+      const delegate = level === 'campaign' ? (this.prisma as any).metaCampaign : (this.prisma as any).metaAdSet;
+      await delegate.updateMany({ where: level === 'campaign' ? { metaCampaignId: id } : { metaAdSetId: id }, data: { status, effectiveStatus: status } });
+    } catch (error: any) { this.logger.warn(`[META_ENTITY_STATUS_CACHE] ${error?.message || error}`); }
+    try {
+      await (this.prisma as any).metaSyncLog.create({ data: {
+        metaAccountId: null, syncType: 'META_AUTOPILOT_AD_STATUS_ACTION', status: 'SUCCESS',
+        range: 'MANUAL', startedAt: new Date(), finishedAt: new Date(), durationMs: 0,
+        scanned: 1, upserted: 1, failed: 0,
+        message: `MANUAL ${status} ${level} ${id}`,
+        errorJson: { level, metaEntityId: id, action: status, actor: 'MANUAL' },
+      } });
+    } catch (error: any) { this.logger.warn(`[META_ENTITY_STATUS_AUDIT] ${error?.message || error}`); }
+    this.autopilotActiveAdsCache = null;
+    return { ok: true, level, id, status };
+  }
+
+  async getAutopilotAdStatusHistory(limit = 200) {
+    const logs = await (this.prisma as any).metaSyncLog.findMany({
+      where: { syncType: 'META_AUTOPILOT_AD_STATUS_ACTION', status: 'SUCCESS' },
+      orderBy: { startedAt: 'desc' }, take: Math.min(1000, Math.max(1, limit)),
+      select: { id: true, startedAt: true, errorJson: true },
+    });
+    return { ok: true, items: logs.map((log: any) => ({
+      id: log.id, at: log.startedAt,
+      metaAdId: String(log.errorJson?.metaAdId || ''),
+      level: String(log.errorJson?.level || 'ad'),
+      metaEntityId: String(log.errorJson?.metaEntityId || ''),
+      action: String(log.errorJson?.action || ''),
+      actor: String(log.errorJson?.actor || 'MANUAL'),
+    })) };
   }
 
   async setAutopilotAdManualMapping(input: { metaAdId: string; productCode: string; color?: string }) {
@@ -1046,41 +1097,41 @@ export class MetaAdsSyncService {
     };
   }
 
-  async getLiveAdsForAutopilot(limit = 500) {
+  async getLiveAdsForAutopilot(limit = 500, includeInactive = false) {
     const requested = Math.min(Math.max(Number(limit || 500), 1), 500);
     const now = Date.now();
 
     // Cache 60s + share request đang chạy để web/mobile/control-center/inventory
     // không bắn trùng Meta cùng lúc.
-    if (this.autopilotActiveAdsCache && now - this.autopilotActiveAdsCache.at < 60_000) {
+    if (!includeInactive && this.autopilotActiveAdsCache && now - this.autopilotActiveAdsCache.at < 60_000) {
       return this.autopilotActiveAdsCache.rows.slice(0, requested);
     }
-    if (this.autopilotActiveAdsInFlight) {
+    if (!includeInactive && this.autopilotActiveAdsInFlight) {
       const rows = await this.autopilotActiveAdsInFlight;
       return rows.slice(0, requested);
     }
 
-    this.autopilotActiveAdsInFlight = (async () => {
+    const request = (async () => {
       const accountId = this.normalizeAccountId(this.defaultAdAccountId);
 
-      // CALL 1: chỉ lấy Ads ACTIVE. Không lấy creative, không tải lịch sử ads.
+      // Vận hành tự động chỉ lấy active; chế độ quản lý lấy cả ads đã dừng.
       const ads = await this.graphList<any>(`/${accountId}/ads`, {
         fields: 'id,name,campaign_id,adset_id,status,effective_status,configured_status,created_time,updated_time,creative{id,thumbnail_url,image_url}',
-        filtering: JSON.stringify([
+        ...(includeInactive ? {} : { filtering: JSON.stringify([
           { field: 'effective_status', operator: 'IN', value: ['ACTIVE'] },
-        ]),
+        ]) }),
         limit: '100',
       }, 5);
 
       const activeAds = (ads || [])
-        .filter((row: any) =>
+        .filter((row: any) => includeInactive ||
           String(row?.effective_status || row?.status || row?.configured_status || '').toUpperCase() === 'ACTIVE',
         )
         .slice(0, requested);
 
       if (!activeAds.length) {
         const empty: any[] = [];
-        this.autopilotActiveAdsCache = { at: Date.now(), rows: empty };
+        if (!includeInactive) this.autopilotActiveAdsCache = { at: Date.now(), rows: empty };
         this.logger.log(`[META_AUTOPILOT_LIVE_ADS] account=${accountId} source=META_ACTIVE_BULK ads=0 metaCalls=1`);
         return empty;
       }
@@ -1126,6 +1177,7 @@ export class MetaAdsSyncService {
       // Một ad chỉ được coi là đang phân phối khi insights hôm nay có impressions hoặc spend > 0.
       const deliveringAdIds = new Set<string>();
       try {
+        if (!includeInactive) {
         const insightRows = await this.graphList<any>(`/${accountId}/insights`, {
           level: 'ad',
           fields: 'ad_id,impressions,spend',
@@ -1141,6 +1193,7 @@ export class MetaAdsSyncService {
           const impressions = Number(row?.impressions || 0);
           const spend = Number(row?.spend || 0);
           if (id && (impressions > 0 || spend > 0)) deliveringAdIds.add(id);
+        }
         }
       } catch (error: any) {
         this.logger.warn(`[META_AUTOPILOT_DELIVERY_INSIGHTS] ${error?.message || error}`);
@@ -1246,7 +1299,7 @@ export class MetaAdsSyncService {
           manualProductCode: manualMapping?.productCode || null,
           manualColor: manualMapping?.color || null,
           manualMapping,
-          source: 'META_ACTIVE_BULK',
+          source: includeInactive ? 'META_ALL_ADS' : 'META_ACTIVE_BULK',
         };
       });
 
@@ -1286,18 +1339,19 @@ export class MetaAdsSyncService {
         this.logger.log(`[META_AUTOPILOT_FILTERED_OUT] ${JSON.stringify(rejectedRows.slice(0, 20))}`);
       }
 
-      this.autopilotActiveAdsCache = { at: Date.now(), rows: operationalRows };
+      if (!includeInactive) this.autopilotActiveAdsCache = { at: Date.now(), rows: operationalRows };
       this.logger.log(
         `[META_AUTOPILOT_LIVE_ADS] account=${accountId} source=META_ACTIVE_BULK rawActive=${rows.length} operational=${operationalRows.length} adsets=${adSetIds.length} campaigns=${campaignIds.length} metaCalls<=4 delivery=today cacheTtlSec=60`,
       );
-      return operationalRows;
+      return includeInactive ? rows.filter((row: any) => Boolean(row.thumbnailUrl || row.liveThumbnailUrl)) : operationalRows;
     })();
 
+    if (!includeInactive) this.autopilotActiveAdsInFlight = request;
     try {
-      const rows = await this.autopilotActiveAdsInFlight;
+      const rows = await request;
       return rows.slice(0, requested);
     } finally {
-      this.autopilotActiveAdsInFlight = null;
+      if (!includeInactive) this.autopilotActiveAdsInFlight = null;
     }
   }
 

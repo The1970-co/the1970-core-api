@@ -214,8 +214,13 @@ export class MetaAdsController {
   }
 
   @Get('autopilot/live-ads')
-  getAutopilotLiveAds(@Query('limit') limit?: string) {
-    return this.metaAdsSyncService.getLiveAdsForAutopilot(Number(limit || 5000));
+  getAutopilotLiveAds(@Query('limit') limit?: string, @Query('includeInactive') includeInactive?: string) {
+    return this.metaAdsSyncService.getLiveAdsForAutopilot(Number(limit || 500), includeInactive === 'true');
+  }
+
+  @Get('autopilot/ad-status-history')
+  getAutopilotAdStatusHistory(@Query('limit') limit?: string) {
+    return this.metaAdsSyncService.getAutopilotAdStatusHistory(Number(limit || 200));
   }
 
   @Post('autopilot/budgets')
@@ -277,6 +282,13 @@ export class MetaAdsController {
       throw new Error('status phải là ACTIVE hoặc PAUSED');
     }
     return this.metaAdsSyncService.setAdStatus(String(body?.metaAdId || ''), status as 'PAUSED' | 'ACTIVE');
+  }
+
+  @Post('actions/entity-status')
+  setAdsEntityStatus(@Body() body: { level?: 'campaign' | 'adset'; metaId?: string; status?: 'ACTIVE' | 'PAUSED' } = {}) {
+    if (body.level !== 'campaign' && body.level !== 'adset') throw new Error('level không hợp lệ');
+    if (body.status !== 'ACTIVE' && body.status !== 'PAUSED') throw new Error('status không hợp lệ');
+    return this.metaAdsSyncService.setAutopilotEntityStatus(body.level, String(body.metaId || ''), body.status);
   }
 
   @Post('autopilot/ads/map')

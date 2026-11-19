@@ -858,7 +858,7 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
           try {
             const canAutoPause = this.runtimeEnabled && this.runtimeLevel === 'auto';
             if (canAutoPause && !dryRun) {
-              await this.metaAdsSyncService.setAdStatus(ad.metaAdId || ad.id, 'PAUSED');
+              await this.metaAdsSyncService.setAdStatus(ad.metaAdId || ad.id, 'PAUSED', 'AUTOPILOT_INVENTORY');
               pausedAds += 1;
             }
             this.pushAction({
