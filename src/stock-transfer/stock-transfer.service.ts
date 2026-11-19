@@ -333,6 +333,11 @@ async getAutoRebalanceConfig() {
 
 async updateAutoRebalanceConfig(dto: UpdateAutoRebalanceConfigDto) {
   const config = await this.getOrCreateAutoConfig();
+  const effectiveEnabled = dto.isEnabled ?? config.isEnabled;
+  const effectiveCategories = dto.categoryNames ?? config.categoryNames;
+  if (effectiveEnabled && (!effectiveCategories || effectiveCategories.length === 0)) {
+    throw new BadRequestException("Chưa chọn danh mục để bật lịch bù tồn. Chế độ POS hôm qua không cần chọn danh mục.");
+  }
 
   return this.prisma.stockTransferAutoConfig.update({
     where: { id: config.id },
@@ -476,22 +481,33 @@ async updateAutoRebalanceConfig(dto: UpdateAutoRebalanceConfigDto) {
     return { success: true, date: preview.date, createdCount: transfers.length, transfers };
   }
 
-  // Cron only executes POS mode; the classic rebalance remains manual.
+  // Both scheduled modes share the same saved configuration and local VN clock.
   @Cron("*/1 * * * *", { timeZone: "Asia/Ho_Chi_Minh" })
   async handleYesterdayPosCron() {
     const config = await this.getOrCreateAutoConfig();
-    if (!config.isEnabled || !config.categoryNames.includes(this.posYesterdayMarker)) return;
+    if (!config.isEnabled) return;
+    const categories = Array.isArray(config.categoryNames) ? config.categoryNames : [];
+    const isPosMode = categories.includes(this.posYesterdayMarker);
+    // Fail closed: classic mode MUST have explicit category selections.
+    if (!isPosMode && categories.length === 0) return;
+    if (!Array.isArray(config.toBranchIds) || config.toBranchIds.length === 0) return;
+
     const now = new Date();
     const clock = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Ho_Chi_Minh", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(now);
     if (clock !== `${String(config.runHour).padStart(2, "0")}:${String(config.runMinute).padStart(2, "0")}`) return;
     const today = this.getDateKey(now);
     if (config.lastRunDateKey === today) return;
+
     try {
-      await this.createYesterdayPosTransfers();
+      if (isPosMode) {
+        await this.createYesterdayPosTransfers();
+      } else {
+        await this.runAutoRebalanceNow();
+      }
       await this.prisma.stockTransferAutoConfig.update({
         where: { id: config.id }, data: { lastRunAt: now, lastRunDateKey: today },
       });
-    } catch (err) { console.error("POS yesterday replenishment failed", err); }
+    } catch (err) { console.error("Scheduled stock replenishment failed", err); }
   }
 
 async runAutoRebalanceNow() {
