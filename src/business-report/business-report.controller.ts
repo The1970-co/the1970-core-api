@@ -14,5 +14,7 @@ export class BusinessReportController {
   @Get('devices') devices(@Req() req:Request & {user?:any}){return this.reports.devices(req.user);}
   @Get('scheduler-status') schedulerStatus(@Req() req:Request & {user?:any}){return this.reports.schedulerStatus(req.user);}
   @Post('scheduler-check') schedulerCheck(@Req() req:Request & {user?:any}){return this.reports.runSchedulerCheck(req.user);}
+  @Get('products/preview') productPreview(@Req() req:Request & {user?:any}){return this.reports.productPreview(req.user);}
+  @Post('products/test') productTest(@Req() req:Request & {user?:any},@Body() body:any){return this.reports.productTest(req.user,body?.tokenId);}
   @Post('test') test(@Req() req:Request & {user?:any},@Body() body:any){return this.reports.test(req.user,body?.tokenId,body?.kind==='growth'?'growth':'daily');}
 }

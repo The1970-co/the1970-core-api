@@ -16,6 +16,7 @@ type ReportSettings = {
   posTarget: number; codTarget: number; revenueTarget: number;
   growthPct: number; declinePct: number; recordDays: 7 | 14 | 30;
   operatingCostEnabled: boolean; dailyOperatingCost: number;
+  productReport: { enabled: boolean; slots: { time: string; enabled: boolean }[]; topN: number };
 };
 const defaults: ReportSettings = {
   enabled: true,
@@ -25,6 +26,7 @@ const defaults: ReportSettings = {
   posTarget: 20_000_000, codTarget: 30_000_000, revenueTarget: 50_000_000,
   growthPct: 0, declinePct: 20, recordDays: 7,
   operatingCostEnabled: true, dailyOperatingCost: 7_000_000,
+  productReport: { enabled: false, slots: [{time:'21:00',enabled:true}], topN: 6 },
 };
 
 // Convert a local wall-clock date/time to UTC; no dependence on Railway's TZ.
@@ -77,12 +79,15 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
       slots:Array.isArray(v.slots)?v.slots:defaults.slots,
       metrics:{...defaults.metrics,...v.metrics},
       alerts:{...defaults.alerts,...v.alerts},
+      productReport: { ...defaults.productReport, ...(v.productReport || {}), slots: Array.isArray(v.productReport?.slots) ? v.productReport.slots : defaults.productReport.slots },
     } as ReportSettings;
   }
   async save(user:any, input:Partial<ReportSettings>) {
     const id=this.owner(user), prev=await this.settings(user);
     const slots=Array.isArray(input.slots) ? input.slots.map(x=>({time:String(x.time),enabled:Boolean(x.enabled)})) : prev.slots;
     if(slots.length>12 || slots.some(x=>!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(x.time))) throw new BadRequestException('Giờ gửi phải là HH:mm; tối đa 12 mốc');
+    const productSlots = Array.isArray(input.productReport?.slots) ? input.productReport.slots.map(x=>({time:String(x.time),enabled:Boolean(x.enabled)})) : prev.productReport.slots;
+    if(productSlots.length>12 || productSlots.some(x=>!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(x.time))) throw new BadRequestException('Giờ báo cáo sản phẩm phải là HH:mm; tối đa 12 mốc');
     const safeNum=(v:any,f:number,max=1e12)=>v===undefined?f:Math.max(0,Math.min(max,num(v)));
     const next:ReportSettings={
       enabled:input.enabled===undefined?prev.enabled:Boolean(input.enabled),
@@ -94,6 +99,11 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
       recordDays:[7,14,30].includes(Number(input.recordDays))?Number(input.recordDays) as 7|14|30:prev.recordDays,
       operatingCostEnabled:input.operatingCostEnabled===undefined?prev.operatingCostEnabled:Boolean(input.operatingCostEnabled),
       dailyOperatingCost:safeNum(input.dailyOperatingCost,prev.dailyOperatingCost),
+      productReport:{
+        enabled:input.productReport?.enabled===undefined?prev.productReport.enabled:Boolean(input.productReport.enabled),
+        slots:productSlots,
+        topN:Math.min(10,Math.max(1,Math.floor(safeNum(input.productReport?.topN,prev.productReport.topN,10)))),
+      },
     };
     await this.prisma.systemSetting.upsert({where:{key:KEY_PREFIX+id},create:{key:KEY_PREFIX+id,value:next as any},update:{value:next as any}});
     return next;
@@ -172,6 +182,63 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
       ads,operating,historical:daily,
     };
   }
+  // Product report uses the same fundamental fields as Dashboard product-created report:
+  // Order.createdAt, cancellation by INTERNAL Order.status, OrderItem.qty/lineTotal,
+  // and ProductVariant.productId to combine sizes/colors into the main product.
+  async productSnapshot(now = new Date()) {
+    const {day,time} = vnParts(now);
+    const orders = await this.prisma.order.findMany({
+      where:{createdAt:{gte:vnUtc(day),lt:vnUtc(shiftDay(day,1))},status:{not:'CANCELLED'}},
+      select:{
+        id:true,salesChannel:true,finalAmount:true,
+        items:{select:{qty:true,lineTotal:true,productName:true,sku:true,variantId:true,
+          variant:{select:{productId:true,product:{select:{name:true}}}}}},
+      },
+    });
+    type ProductLine={productId:string|null;name:string;quantity:number;pos:number;facebook:number;other:number;revenue:number;orderIds:Set<string>};
+    const grouped=new Map<string,ProductLine>();
+    for(const order of orders){
+      const channel=String(order.salesChannel||'').toUpperCase();
+      const group: 'pos'|'facebook'|'other' = channel==='POS'||channel==='SHOWROOM'?'pos':channel==='FACEBOOK_MANUAL'?'facebook':'other';
+      for(const line of order.items){
+        const qty=num(line.qty);
+        if(qty<=0)continue;
+        const productId=line.variant?.productId||null;
+        const name=String(line.variant?.product?.name||line.productName||line.sku||'Sản phẩm').trim();
+        // When catalog relation is missing, group by the saved order-item product name.
+        const key=productId?`product:${productId}`:`name:${name.toLocaleLowerCase('vi-VN')}`;
+        let row=grouped.get(key);
+        if(!row){row={productId,name,quantity:0,pos:0,facebook:0,other:0,revenue:0,orderIds:new Set()};grouped.set(key,row);}
+        row.quantity+=qty;
+        row[group]+=qty;
+        row.revenue+=num(line.lineTotal);
+        row.orderIds.add(order.id);
+      }
+    }
+    const products=[...grouped.values()].map(({orderIds,...r})=>({...r,orderCount:orderIds.size})).sort((a,b)=>b.quantity-a.quantity||b.revenue-a.revenue||a.name.localeCompare(b.name,'vi'));
+    return {day,time,productCount:products.length,orderCount:orders.length,quantity:products.reduce((s,x)=>s+x.quantity,0),revenue:products.reduce((s,x)=>s+x.revenue,0),products};
+  }
+
+  private productPushBody(s:Awaited<ReturnType<BusinessReportService['productSnapshot']>>,topN:number){
+    const head=`${s.productCount} SP · ${s.orderCount} đơn · ${fmt(s.quantity)} cái · ${fmt(s.revenue)}đ`;
+    const lines=s.products.slice(0,topN).map((p,i)=>`${i+1}. ${p.name}: ${p.quantity} cái (POS ${p.pos}, FB/COD ${p.facebook}${p.other?`, khác ${p.other}`:''}) · ${fmt(p.revenue)}đ`);
+    const remaining=s.products.length-topN;
+    return [head,...lines,remaining>0?`+${remaining} sản phẩm khác. Mở Báo cáo & cảnh báo để xem đầy đủ.`:''].filter(Boolean).join('\n');
+  }
+
+  async productPreview(user:any){
+    this.owner(user);
+    const s=await this.productSnapshot();
+    const body=this.productPushBody(s,s.products.length);
+    return {title:`Sản phẩm tạo đơn ${s.day} · ${s.time}`,body,snapshot:s};
+  }
+  async productTest(user:any,tokenId?:string){
+    const id=this.owner(user);
+    const c=await this.settings(user);
+    const s=await this.productSnapshot();
+    return this.push.notifyReport(id,'[Thử] Báo cáo sản phẩm',this.productPushBody(s,c.productReport.topN),{kind:'product_test',day:s.day},tokenId);
+  }
+
   private format(s:any,c:ReportSettings) {
     const entries:[Metric,string][]=[
       ['orders',`Đơn tạo ${fmt(s.orders)}`],['pos',`POS ${fmt(s.pos)}`],['cod',`COD ${fmt(s.cod)}`],
@@ -206,16 +273,16 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
     const c=await this.settings(user);
     const p=vnParts();
     const histories=await this.prisma.businessReportDelivery.findMany({
-      where:{userId,kind:'daily',key:{startsWith:`daily:${userId}:${p.day}:`}},
+      where:{userId,OR:[{key:{startsWith:`daily:${userId}:${p.day}:`}},{key:{startsWith:`products:${userId}:${p.day}:`}}]},
       select:{key:true,status:true,createdAt:true,sent:true,failed:true,error:true},
       orderBy:{createdAt:'desc'},take:20,
     });
     return {
       serverNow:new Date().toISOString(),localNow:p, schedulerStarted:Boolean(this.timer),
       isRunning:this.running,lastTickAt:this.lastTickAt,lastTickError:this.lastTickError,
-      lastTickSummary:this.lastTickSummary,enabled:c.enabled,slots:c.slots,
+      lastTickSummary:this.lastTickSummary,enabled:c.enabled,slots:c.slots,productReport:c.productReport,
       // Values that have passed should have delivery rows; otherwise scheduler is not delivering.
-      dueToday:c.slots.filter(x=>x.enabled&&x.time<=p.time),histories,
+      dueToday:c.slots.filter(x=>x.enabled&&x.time<=p.time),productDueToday:c.productReport.enabled?c.productReport.slots.filter(x=>x.enabled&&x.time<=p.time):[],histories,
     };
   }
 
@@ -265,10 +332,26 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
         stats.owners++;
         try {
         const c=await this.settings({id:userId,role:'OWNER'});
-        if(!c.enabled)continue;
+        if(!c.enabled && !c.productReport.enabled)continue;
+        // Independent product report schedule (does not depend on daily report slots).
+        if(c.productReport.enabled){
+          const dueProductSlots=c.productReport.slots.filter(x=>x.enabled&&x.time<=p.time);
+          const productKeys=dueProductSlots.map(x=>`products:${userId}:${p.day}:${x.time}`);
+          const existingProduct=productKeys.length?await this.prisma.businessReportDelivery.findMany({where:{key:{in:productKeys}},select:{key:true}}):[];
+          const sentProductKeys=new Set(existingProduct.map(x=>x.key));
+          const pendingProducts=dueProductSlots.filter(x=>!sentProductKeys.has(`products:${userId}:${p.day}:${x.time}`));
+          if(pendingProducts.length){
+            const productData=await this.productSnapshot();
+            const productBody=this.productPushBody(productData,c.productReport.topN);
+            for(const slot of pendingProducts){
+              stats.dueSlots++;stats.sentChecks++;
+              await this.deliver(userId,`products:${userId}:${p.day}:${slot.time}`,'product',`Báo cáo sản phẩm ${slot.time}`,productBody,p.day);
+            }
+          }
+        }
         // Catch up any due slot earlier today, including after restarts or slow queries.
         // Unique delivery key prevents duplicates; never send tomorrow's slots early.
-        const dueSlots=c.slots.filter(x=>x.enabled && x.time<=p.time);
+        const dueSlots=c.enabled?c.slots.filter(x=>x.enabled && x.time<=p.time):[];
         stats.dueSlots+=dueSlots.length;
         // Avoid expensive Dashboard/Shipment queries every minute after noon.
         const dueKeys=dueSlots.map(slot=>`daily:${userId}:${p.day}:${slot.time}`);
@@ -283,7 +366,7 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
           stats.sentChecks++;
           await this.deliver(userId,`daily:${userId}:${p.day}:${slot.time}`,'daily',`Báo cáo kinh doanh ${slot.time}`,this.format(s,c),p.day);
         }
-        if(p.minutes%5!==0)continue;
+        if(!c.enabled || p.minutes%5!==0)continue;
         for(const [name,value,threshold,label] of [
           ['pos',s.posRevenue,c.posTarget,'POS'],['cod',s.codRevenue,c.codTarget,'COD'],['revenue',s.createdRevenue,c.revenueTarget,'Tổng doanh thu tạo'],
         ] as const) {
