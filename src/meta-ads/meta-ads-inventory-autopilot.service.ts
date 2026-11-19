@@ -60,6 +60,44 @@ function compactText(value: any) {
   return normalizeText(value).replace(/\s+/g, '');
 }
 
+// Tên màu quảng cáo và tên màu nội bộ (không phân biệt hoa/thường, dấu).
+// Nhóm màu rộng (vd. nâu/coffee) chỉ chọn khi đúng MỘT màu trong cùng mã SP.
+const COLOR_EQUIVALENTS: ReadonlyArray<ReadonlyArray<string>> = [
+  ['nau', 'brown', 'coffee', 'cafe', 'ca phe'],
+  ['xam', 'gray', 'grey'],
+  ['den', 'black'],
+  ['trang', 'white'],
+  ['vang', 'yellow'],
+  ['do', 'red'],
+  ['hong', 'pink'],
+  ['cam', 'orange'],
+  ['tim', 'purple', 'violet'],
+  ['be', 'beige'],
+  ['kem', 'cream', 'ivory'],
+  ['xanh than', 'navy', 'navy blue', 'dark navy'],
+  ['xanh duong', 'blue'],
+  ['xanh la', 'green'],
+  ['reu', 'moss', 'moss green'],
+  ['olive', 'xanh olive', 'oliu'],
+  ['khaki', 'kaki'],
+  ['ghi', 'grey', 'gray'],
+  ['camel', 'nau camel'],
+  ['cognac', 'nau cognac'],
+  ['indigo', 'xanh indigo'],
+];
+
+function hasColorPhrase(text: string, phrase: string) {
+  const haystack = ` ${normalizeText(text)} `;
+  const needle = normalizeText(phrase);
+  return Boolean(needle) && haystack.includes(` ${needle} `);
+}
+
+function equivalentColorNames(color: string): string[] {
+  const normalized = normalizeText(color);
+  const matches = COLOR_EQUIVALENTS.filter((set) => set.some((name) => normalizeText(name) === normalized));
+  return uniq(matches.flatMap((set) => set.map(normalizeText)));
+}
+
 function uniq<T>(items: T[]) {
   return Array.from(new Set(items));
 }
@@ -236,37 +274,42 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
 
   private colorMatchScore(group: ColorStockGroup, rawAdText: string) {
     const text = normalizeText(rawAdText);
-    const compact = compactText(rawAdText);
-    const colorPhrase = normalizeText(group.color);
-    const colorCompact = compactText(group.color);
-    const skuAliases = group.skuAliases.map(compactText).filter(Boolean);
+    const groupColor = normalizeText(group.color);
+    if (!groupColor) return 0;
 
-    if (skuAliases.some((alias) => alias.length >= 4 && compact.includes(alias))) return 120;
-    if (colorPhrase && text.includes(colorPhrase)) return 110;
-    if (colorCompact && compact.includes(colorCompact)) return 105;
+    // Màu được ghi đầy đủ trong Ads: ưu tiên hơn mọi cách đoán theo token.
+    if (hasColorPhrase(text, groupColor)) return 130;
 
-    const groupTokens = this.meaningfulColorTokens(group.color);
-    if (!groupTokens.length) return 0;
-    const adTokens = new Set(normalizeText(rawAdText).split(/\s+/).filter(Boolean));
-    const matched = groupTokens.filter((token) => adTokens.has(token));
+    // Tên màu tương đương chỉ áp dụng khi toàn bộ tên màu kho chính là một alias.
+    // Không tự coi "Nâu" là "Nâu đậm", "Coffee" là "Dark Coffee", v.v.
+    const equivalents = equivalentColorNames(group.color);
+    if (equivalents.some((alias) => alias !== groupColor && hasColorPhrase(text, alias))) return 115;
+
+    // SKU variant có thể chứa màu dưới dạng mã, nhưng cần ranh giới để tránh trùng tiền tố.
+    const skuAliases = group.skuAliases.map(normalizeText).filter(Boolean);
+    if (skuAliases.some((alias) => alias.length >= 5 && hasColorPhrase(text, alias))) return 125;
+
+    // Match một phần tên màu dài chỉ phục vụ hiển thị, tuyệt đối không auto pause.
+    const tokens = this.meaningfulColorTokens(group.color);
+    const adTokens = new Set(text.split(/\s+/).filter(Boolean));
+    const matched = tokens.filter((token) => adTokens.has(token));
     if (!matched.length) return 0;
-
-    // Cho phép tên quảng cáo dùng tên màu đời thường khác tên màu kho.
-    // Ví dụ kho "RÊU TRÀM" nhưng bài ads ghi "Xanh rêu" -> token "reu" vẫn match chắc.
-    const ratio = matched.length / groupTokens.length;
-    if (matched.length === groupTokens.length) return 95;
-    if (matched.length === 1 && groupTokens.length === 1) return 90;
-    return 60 + Math.round(ratio * 25);
+    if (matched.length === tokens.length && tokens.length > 1) return 75;
+    return 40;
   }
 
   private productMatchesAd(group: ColorStockGroup, rawAdText: string) {
+    const text = normalizeText(rawAdText);
     const compact = compactText(rawAdText);
-    const productTokens = uniq([
-      compactText(group.productCode),
-      ...(group.productAliases || []).map(compactText),
-    ]).filter((token) => token.length >= 4);
-    const skuAliases = group.skuAliases.map(compactText).filter(Boolean);
-    return productTokens.some((token) => compact.includes(token)) || skuAliases.some((alias) => alias.length >= 4 && compact.includes(alias));
+    const codes = uniq([group.productCode, ...(group.productAliases || [])].map(normalizeText)).filter((x) => x.length >= 4);
+    if (codes.some((code) => hasColorPhrase(text, code))) return true;
+    // Cho phép mã viết "AB 968" nhưng không match nhầm "AB9680".
+    if (codes.some((code) => {
+      const m = code.match(/^([a-z]{1,8})([0-9]{2,6})$/);
+      return Boolean(m && new RegExp(`(?:^| )${m[1]} ${m[2]}(?: |$)`).test(` ${text} `));
+    })) return true;
+    const skuAliases = group.skuAliases.map(normalizeText).filter((x) => x.length >= 5);
+    return skuAliases.some((alias) => hasColorPhrase(text, alias)) || codes.some((code) => compact === compactText(code));
   }
 
   private bestGroupForAd(
@@ -302,6 +345,10 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
           }
         }
 
+        if (manualColor) {
+          return { group: null as ColorStockGroup | null, ambiguous: true, score: 0, manual: true, candidates: [] };
+        }
+
         if (manualGroups.length === 1) {
           return {
             group: manualGroups[0],
@@ -327,7 +374,8 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
       .filter((group) => this.productMatchesAd(group, raw))
       .map((group) => {
         let score = this.colorMatchScore(group, raw);
-        if (!score && (colorCountByProduct.get(group.productCode) || 0) === 1) score = 20;
+        // Một màu duy nhất vẫn cần Ads nêu rõ màu; không đoán cho Auto Pause.
+        // Mức 40-75 chỉ dùng làm gợi ý, không đủ để xác nhận mapping.
         return { group, score };
       })
       .filter((item) => item.score > 0)
@@ -337,7 +385,8 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
     const best = candidates[0];
     const second = candidates[1];
     const ambiguous = Boolean(second && second.score === best.score && second.group.colorKey !== best.group.colorKey);
-    return { group: ambiguous ? null : best.group, ambiguous, score: best.score, candidates: candidates.slice(0, 5) };
+    // Chỉ xác nhận khi khớp màu đầy đủ/alias rõ ràng. Dưới 90 là gợi ý.
+    return { group: ambiguous || best.score < 90 ? null : best.group, ambiguous: ambiguous || best.score < 90, score: best.score, candidates: candidates.slice(0, 5) };
   }
 
   private async loadInventoryGroups(): Promise<ColorStockGroup[]> {
@@ -732,6 +781,11 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
         null;
 
       if (!selected) {
+        const aliases = productGroups.filter((group) => equivalentColorNames(group.color).includes(normalizeText(color)));
+        if (aliases.length === 1) selected = aliases[0];
+      }
+
+      if (!selected) {
         return {
           safe: false,
           level: 'AMBIGUOUS',
@@ -834,7 +888,7 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
         const manualColor = String(ad?.manualColor || ad?.manualMapping?.color || '').trim();
         const explicitManual = Boolean(manualCode && manualColor && manualCode === best.group.productCode && normalizeText(manualColor) === normalizeText(best.group.color));
         const adText = [ad?.name, ad?.adName, ad?.adSetName, ad?.campaignName].filter(Boolean).join(' ');
-        const explicitAuto = !manualCode && this.productMatchesAd(best.group, adText) && this.colorMatchScore(best.group, adText) > 0;
+        const explicitAuto = !manualCode && this.productMatchesAd(best.group, adText) && this.colorMatchScore(best.group, adText) >= 90;
         if (explicitManual || explicitAuto) bestGroupByAd.set(String(ad?.metaAdId || ad?.id || ''), best.group.key);
       }
 
