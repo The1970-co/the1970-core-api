@@ -328,6 +328,81 @@ export class MobilePushService implements OnModuleDestroy {
     return { success: result.failed.length === 0, sent: result.sent.length, failed: result.failed.length, devices };
   }
 
+  // Chỉ OWNER/ADMIN nhận sự kiện tài chính Meta Ads. Không gửi broadcast như thông báo đơn.
+  // Best effort: lỗi APNs không được làm thất bại giao dịch đã thành công với Meta.
+  private readonly autopilotPushRecentlySent = new Map<string, number>();
+
+  async notifyAutopilot(event: {
+    eventId: string;
+    kind: 'AD_PAUSED' | 'AD_ACTIVE' | 'BUDGET_CHANGED';
+    source: 'auto' | 'manual';
+    name: string;
+    reason?: string;
+    oldBudget?: number;
+    newBudget?: number;
+    level?: string;
+    entityId?: string;
+  }) {
+    const key = String(event.eventId || '').trim();
+    if (!key) return { success: false, sent: 0, failed: 0, reason: 'MISSING_EVENT_ID' };
+    const now = Date.now();
+    for (const [id, at] of this.autopilotPushRecentlySent) {
+      if (now - at > 10 * 60_000) this.autopilotPushRecentlySent.delete(id);
+    }
+    if (this.autopilotPushRecentlySent.has(key)) {
+      return { success: true, sent: 0, failed: 0, reason: 'DUPLICATE' };
+    }
+    this.autopilotPushRecentlySent.set(key, now);
+    try {
+      const admins = await this.prisma.adminUser.findMany({
+        where: { isActive: true, role: { in: ['OWNER', 'ADMIN'] } },
+        select: { id: true },
+      });
+      const ids = admins.map((a) => a.id);
+      if (!ids.length) return { success: true, sent: 0, failed: 0, reason: 'NO_ADMINS' };
+      const tokens = await this.prisma.mobilePushToken.findMany({
+        where: {
+          isActive: true, platform: 'ios', provider: 'apns',
+          OR: [{ userId: { in: ids } }, { staffId: { in: ids } }],
+        },
+        select: { token: true }, take: 500,
+      });
+      if (!tokens.length) return { success: true, sent: 0, failed: 0, reason: 'NO_ADMIN_DEVICE' };
+      const source = event.source === 'auto' ? 'Autopilot' : 'Thủ công';
+      const title = event.kind === 'AD_PAUSED' ? `${source} đã tắt Ads`
+        : event.kind === 'AD_ACTIVE' ? `${source} đã bật Ads`
+        : `${source} đã đổi ngân sách`;
+      const detail = event.kind === 'BUDGET_CHANGED'
+        ? `${this.formatMoney(event.oldBudget)} → ${this.formatMoney(event.newBudget)}`
+        : String(event.reason || '').trim();
+      const note: any = new apn.Notification();
+      note.topic = process.env.APNS_BUNDLE_ID || 'co.the1970.operations';
+      note.pushType = 'alert';
+      note.priority = 10;
+      note.expiry = Math.floor(Date.now() / 1000) + 3600;
+      note.alert = { title, body: `${event.name || 'Meta Ads'}${detail ? ` · ${detail}` : ''}`.slice(0, 450) };
+      note.sound = 'default';
+      note.payload = {
+        type: 'meta_autopilot', kind: event.kind, source: event.source,
+        eventId: key, entityId: String(event.entityId || ''), level: String(event.level || 'ad'),
+        route: '/mobile/autopilot',
+      };
+      const result = await this.provider().send(note, [...new Set(tokens.map((t) => t.token))]);
+      const dead = result.failed.filter((f: any) =>
+        ['Unregistered', 'BadDeviceToken'].includes(String(f.response?.reason || '')),
+      ).map((f: any) => f.device).filter(Boolean);
+      if (dead.length) await this.prisma.mobilePushToken.updateMany({
+        where: { token: { in: dead } }, data: { isActive: false },
+      });
+      return { success: result.failed.length === 0, sent: result.sent.length, failed: result.failed.length };
+    } catch (error) {
+      console.error('[MOBILE_PUSH_AUTOPILOT_FAILED]', error);
+      // Cho phép retry thủ công sau lỗi; API Meta vẫn thành công.
+      this.autopilotPushRecentlySent.delete(key);
+      return { success: false, sent: 0, failed: 0, reason: 'PUSH_ERROR' };
+    }
+  }
+
   onModuleDestroy() {
     this.apnProvider?.shutdown();
   }

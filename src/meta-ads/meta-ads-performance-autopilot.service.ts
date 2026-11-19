@@ -3,6 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { MetaAdsSyncService } from './meta-ads-sync.service';
 import { MetaAdsOrderAttributionService } from './meta-ads-order-attribution.service';
 import { MetaAdsInventoryAutopilotService } from './meta-ads-inventory-autopilot.service';
+import { MobilePushService } from '../mobile-push/mobile-push.service';
 
 type AutomationLevel = 'manual' | 'semi' | 'auto';
 type AnyRow = Record<string, any>;
@@ -58,6 +59,7 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
     private readonly metaAdsSyncService: MetaAdsSyncService,
     private readonly attributionService: MetaAdsOrderAttributionService,
     private readonly inventoryAutopilotService: MetaAdsInventoryAutopilotService,
+    private readonly mobilePush: MobilePushService,
   ) {}
 
   private envBool(key: string, fallback: boolean) {
@@ -390,6 +392,15 @@ export class MetaAdsPerformanceAutopilotService implements OnModuleInit, OnModul
         roas: context.roas,
         spend: context.spend,
       });
+      // Chỉ báo sau khi Meta đã đổi ngân sách; không gửi khi Dry Run.
+      void this.mobilePush.notifyAutopilot({
+        eventId: `budget:${budgetLevel}:${budgetEntityId}:${nextBudget}:${Date.now()}`,
+        kind: 'BUDGET_CHANGED', source: String(context.source || '').toLowerCase() === 'manual' ? 'manual' : 'auto',
+        name: `${budgetLevel === 'CAMPAIGN' ? 'Chiến dịch' : 'Nhóm quảng cáo'} ${budgetEntityId}`,
+        reason: context.roas != null ? `ROAS ${Number(context.roas).toFixed(2)}` : '',
+        oldBudget: currentBudget, newBudget: nextBudget,
+        level: budgetLevel.toLowerCase(), entityId: budgetEntityId,
+      }).catch((error) => this.logger.warn(`[META_SCALE_PUSH] ${error?.message || error}`));
     }
 
     return {

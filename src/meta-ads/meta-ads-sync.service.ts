@@ -108,6 +108,7 @@ function mapMetaAdsManagerMetrics(row: any, metrics: any = {}) {
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { SyncMetaAdsDto, MetaInsightLevel } from './dto/sync-meta-ads.dto';
+import { MobilePushService } from '../mobile-push/mobile-push.service';
 
 type GraphListResponse<T> = {
   data?: T[];
@@ -130,7 +131,7 @@ export class MetaAdsSyncService {
   private autopilotActiveAdsInFlight: Promise<any[]> | null = null;
   private autopilotTemplateAdSetsCache: { at: number; rows: any[] } | null = null;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly mobilePush: MobilePushService) {}
 
   private get version() {
     return process.env.META_API_VERSION || process.env.META_GRAPH_API_VERSION || 'v25.0';
@@ -940,6 +941,15 @@ export class MetaAdsSyncService {
         auditSaved = true;
       } catch (error: any) { this.logger.warn(`[META_AD_STATUS_AUDIT] ${error?.message || error}`); }
     }
+    // Chỉ gửi sau khi Graph xác nhận. Push best-effort, không rollback trạng thái Ads.
+    void this.mobilePush.notifyAutopilot({
+      eventId: `ad:${adId}:${status}:${Date.now()}`,
+      kind: status === 'PAUSED' ? 'AD_PAUSED' : 'AD_ACTIVE',
+      source: actor === 'MANUAL' ? 'manual' : 'auto',
+      name: details.adName || existingAd?.name || `Ads ${adId}`,
+      reason: details.reason || (details.productCode ? `${details.productCode}${details.color ? ` · ${details.color}` : ''}` : ''),
+      level: 'ad', entityId: adId,
+    }).catch((error) => this.logger.warn(`[META_AD_PUSH] ${error?.message || error}`));
     return { ok: true, metaAdId: adId, status, auditSaved, auditWarning: auditSaved ? null : 'Meta đã nhận lệnh nhưng không lưu được lịch sử; kiểm tra MetaSyncLog.' };
   }
 
@@ -963,6 +973,12 @@ export class MetaAdsSyncService {
       } });
     } catch (error: any) { this.logger.warn(`[META_ENTITY_STATUS_AUDIT] ${error?.message || error}`); }
     this.autopilotActiveAdsCache = null;
+    void this.mobilePush.notifyAutopilot({
+      eventId: `${level}:${id}:${status}:${Date.now()}`,
+      kind: status === 'PAUSED' ? 'AD_PAUSED' : 'AD_ACTIVE', source: 'manual',
+      name: `${level === 'campaign' ? 'Chiến dịch' : 'Nhóm quảng cáo'} ${id}`,
+      level, entityId: id,
+    }).catch((error) => this.logger.warn(`[META_ENTITY_PUSH] ${error?.message || error}`));
     return { ok: true, level, id, status };
   }
 
