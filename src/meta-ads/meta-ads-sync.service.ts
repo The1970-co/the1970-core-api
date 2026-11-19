@@ -903,12 +903,14 @@ export class MetaAdsSyncService {
     };
   }
 
-  async setAdStatus(metaAdId: string, status: 'PAUSED' | 'ACTIVE', actor: 'MANUAL' | 'AUTOPILOT_INVENTORY' = 'MANUAL') {
+  async setAdStatus(metaAdId: string, status: 'PAUSED' | 'ACTIVE', actor: 'MANUAL' | 'AUTOPILOT_INVENTORY' = 'MANUAL', details: { reason?: string; adName?: string; productCode?: string; color?: string; sizes?: Array<{ size: string; qty: number }>; matchMode?: string } = {}) {
     const adId = String(metaAdId || '').trim();
     if (!adId) throw new Error('Thiếu metaAdId');
     if (status !== 'PAUSED' && status !== 'ACTIVE') throw new Error('Meta ad status không hợp lệ');
 
+    const existingAd = await (this.prisma as any).metaAd.findFirst({ where: { metaAdId: adId }, select: { name: true, status: true, effectiveStatus: true } }).catch(() => null);
     const result = await this.graphPost<{ success?: boolean }>(`/${adId}`, { status });
+    if (result?.success === false) throw new Error('Meta không xác nhận thay đổi trạng thái Ads');
 
     try {
       await (this.prisma as any).metaAd.updateMany({
@@ -924,19 +926,21 @@ export class MetaAdsSyncService {
       this.logger.warn(`[META_AD_STATUS_DB_CACHE] ${adId}: ${error?.message || error}`);
     }
 
-    if (result?.success !== false) {
+    let auditSaved = false;
+    {
       this.autopilotActiveAdsCache = null;
       try {
         await (this.prisma as any).metaSyncLog.create({ data: {
           metaAccountId: null, syncType: 'META_AUTOPILOT_AD_STATUS_ACTION', status: 'SUCCESS',
           range: actor, startedAt: new Date(), finishedAt: new Date(), durationMs: 0,
           scanned: 1, upserted: 1, failed: 0,
-          message: `${actor} ${status} ad ${adId}`,
-          errorJson: { metaAdId: adId, action: status, actor },
+          message: `${actor} ${status} ad ${adId}${details.reason ? `: ${details.reason}` : ''}`,
+          errorJson: { metaAdId: adId, action: status, actor, adName: details.adName || existingAd?.name || null, previousStatus: existingAd?.status || null, reason: details.reason || null, productCode: details.productCode || null, color: details.color || null, sizes: details.sizes || [], matchMode: details.matchMode || null },
         } });
+        auditSaved = true;
       } catch (error: any) { this.logger.warn(`[META_AD_STATUS_AUDIT] ${error?.message || error}`); }
     }
-    return { ok: result?.success !== false, metaAdId: adId, status };
+    return { ok: true, metaAdId: adId, status, auditSaved, auditWarning: auditSaved ? null : 'Meta đã nhận lệnh nhưng không lưu được lịch sử; kiểm tra MetaSyncLog.' };
   }
 
   async setAutopilotEntityStatus(level: 'campaign' | 'adset', metaId: string, status: 'PAUSED' | 'ACTIVE') {
@@ -975,6 +979,13 @@ export class MetaAdsSyncService {
       metaEntityId: String(log.errorJson?.metaEntityId || ''),
       action: String(log.errorJson?.action || ''),
       actor: String(log.errorJson?.actor || 'MANUAL'),
+      adName: String(log.errorJson?.adName || ''),
+      reason: String(log.errorJson?.reason || ''),
+      productCode: String(log.errorJson?.productCode || ''),
+      color: String(log.errorJson?.color || ''),
+      matchMode: String(log.errorJson?.matchMode || ''),
+      sizes: Array.isArray(log.errorJson?.sizes) ? log.errorJson.sizes : [],
+      previousStatus: String(log.errorJson?.previousStatus || ''),
     })) };
   }
 

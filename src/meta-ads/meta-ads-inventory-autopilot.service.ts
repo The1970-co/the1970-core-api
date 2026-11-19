@@ -827,7 +827,15 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
       const bestGroupByAd = new Map<string, string>();
       for (const ad of ads || []) {
         const best = this.bestGroupForAd(ad, groups, colorCountByProduct, { activeOnly: true });
-        if (best.group) bestGroupByAd.set(String(ad?.metaAdId || ad?.id || ''), best.group.key);
+        if (!best.group) continue;
+        // AUTO PAUSE tuyệt đối không dùng màu suy đoán từ mặc định một biến thể.
+        // Yêu cầu mapping thủ công có màu chính xác hoặc tên Ads khớp rõ mã + màu.
+        const manualCode = String(ad?.manualProductCode || ad?.manualMapping?.productCode || '').trim().toUpperCase();
+        const manualColor = String(ad?.manualColor || ad?.manualMapping?.color || '').trim();
+        const explicitManual = Boolean(manualCode && manualColor && manualCode === best.group.productCode && normalizeText(manualColor) === normalizeText(best.group.color));
+        const adText = [ad?.name, ad?.adName, ad?.adSetName, ad?.campaignName].filter(Boolean).join(' ');
+        const explicitAuto = !manualCode && this.productMatchesAd(best.group, adText) && this.colorMatchScore(best.group, adText) > 0;
+        if (explicitManual || explicitAuto) bestGroupByAd.set(String(ad?.metaAdId || ad?.id || ''), best.group.key);
       }
 
       for (const group of critical) {
@@ -858,7 +866,7 @@ export class MetaAdsInventoryAutopilotService implements OnModuleInit, OnModuleD
           try {
             const canAutoPause = this.runtimeEnabled && this.runtimeLevel === 'auto';
             if (canAutoPause && !dryRun) {
-              await this.metaAdsSyncService.setAdStatus(ad.metaAdId || ad.id, 'PAUSED', 'AUTOPILOT_INVENTORY');
+              await this.metaAdsSyncService.setAdStatus(ad.metaAdId || ad.id, 'PAUSED', 'AUTOPILOT_INVENTORY', { reason, adName: String(ad.name || ad.adName || ''), productCode: group.productCode, color: group.color, sizes: group.sizes.map((s) => ({ size: s.size, qty: s.qty })), matchMode: String(ad?.manualColor || ad?.manualMapping?.color ? 'MANUAL_COLOR' : 'AUTO_EXPLICIT_COLOR') });
               pausedAds += 1;
             }
             this.pushAction({
