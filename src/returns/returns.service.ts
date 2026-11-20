@@ -1546,6 +1546,8 @@ export class ReturnsService {
     const type = String(params?.type || "ALL").trim().toUpperCase();
     const branchId = String(params?.branchId || "ALL").trim();
     const q = String(params?.q || "").trim();
+    const staff = String(params?.staff || "").trim();
+    if (staff) filters.push({ handledByStaffName: { contains: staff, mode: "insensitive" } });
 
     if (status !== "ALL") filters.push({ status });
     if (type !== "ALL") filters.push({ type });

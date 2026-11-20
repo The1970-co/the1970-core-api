@@ -71,10 +71,11 @@ export class ReturnsController {
     @Query("type") type: string,
     @Query("from") from: string,
     @Query("to") to: string,
+    @Query("staff") staff: string,
     @Req() req: Request & { user?: any },
   ) {
     return this.returnsService.getReturns(
-      { q, status, branchId, type, from, to },
+      { q, status, branchId, type, from, to, staff },
       req.user,
     );
   }
