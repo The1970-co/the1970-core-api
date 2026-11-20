@@ -125,6 +125,13 @@ export class FinanceController {
   }
 
 
+
+  @Get("daily/export-excel")
+  @RequirePermissions("finance.view")
+  exportDailyExcel(@Req() req: any, @Query() query: any) {
+    return this.financeService.exportDailyExcel(query, req.user);
+  }
+
   @Get("daily-ledger/audit")
   @RequirePermissions("finance.view")
   auditDailyLedger(

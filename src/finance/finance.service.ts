@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { randomUUID } from "crypto";
+import * as XLSX from "xlsx";
 import { FulfillmentStatus, OrderStatus, PaymentStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 
@@ -480,6 +481,7 @@ export class FinanceService {
 
       mappedCashVouchers.push({
         id: voucher.id,
+        paymentSourceId: voucher.paymentSourceId || null,
         orderId: voucher.refId || null,
         orderCode: voucher.refType === "ORDER" ? voucher.refId : voucher.voucherCode,
         voucherCode: voucher.voucherCode,
@@ -567,6 +569,7 @@ export class FinanceService {
       payments: [
         ...moneyPayments.map((p) => ({
         id: p.id,
+        paymentSourceId: p.paymentSourceId || null,
         orderId: p.orderId,
         orderCode: p.order?.orderCode || "—",
         branchId: p.order?.branchId || "—",
@@ -596,6 +599,121 @@ export class FinanceService {
     };
   }
 
+
+
+  // Xuất trực tiếp từ backend để không phụ thuộc số dòng đang render tại trình duyệt.
+  async exportDailyExcel(params: {
+    dateFrom?: string; dateTo?: string; branchId?: string; sourceIds?: string; detailBranch?: string; detailSources?: string;
+    flow?: string; staff?: string; status?: string; recordType?: string;
+    detailDateFrom?: string; detailDateTo?: string; amountFrom?: string;
+    amountTo?: string; q?: string; columns?: string;
+  }, user?: any) {
+    if (params.dateFrom && params.dateTo && params.dateFrom > params.dateTo) {
+      throw new BadRequestException("Khoảng ngày xuất không hợp lệ.");
+    }
+    const base = await this.getDailyReconciliation({
+      dateFrom: params.dateFrom, dateTo: params.dateTo,
+      branchId: params.branchId || "ALL", paymentSourceId: "ALL",
+      status: "ALL", q: "",
+    }, user);
+    const sources = await this.prisma.paymentSource.findMany({ select: { id: true, name: true, code: true } });
+    const branches = await this.prisma.branch.findMany({ select: { id: true, name: true } });
+    const sourceNames = new Map(sources.map((v) => [String(v.id), v.name || v.code || "—"]));
+    const branchNames = new Map(branches.map((v) => [String(v.id), v.name || "—"]));
+    const clean = (v: any) => String(v ?? "").trim();
+    const normalized = (v: any) => clean(v).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    const safeCell = (v: any) => /^[=+@\-\t\r]/.test(clean(v)) ? "'" + clean(v) : clean(v);
+    const selectedSources = new Set(clean(params.sourceIds).split(",").filter(Boolean));
+    const selectedDetailSources = new Set(clean(params.detailSources).split("|").filter(Boolean).map(normalized));
+    const allowed = new Set(["time","code","customer","phone","branch","staff","source","sourceType","flow","recordType","amount","status","title","category","note"]);
+    const selectedCols = clean(params.columns).split(",").filter((key) => allowed.has(key));
+    const columns = selectedCols.length ? Array.from(new Set(selectedCols)) : Array.from(allowed);
+    const names: Record<string,string> = {
+      time:"Thời gian",code:"Mã đơn/phiếu",customer:"Đối tượng",phone:"SĐT",branch:"Chi nhánh",staff:"Nhân viên",
+      source:"Nguồn tiền",sourceType:"Loại nguồn",flow:"Dòng tiền",recordType:"Loại chứng từ",amount:"Số tiền (+/-)",
+      status:"Trạng thái",title:"Nội dung",category:"Danh mục",note:"Ghi chú",
+    };
+    const val = (r: any, key: string): any => {
+      const receipt = clean(r.flowType || r.type).toUpperCase() !== "PAYMENT";
+      const sourceName = sourceNames.get(clean(r.paymentSourceId)) || r.sourceName || r.method || "—";
+      const rawStatus = clean(r.status).toUpperCase();
+      const statusNames: Record<string,string> = {CONFIRMED:"Đã xác nhận",PAID:"Đã thu",PARTIAL:"Thu một phần",PENDING_COD:"COD chờ",DRAFT:"Nháp",CANCELLED:"Đã huỷ",REFUNDED:"Hoàn tiền"};
+      const rawType = clean(r.sourceType).toUpperCase();
+      const srcType = rawType === "CASH" ? "Tiền mặt" : rawType === "BANK" ? "Ngân hàng / chuyển khoản" : rawType === "COD" ? "COD" : (rawType || "Khác");
+      const values: Record<string,any> = {
+        time: r.paidAt || r.createdAt ? new Date(r.paidAt || r.createdAt).toLocaleString("vi-VN", {timeZone:"Asia/Ho_Chi_Minh"}) : "",
+        code: r.voucherCode || r.orderCode || "", customer: r.customerName || "", phone: r.customerPhone || "",
+        branch: branchNames.get(clean(r.branchId)) || r.branchName || "—",
+        staff: r.createdByName || r.staffName || r.createdById || r.staffId || "—",
+        source: sourceName, sourceType: srcType, flow: receipt ? "Tiền vào" : "Tiền ra",
+        recordType: clean(r.recordType).toUpperCase() === "CASH_VOUCHER" || r.voucherCode ? "Phiếu thu/chi" : "Đơn hàng",
+        amount: receipt ? Number(r.amount || 0) : -Number(r.amount || 0),
+        status: statusNames[rawStatus] || r.status || "", title:r.title || "", category:r.category || "", note:r.note || "",
+      };
+      return key === "amount" ? values[key] : safeCell(values[key]);
+    };
+    const minAmount = params.amountFrom !== undefined && clean(params.amountFrom) !== "" ? Number(params.amountFrom) : null;
+    const maxAmount = params.amountTo !== undefined && clean(params.amountTo) !== "" ? Number(params.amountTo) : null;
+    const filtered = (Array.isArray(base.payments) ? base.payments : []).filter((r: any) => {
+      const receipt = clean(r.flowType || r.type).toUpperCase() !== "PAYMENT";
+      const source = normalized(val(r,"source"));
+      const sourceType = normalized(r.sourceType);
+      const flow = clean(params.flow).toUpperCase();
+      const pos = normalized([r.voucherCode,r.orderCode,r.title,r.category,r.note,r.recordType].filter(Boolean).join(" "));
+      const isPos = pos.includes("pos") || pos.includes("ban le");
+      const kind = sourceType.includes("cod") || source.includes("cod") ? "COD" :
+        sourceType.includes("bank") || source.includes("chuyen khoan") || source.includes("vcb") || source.includes("agribank") ? "BANK" :
+        sourceType.includes("cash") || source.includes("tien mat") || source.includes("quy tien") ? "CASH" : "OTHER";
+      if (selectedSources.size && !selectedSources.has(clean(r.paymentSourceId))) return false;
+      if (params.detailBranch && params.detailBranch !== "ALL" && normalized(val(r,"branch")) !== normalized(params.detailBranch)) return false;
+      if (selectedDetailSources.size && !selectedDetailSources.has(source)) return false;
+      if (flow === "RECEIPT" && !receipt || flow === "PAYMENT" && receipt || flow === "POS" && !isPos ||
+          flow === "TRANSFER" && kind !== "BANK" || flow === "BANK" && kind !== "BANK" ||
+          flow === "CASH" && kind !== "CASH" || flow === "OTHER" && kind !== "OTHER") return false;
+      if (params.staff && params.staff !== "ALL" && val(r,"staff") !== params.staff) return false;
+      if (params.status && params.status !== "ALL" && normalized(val(r,"status")) !== normalized(params.status)) return false;
+      if (params.recordType && params.recordType !== "ALL" && (params.recordType === "ORDER" ? val(r,"recordType") !== "Đơn hàng" : val(r,"recordType") !== "Phiếu thu/chi")) return false;
+      const isoDate = clean(r.paidAt || r.createdAt);
+      const dateKey = isoDate ? new Date(isoDate).toLocaleDateString("en-CA",{timeZone:"Asia/Ho_Chi_Minh"}) : "";
+      if (params.detailDateFrom && dateKey < params.detailDateFrom || params.detailDateTo && dateKey > params.detailDateTo) return false;
+      const absAmount = Math.abs(Number(r.amount || 0));
+      if (minAmount !== null && absAmount < minAmount || maxAmount !== null && absAmount > maxAmount) return false;
+      if (params.q) {
+        const keywords = [r.voucherCode,r.orderCode,r.customerName,r.customerPhone,r.branchName,val(r,"branch"),
+          val(r,"source"),r.sourceCode,r.method,val(r,"sourceType"),val(r,"status"),val(r,"staff"),
+          r.title,r.category,r.note,r.recordType].filter(Boolean).join(" ");
+        if (!normalized(keywords).includes(normalized(params.q))) return false;
+      }
+      return true;
+    });
+    const receiptTotal = filtered.filter((r:any) => clean(r.flowType || r.type).toUpperCase() !== "PAYMENT").reduce((n:number,r:any)=>n+Number(r.amount||0),0);
+    const paymentTotal = filtered.filter((r:any) => clean(r.flowType || r.type).toUpperCase() === "PAYMENT").reduce((n:number,r:any)=>n+Number(r.amount||0),0);
+    const book = XLSX.utils.book_new();
+    const summary = [
+      ["THE 1970 — TỔNG QUAN DÒNG TIỀN"], ["Khoảng thời gian", `${params.dateFrom || ""} — ${params.dateTo || ""}`],
+      ["Chi nhánh", params.branchId && params.branchId !== "ALL" ? branchNames.get(params.branchId) || params.branchId : "Tất cả"],
+      ["Chi nhánh chi tiết",params.detailBranch || "ALL"],["Nguồn tiền chi tiết",params.detailSources || "Tất cả"],
+      ["Số giao dịch",filtered.length],["Tổng tiền vào",receiptTotal],["Tổng tiền ra",paymentTotal],["Dòng tiền ròng",receiptTotal-paymentTotal],
+      ["Từ ngày giao dịch",params.detailDateFrom || "Tất cả"],["Đến ngày giao dịch",params.detailDateTo || "Tất cả"],
+      ["Dòng tiền",params.flow || "ALL"],["Trạng thái",params.status || "ALL"],["Nhân viên",params.staff || "ALL"],
+      ["Loại chứng từ",params.recordType || "ALL"],["Nguồn tiền",selectedSources.size ? Array.from(selectedSources).map(id=>sourceNames.get(id)||id).join(", ") : "Tất cả"],
+      ["Khoảng tiền",`${params.amountFrom || "0"} — ${params.amountTo || "Không giới hạn"}`],["Tìm kiếm",params.q || ""],
+    ];
+    const overview = XLSX.utils.aoa_to_sheet(summary);
+    overview["!cols"] = [{wch:27},{wch:62}];
+    for (const ix of [6,7,8]) { const cell=overview[`B${ix+1}`]; if (cell) cell.z = '#,##0" ₫"'; }
+    XLSX.utils.book_append_sheet(book,overview,"Tổng hợp");
+    const detail = XLSX.utils.aoa_to_sheet([columns.map(c=>names[c]), ...filtered.map((r:any)=>columns.map(c=>val(r,c)))]);
+    detail["!cols"] = columns.map(c=>({wch: c==="note" || c==="title" ? 46 : c==="time" ? 22 : c==="amount" ? 20 : 23}));
+    detail["!autofilter"] = {ref:detail["!ref"] || "A1"};
+    if (columns.includes("amount")) {
+      const col = XLSX.utils.encode_col(columns.indexOf("amount"));
+      for (let i=2;i<=filtered.length+1;i++) { const cell=detail[`${col}${i}`]; if(cell) cell.z='#,##0;[Red](#,##0)'; }
+    }
+    XLSX.utils.book_append_sheet(book,detail,"Chi tiết giao dịch");
+    const filename=`The1970_DongTien_${params.dateFrom || ""}_${params.dateTo || ""}.xlsx`;
+    return { filename, base64: XLSX.write(book,{type:"base64",bookType:"xlsx"}), count:filtered.length };
+  }
 
   private async ensureLocalDeliveryReconciliationTable() {
     if (!this.localDeliverySchemaReady) {

@@ -50,6 +50,7 @@ type GetOrdersParams = {
   branchIds?: string;
   orderStatuses?: string;
   paymentStatuses?: string;
+  paymentSourceIds?: string;
   fulfillmentStatuses?: string;
   deliveryStatuses?: string;
   salesChannels?: string;
@@ -3302,14 +3303,21 @@ export class OrderService implements OnModuleInit {
 
   async getOrderFilterOptions(user?: any) {
     const scoped = this.buildOrderWhereByUser(user, {});
-    const [carriers, channels] = await Promise.all([
+    const [carriers, channels, paymentSources] = await Promise.all([
       this.prisma.order.findMany({ where: { AND: [scoped, { shipment: { isNot: null } }] },
         distinct: ["id"], select: { shipment: { select: { carrier: true } } }, take: 10000 }),
       this.prisma.order.findMany({ where: scoped, distinct: ["salesChannel"], select: { salesChannel: true } }),
+      this.prisma.paymentSource.findMany({
+        select: { id: true, name: true, code: true, type: true, branchId: true, isActive: true },
+        orderBy: { name: "asc" },
+      }),
     ]);
     return {
       shippingPartners: Array.from(new Set(carriers.map(row => String(row.shipment?.carrier || "").trim()).filter(Boolean))),
       salesChannels: channels.map(row => String(row.salesChannel || "")).filter(Boolean),
+      paymentSources: paymentSources.filter(row => row.isActive !== false && (this.isOwner(user) || !row.branchId || row.branchId === (user?.branchId || user?.workingBranchId || user?.currentBranchId || user?.branch?.id))).map(row => ({
+        id: row.id, name: row.name, code: row.code, type: row.type, branchId: row.branchId,
+      })),
     };
   }
 
@@ -3321,6 +3329,8 @@ export class OrderService implements OnModuleInit {
     if (branchIds.length) parts.push({ branchId: { in: branchIds } });
     const orderStatuses = split(params.orderStatuses);
     if (orderStatuses.length) parts.push({ status: { in: orderStatuses as OrderStatus[] } });
+    const paymentSourceIds = split(params.paymentSourceIds);
+    if (paymentSourceIds.length) parts.push({ payments: { some: { paymentSourceId: { in: paymentSourceIds } } } });
     const paymentStatuses = split(params.paymentStatuses);
     if (paymentStatuses.length) parts.push({ paymentStatus: { in: paymentStatuses as PaymentStatus[] } });
     const fulfillmentStatuses = split(params.fulfillmentStatuses);
