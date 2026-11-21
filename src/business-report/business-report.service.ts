@@ -48,19 +48,106 @@ const num = (n:any) => Number.isFinite(Number(n)) ? Number(n) : 0;
 
 @Injectable()
 export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
-  private timer?: ReturnType<typeof setInterval>;
+  private timer?: ReturnType<typeof setTimeout>;
+  private scheduleVersion = 0;
+  private readonly RETRY_DELAY_MS = 90_000;
+  private readonly MAX_DELIVERY_ATTEMPTS = 3;
+  private readonly DELIVERY_WINDOW_MS = 10 * 60_000;
+  private nextScheduledAt: Date | null = null;
   private running=false;
   private lastTickAt: Date | null = null;
   private lastTickError: string | null = null;
   private lastTickSummary: Record<string, unknown> | null = null;
   constructor(private prisma:PrismaService, private dashboard:DashboardService, private push:MobilePushService, private shipment:ShipmentService) {}
   onModuleInit() {
-    // Railway backend must be a persistent instance; no browser/phone required.
-    console.log('[REPORT_SCHEDULER_START] timezone=Asia/Ho_Chi_Minh interval=60s');
-    this.timer=setInterval(()=>void this.tick().catch(e=>console.error('[REPORT_CRON]',e)), 60_000);
-    void this.tick().catch(e=>console.error('[REPORT_BOOT]',e));
+    // One-shot timer to the next configured local time; no per-minute polling.
+    void this.planNextRun(true).catch(error => console.error('[REPORT_SCHEDULER_INIT_FAILED]', error));
   }
-  onModuleDestroy() { if(this.timer) clearInterval(this.timer); }
+  onModuleDestroy() {
+    ++this.scheduleVersion;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+
+  private async planNextRun(checkRecent = false) {
+    const version = ++this.scheduleVersion;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+    this.nextScheduledAt = null;
+
+    // A startup check catches a due slot missed by a short Railway restart.
+    if (checkRecent) await this.tick();
+    if (version !== this.scheduleVersion) return;
+
+    const [staff, activeTokens] = await Promise.all([
+      this.prisma.staffUser.findMany({
+        where: { isActive: true },
+        select: { id: true, role: true, roles: { select: { roleCode: true } } },
+      }),
+      this.prisma.mobilePushToken.findMany({
+        where: { isActive: true, platform: 'ios', provider: 'apns', userId: { not: null } },
+        select: { userId: true },
+      }),
+    ]);
+    if (version !== this.scheduleVersion) return;
+    const authorized = new Set(staff.filter(user => {
+      const roles = [user.role, ...user.roles.map(role => role.roleCode)]
+        .map(role => String(role || '').trim().toLowerCase());
+      return roles.includes('owner') || roles.includes('admin');
+    }).map(user => user.id));
+    const userIds = [...new Set(activeTokens.map(t => t.userId).filter((id): id is string => Boolean(id)))]
+      .filter(id => authorized.has(id));
+
+    const now = Date.now();
+    const today = vnParts(new Date()).day;
+    // Midnight refresh picks up device registrations without a periodic scan.
+    let nearest = vnUtc(shiftDay(today, 1)).getTime() + 1000;
+    for (const userId of userIds) {
+      const cfg = await this.settings({ id: userId, role: 'OWNER' });
+      if (version !== this.scheduleVersion) return;
+      const slots = [
+        ...(cfg.enabled ? cfg.slots : []),
+        ...(cfg.productReport.enabled ? cfg.productReport.slots : []),
+      ].filter(x => x.enabled);
+      for (const slot of slots) {
+        const [hour, minute] = slot.time.split(':').map(Number);
+        if (!Number.isInteger(hour) || !Number.isInteger(minute)) continue;
+        const mins = hour * 60 + minute;
+        let dueAt = vnUtc(today, mins).getTime() + 1000;
+        if (dueAt <= now) dueAt = vnUtc(shiftDay(today, 1), mins).getTime() + 1000;
+        nearest = Math.min(nearest, dueAt);
+      }
+    }
+    // Retry failed scheduled notifications with a one-shot timer, not per-minute polling.
+    // Retry window is limited to 10 minutes after the configured slot.
+    const todayRows=await this.prisma.businessReportDelivery.findMany({
+      where:{userId:{in:userIds},OR:[
+        {key:{contains:`:${today}:`}},
+      ],status:{in:['FAILED_1','FAILED_2','NO_DEVICE_1','NO_DEVICE_2','SENDING_1','SENDING_2','SENDING_3']}},
+      select:{key:true,status:true,updatedAt:true},take:200,
+    });
+    for(const row of todayRows){
+      const m=/^(daily|products):[^:]+:(\d{4}-\d{2}-\d{2}):(\d{2}:\d{2})$/.exec(row.key);
+      if(!m)continue;
+      const [h,min]=m[3].split(':').map(Number);
+      const start=vnUtc(m[2],h*60+min).getTime();
+      const deadline=start+this.DELIVERY_WINDOW_MS;
+      const delay=/^SENDING_/.test(row.status)?5*60_000:this.RETRY_DELAY_MS;
+      const candidate=Math.max(now+1000,row.updatedAt.getTime()+delay);
+      if(candidate<=deadline && candidate<nearest)nearest=candidate;
+    }
+    if (version !== this.scheduleVersion) return;
+    this.nextScheduledAt = new Date(nearest);
+    this.timer = setTimeout(() => {
+      if (version !== this.scheduleVersion) return;
+      void (async () => {
+        try { await this.tick(); }
+        catch (error) { console.error('[REPORT_SCHEDULER_RUN_FAILED]', error); }
+        finally { await this.planNextRun(); }
+      })().catch(error => console.error('[REPORT_SCHEDULER_REARM_FAILED]', error));
+    }, Math.max(1, nearest - Date.now()));
+    console.log('[REPORT_SCHEDULER_NEXT]', this.nextScheduledAt.toISOString());
+  }
 
   private owner(user:any) {
     const id=String(user?.id || user?.userId || '');
@@ -106,6 +193,7 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
       },
     };
     await this.prisma.systemSetting.upsert({where:{key:KEY_PREFIX+id},create:{key:KEY_PREFIX+id,value:next as any},update:{value:next as any}});
+    void this.planNextRun().catch(error => console.error('[REPORT_SCHEDULER_REPLAN_FAILED]', error));
     return next;
   }
   async history(user:any) {const id=this.owner(user);return this.prisma.businessReportDelivery.findMany({where:{userId:id},orderBy:{createdAt:'desc'},take:50});}
@@ -270,13 +358,62 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
     return this.push.notifyReport(id,title,body,{kind:kind==='growth'?'growth':'test',day:s.day},tokenId);
   }
   private async deliver(userId:string,key:string,kind:string,title:string,body:string,day:string) {
-    // Unique key provides deduplication even if Railway runs >1 worker.
-    try {await this.prisma.businessReportDelivery.create({data:{key,userId,kind,title,body}});}
-    catch(e:any){if(e?.code==='P2002')return;throw e;}
+    // Unique database key + conditional status transition: only one Railway replica may send.
+    const existing = await this.prisma.businessReportDelivery.findUnique({where:{key},select:{status:true,updatedAt:true}});
+    if (!existing) {
+      try {
+        await this.prisma.businessReportDelivery.create({data:{key,userId,kind,title,body}});
+      } catch(e:any) {
+        if(e?.code!=='P2002')throw e;
+      }
+    }
+    const current = await this.prisma.businessReportDelivery.findUnique({where:{key},select:{status:true,updatedAt:true}});
+    if (!current) return;
+    const status=String(current.status);
+    // SENT is final. A late retry must never re-send an APNs-accepted notification.
+    if(status==='SENT' || status==='FAILED_3' || status==='NO_DEVICE_3')return;
+    const retryMatch=/^(?:FAILED|NO_DEVICE)_(1|2)$/.exec(status);
+    const sendingMatch=/^SENDING_(1|2|3)$/.exec(status);
+    let attempt=1;
+    if(retryMatch){
+      attempt=Number(retryMatch[1])+1;
+      if(Date.now()-current.updatedAt.getTime()<this.RETRY_DELAY_MS)return;
+    } else if(sendingMatch){
+      // Recover worker crash; wait 5 minutes so an in-flight APNs call is not duplicated.
+      if(Date.now()-current.updatedAt.getTime()<5*60_000)return;
+      attempt=Number(sendingMatch[1]);
+    } else if(status!=='PENDING')return;
+    if(attempt>this.MAX_DELIVERY_ATTEMPTS)return;
+    const claimed=await this.prisma.businessReportDelivery.updateMany({
+      where:{key,status:current.status,updatedAt:current.updatedAt},
+      data:{status:`SENDING_${attempt}`,error:null},
+    });
+    if(claimed.count!==1)return;
     try {
       const result=await this.push.notifyReport(userId,title,body,{kind,day,...(kind==='product'?{reportPath:'/mobile/reports/products'}:{})});
-      await this.prisma.businessReportDelivery.update({where:{key},data:{status:result.sent?'SENT':result.failed?'FAILED':'NO_DEVICE',sent:result.sent,failed:result.failed}});
-    } catch(e:any) {await this.prisma.businessReportDelivery.update({where:{key},data:{status:'FAILED',error:String(e?.message||e).slice(0,500)}});}
+      const accepted=Number(result.sent||0)>0;
+      const failed=Number(result.failed||0);
+      const rejectedReasons=Array.isArray((result as any).devices) ? (result as any).devices.map((x:any)=>x?.reason).filter(Boolean).slice(0,3).join('; ') : '';
+      const reason=(!accepted && !failed)?'NO_ACTIVE_DEVICE':(!accepted?(rejectedReasons||'APNS_REJECTED'):'');
+      const nextStatus=accepted?'SENT':`${failed?'FAILED':'NO_DEVICE'}_${attempt}`;
+      await this.prisma.businessReportDelivery.update({where:{key},data:{status:nextStatus,sent:Number(result.sent||0),failed,error:reason||null}});
+      console.log('[REPORT_DELIVERY]',{key,attempt,status:nextStatus,sent:result.sent,failed});
+    } catch(e:any){
+      const message=String(e?.message||e).slice(0,500);
+      await this.prisma.businessReportDelivery.update({where:{key},data:{status:`FAILED_${attempt}`,error:message}});
+      console.error('[REPORT_DELIVERY_FAILED]',{key,attempt,error:message,apnsEnv:{
+        hasKey:Boolean(process.env.APNS_KEY_BASE64||process.env.APNS_KEY_CONTENT||process.env.APNS_KEY||process.env.APNS_KEY_PATH),
+        hasKeyId:Boolean(process.env.APNS_KEY_ID),hasTeamId:Boolean(process.env.APNS_TEAM_ID),
+        service:process.env.RAILWAY_SERVICE_NAME||'unknown',deployment:process.env.RAILWAY_DEPLOYMENT_ID||'unknown'
+      }});
+    }
+  }
+  private retryEligibleStatus(status:string, updatedAt:Date, now=Date.now()) {
+    const name=String(status||'');
+    if(name==='PENDING')return true;
+    if(/^(FAILED|NO_DEVICE)_[12]$/.test(name))return now-updatedAt.getTime()>=this.RETRY_DELAY_MS;
+    if(/^SENDING_[123]$/.test(name))return now-updatedAt.getTime()>=5*60_000;
+    return false;
   }
   // Diagnoses whether this API process is actually running the scheduler.
   async schedulerStatus(user:any) {
@@ -289,7 +426,7 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
       orderBy:{createdAt:'desc'},take:20,
     });
     return {
-      serverNow:new Date().toISOString(),localNow:p, schedulerStarted:Boolean(this.timer),
+      serverNow:new Date().toISOString(),localNow:p, schedulerStarted:Boolean(this.timer),nextScheduledAt:this.nextScheduledAt?.toISOString() || null,
       isRunning:this.running,lastTickAt:this.lastTickAt,lastTickError:this.lastTickError,
       lastTickSummary:this.lastTickSummary,enabled:c.enabled,slots:c.slots,productReport:c.productReport,
       // Values that have passed should have delivery rows; otherwise scheduler is not delivering.
@@ -312,8 +449,7 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
       const p=vnParts();
       // JWT login and /auth/me use StaffUser + StaffUserRole, never AdminUser.
       // Only active APNs devices belonging to active owner/admin StaffUser may receive reports.
-      const [savedRows, staff, activeTokens] = await Promise.all([
-        this.prisma.systemSetting.findMany({where:{key:{startsWith:KEY_PREFIX}},select:{key:true}}),
+      const [staff, activeTokens] = await Promise.all([
         this.prisma.staffUser.findMany({
           where:{isActive:true},
           select:{id:true,role:true,roles:{select:{roleCode:true}}},
@@ -329,80 +465,94 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
         return roles.includes('owner') || roles.includes('admin');
       }).map(user => user.id));
       const deviceIds = new Set(activeTokens.map(token => token.userId).filter((id):id is string => Boolean(id)));
-      const savedIds = new Set(savedRows.map(row => row.key.slice(KEY_PREFIX.length)));
+      // Saved settings are loaded by settings(user) for each eligible device account.
       // Saved settings are per account; devices get its default schedule even without saved settings.
       const ids = [...deviceIds].filter(id => authorized.has(id));
-      console.log('[REPORT_SCHEDULER_RECIPIENTS]', {
-        activeAdminAccounts:authorized.size,
-        activeDeviceTokens:activeTokens.length,
-        activeDeviceAccounts:deviceIds.size,
-        eligibleAdminAccounts:ids.length,
-        eligibleAdminWithSavedSettings:ids.filter(id => savedIds.has(id)).length,
-      });
+      // Do not print a recipient/heartbeat entry every minute; status API retains diagnostics.
+      // The periodic timer only checks the clock. Reports are generated at configured slots.
       for(const userId of ids){
         stats.owners++;
         try {
         const c=await this.settings({id:userId,role:'OWNER'});
         if(!c.enabled && !c.productReport.enabled)continue;
-        // Independent product report schedule (does not depend on daily report slots).
-        if(c.productReport.enabled){
-          const dueProductSlots=c.productReport.slots.filter(x=>x.enabled&&x.time<=p.time);
-          const productKeys=dueProductSlots.map(x=>`products:${userId}:${p.day}:${x.time}`);
-          const existingProduct=productKeys.length?await this.prisma.businessReportDelivery.findMany({where:{key:{in:productKeys}},select:{key:true}}):[];
-          const sentProductKeys=new Set(existingProduct.map(x=>x.key));
-          const pendingProducts=dueProductSlots.filter(x=>!sentProductKeys.has(`products:${userId}:${p.day}:${x.time}`));
-          if(pendingProducts.length){
-            const productData=await this.productSnapshot();
-            const productBody=this.productPushBody(productData,c.productReport.topN);
-            for(const slot of pendingProducts){
-              stats.dueSlots++;stats.sentChecks++;
-              await this.deliver(userId,`products:${userId}:${p.day}:${slot.time}`,'product',`Báo cáo sản phẩm ${slot.time}`,productBody,p.day);
+        // Exactly one delivery key per user, report type, day and configured HH:mm.
+        // A short grace period handles scheduler delays/restarts without sending old reports hours late.
+        const GRACE_MINUTES = 10;
+        const due = (slots: {time:string;enabled:boolean}[]) => slots.filter(slot => {
+          if (!slot.enabled) return false;
+          const [hh,mm] = slot.time.split(':').map(Number);
+          const elapsed = p.minutes - (hh*60+mm);
+          return elapsed >= 0 && elapsed <= GRACE_MINUTES;
+        });
+        const productSlots=c.productReport.enabled?due(c.productReport.slots):[];
+        const dailySlots=c.enabled?due(c.slots):[];
+        if (!productSlots.length && !dailySlots.length) continue;
+
+        // Cheap DB lookups first. Avoid inventory/order/dashboard snapshots if already delivered.
+        const productKeys=productSlots.map(x=>`products:${userId}:${p.day}:${x.time}`);
+        const dailyKeys=dailySlots.map(x=>`daily:${userId}:${p.day}:${x.time}`);
+        const allKeys=[...productKeys,...dailyKeys];
+        const existing=allKeys.length?await this.prisma.businessReportDelivery.findMany({
+          where:{key:{in:allKeys}},select:{key:true,status:true,updatedAt:true},
+        }):[];
+        const existingByKey=new Map(existing.map(x=>[x.key,x]));
+        const requiresDelivery=(key:string)=>{
+          const row=existingByKey.get(key);
+          return !row || this.retryEligibleStatus(row.status,row.updatedAt);
+        };
+        const pendingProducts=productSlots.filter(x=>requiresDelivery(`products:${userId}:${p.day}:${x.time}`));
+        const pendingDaily=dailySlots.filter(x=>requiresDelivery(`daily:${userId}:${p.day}:${x.time}`));
+        stats.dueSlots+=productSlots.length+dailySlots.length;
+        stats.skipped+=allKeys.length-pendingProducts.length-pendingDaily.length;
+        if(!pendingProducts.length && !pendingDaily.length) continue;
+
+        // Product report is independent of business report: each has its own timetable.
+        if(pendingProducts.length){
+          const productData=await this.productSnapshot();
+          const productBody=this.productPushBody(productData,c.productReport.topN);
+          for(const slot of pendingProducts){
+            stats.sentChecks++;
+            await this.deliver(userId,`products:${userId}:${p.day}:${slot.time}`,'product',`Báo cáo sản phẩm ${slot.time}`,productBody,p.day);
+          }
+        }
+        let businessSnapshot: Awaited<ReturnType<BusinessReportService['snapshot']>> | null = null;
+        if(pendingDaily.length){
+          const s=await this.snapshot(c);
+          businessSnapshot=s;
+          for(const slot of pendingDaily){
+            stats.sentChecks++;
+            await this.deliver(userId,`daily:${userId}:${p.day}:${slot.time}`,'daily',`Báo cáo kinh doanh ${slot.time}`,this.format(s,c),p.day);
+          }
+        }
+        // Threshold/growth/record alerts are separate features. They must NOT trigger
+        // expensive snapshots or database INSERT attempts every 5 minutes.
+        // To avoid repeated scans and noisy log errors, evaluate them at a report slot only.
+        if(pendingDaily.length && c.enabled){
+          const s=businessSnapshot!;
+          for(const [name,value,threshold,label] of [
+            ['pos',s.posRevenue,c.posTarget,'POS'],['cod',s.codRevenue,c.codTarget,'COD'],['revenue',s.createdRevenue,c.revenueTarget,'Tổng doanh thu tạo'],
+          ] as const) {
+            if(c.alerts[name]&&threshold>0&&value>=threshold) await this.deliver(userId,`threshold:${name}:${userId}:${p.day}:${threshold}`,name,`${label} đạt mục tiêu`,`${label} hôm nay đạt ${fmt(value)}đ, vượt mốc ${fmt(threshold)}đ.`,p.day);
+          }
+          if(c.alerts.growth||c.alerts.decline){
+            const previous=shiftDay(p.day,-1);
+            const [a,b]=await Promise.all([
+              this.prisma.order.aggregate({where:{status:{not:'CANCELLED'},soldAt:{gte:vnUtc(previous),lt:vnUtc(previous,p.minutes)}},_sum:{finalAmount:true}}),
+              this.prisma.order.aggregate({where:{status:{not:'CANCELLED'},soldAt:{gte:vnUtc(p.day),lt:new Date()}},_sum:{finalAmount:true}}),
+            ]);
+            const before=num(a._sum.finalAmount),current=num(b._sum.finalAmount);
+            if(before>0){
+              const pct=100*(current-before)/before;
+              if(c.alerts.growth&&pct>0&&pct>=c.growthPct)await this.deliver(userId,`growth:${userId}:${p.day}:${c.growthPct}`,'growth','Doanh thu tăng trưởng',`Doanh thu thành công tăng ${pct.toFixed(1)}% so với hôm qua cùng giờ (${fmt(current)}đ).`,p.day);
+              if(c.alerts.decline&&pct<0&&pct<=-c.declinePct)await this.deliver(userId,`decline:${userId}:${p.day}:${c.declinePct}`,'decline','Doanh thu giảm',`Doanh thu thành công giảm ${Math.abs(pct).toFixed(1)}% so với hôm qua cùng giờ.`,p.day);
             }
           }
-        }
-        // Catch up any due slot earlier today, including after restarts or slow queries.
-        // Unique delivery key prevents duplicates; never send tomorrow's slots early.
-        const dueSlots=c.enabled?c.slots.filter(x=>x.enabled && x.time<=p.time):[];
-        stats.dueSlots+=dueSlots.length;
-        // Avoid expensive Dashboard/Shipment queries every minute after noon.
-        const dueKeys=dueSlots.map(slot=>`daily:${userId}:${p.day}:${slot.time}`);
-        const existing=dueKeys.length?await this.prisma.businessReportDelivery.findMany({
-          where:{key:{in:dueKeys}},select:{key:true},
-        }):[];
-        const existingKeys=new Set(existing.map(x=>x.key));
-        const pendingSlots=dueSlots.filter(slot=>!existingKeys.has(`daily:${userId}:${p.day}:${slot.time}`));
-        if(!pendingSlots.length&&p.minutes%5!==0)continue;
-        const s=await this.snapshot(c);
-        for(const slot of pendingSlots){
-          stats.sentChecks++;
-          await this.deliver(userId,`daily:${userId}:${p.day}:${slot.time}`,'daily',`Báo cáo kinh doanh ${slot.time}`,this.format(s,c),p.day);
-        }
-        if(!c.enabled || p.minutes%5!==0)continue;
-        for(const [name,value,threshold,label] of [
-          ['pos',s.posRevenue,c.posTarget,'POS'],['cod',s.codRevenue,c.codTarget,'COD'],['revenue',s.createdRevenue,c.revenueTarget,'Tổng doanh thu tạo'],
-        ] as const) {
-          if(c.alerts[name]&&threshold>0&&value>=threshold) await this.deliver(userId,`threshold:${name}:${userId}:${p.day}:${threshold}`,name,`${label} đạt mục tiêu`,`${label} hôm nay đạt ${fmt(value)}đ, vượt mốc ${fmt(threshold)}đ.`,p.day);
-        }
-        // Historical daily comparison: same cut-off needs historical snapshots;
-        // use exact time window revenue aggregate, never compare full yesterday to partial today.
-        if(c.alerts.growth||c.alerts.decline){
-          const previous=shiftDay(p.day,-1);
-          const [a,b]=await Promise.all([
-            this.prisma.order.aggregate({where:{status:{not:'CANCELLED'},soldAt:{gte:vnUtc(previous),lt:vnUtc(previous,p.minutes)}},_sum:{finalAmount:true}}),
-            this.prisma.order.aggregate({where:{status:{not:'CANCELLED'},soldAt:{gte:vnUtc(p.day),lt:new Date()}},_sum:{finalAmount:true}}),
-          ]);
-          const before=num(a._sum.finalAmount),current=num(b._sum.finalAmount);
-          if(before>0){
-            const pct=100*(current-before)/before;
-            if(c.alerts.growth&&pct>0&&pct>=c.growthPct)await this.deliver(userId,`growth:${userId}:${p.day}:${c.growthPct}`,'growth','Doanh thu tăng trưởng',`Doanh thu thành công tăng ${pct.toFixed(1)}% so với hôm qua cùng giờ (${fmt(current)}đ).`,p.day);
-            if(c.alerts.decline&&pct<0&&pct<=-c.declinePct)await this.deliver(userId,`decline:${userId}:${p.day}:${c.declinePct}`,'decline','Doanh thu giảm',`Doanh thu thành công giảm ${Math.abs(pct).toFixed(1)}% so với hôm qua cùng giờ.`,p.day);
-          }
-        }
-        if(c.alerts.record){
-          const past=s.historical.filter((r:any)=>r.date<p.day&&r.date>=shiftDay(p.day,-c.recordDays));
-          if(past.length===c.recordDays&&s.createdRevenue>0){
-            const highest=Math.max(...past.map((r:any)=>num(r.raw?.createdAmount)));
-            if(s.createdRevenue>highest)await this.deliver(userId,`record:${userId}:${p.day}:${c.recordDays}`,'record',`Kỷ lục doanh thu ${c.recordDays} ngày`,`Doanh thu tạo đơn ${fmt(s.createdRevenue)}đ, vượt mức cao nhất ${fmt(highest)}đ.`,p.day);
+          if(c.alerts.record){
+            const past=s.historical.filter((r:any)=>r.date<p.day&&r.date>=shiftDay(p.day,-c.recordDays));
+            if(past.length===c.recordDays&&s.createdRevenue>0){
+              const highest=Math.max(...past.map((r:any)=>num(r.raw?.createdAmount)));
+              if(s.createdRevenue>highest)await this.deliver(userId,`record:${userId}:${p.day}:${c.recordDays}`,'record',`Kỷ lục doanh thu ${c.recordDays} ngày`,`Doanh thu tạo đơn ${fmt(s.createdRevenue)}đ, vượt mức cao nhất ${fmt(highest)}đ.`,p.day);
+            }
           }
         }
         } catch (error:any) {
@@ -417,7 +567,9 @@ export class BusinessReportService implements OnModuleInit, OnModuleDestroy {
     } finally {
       this.lastTickSummary=stats;
       this.running=false;
-      console.log('[REPORT_SCHEDULER_TICK]',{at:this.lastTickAt?.toISOString(),...stats});
+      // Only log actual delivery checks/errors, not 1 heartbeat per minute (per replica).
+      if(stats.sentChecks>0 || stats.errors>0 || this.lastTickError)
+        console.log('[REPORT_SCHEDULER_TICK]',{at:this.lastTickAt?.toISOString(),...stats});
     }
   }
 }
