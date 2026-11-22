@@ -697,7 +697,7 @@ export class GhnCodReconciliationService {
           orderBy: { createdAt: "desc" },
         });
 
-        const order =
+        let order =
           shipmentByTracking?.order ||
           (await (this.prisma as any).order
             .findFirst({
@@ -711,6 +711,29 @@ export class GhnCodReconciliationService {
               orderBy: { createdAt: "desc" },
             })
             .catch(() => null));
+
+        // Mã vận đơn SPX/AhaMove/Viettel... đôi khi chỉ được lưu trong
+        // ghi chú đơn nội bộ, chưa có bản ghi Shipment tương ứng.
+        // Chỉ fallback với mã HVC dài, kiểm tra token nguyên vẹn và duy nhất,
+        // tuyệt đối không ghép một đoạn số/mã trùng với đơn khác.
+        let matchedByOrderNote = false;
+        if (!order && /^[A-Z0-9_-]{8,}$/i.test(baseCode)) {
+          const noteCandidates = await this.prisma.order.findMany({
+            where: { note: { contains: baseCode, mode: "insensitive" } },
+            take: 10,
+            orderBy: { createdAt: "desc" },
+          });
+          const exactMatches = noteCandidates.filter((candidate) =>
+            String(candidate.note || "")
+              .toUpperCase()
+              .split(/[^A-Z0-9_-]+/)
+              .some((token) => token === baseCode.toUpperCase()),
+          );
+          if (exactMatches.length === 1 && noteCandidates.length < 10) {
+            order = exactMatches[0];
+            matchedByOrderNote = true;
+          }
+        }
 
         const shipment =
           shipmentByTracking ||
@@ -782,7 +805,7 @@ export class GhnCodReconciliationService {
             orderId: finalOrder?.id || null,
             orderCode: finalOrder?.orderCode || null,
             shipmentId: shipment?.id || null,
-            ghnCode: shipment?.trackingCode || code,
+            ghnCode: matchedByOrderNote ? code : (shipment?.trackingCode || code),
             customerOrderCode: finalOrder?.orderCode || code,
             ghnStatus:
               (shipment as any)?.shippingStatus ||
@@ -822,7 +845,7 @@ export class GhnCodReconciliationService {
           reconciliationRowId: savedRow.id,
           reconciliationStatus,
           reconciledAt: savedRow.createdAt,
-          ghnOrderCode: shipment?.trackingCode || code,
+          ghnOrderCode: matchedByOrderNote ? code : (shipment?.trackingCode || code),
           customerOrderCode: finalOrder?.orderCode || code,
           systemOrderCode: finalOrder?.orderCode || null,
           internalOrderId: finalOrder?.id || null,
