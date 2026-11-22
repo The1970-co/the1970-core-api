@@ -3766,6 +3766,28 @@ export class OrderService implements OnModuleInit {
       this.buildReturnSettlementPreview(orderWithAssignedStaff, partialDeliveries),
       this.findExchangeContextForOrder(orderWithAssignedStaff),
     ]);
+    // Đối soát nội thành cũ đã lưu nguồn tiền ở paymentRows nhưng chưa tạo Payment.
+    // Chỉ cung cấp lịch sử riêng để hiển thị; không cộng thêm vào số đã thu.
+    let localReconciliationHistory: any[] = [];
+    try {
+      const history = await this.prisma.$queryRawUnsafe<any[]>(
+        `SELECT "code", "status", "createdAt", "confirmedAt", "paidAt", "paymentRows", "paidAmount"
+         FROM "LocalDeliveryReconciliation" WHERE "orderId" = $1 AND "status" <> 'CANCELLED'
+         ORDER BY "createdAt" DESC`, order.id,
+      );
+      localReconciliationHistory = history.map((r) => ({
+        code: r.code,
+        status: r.status,
+        createdAt: r.createdAt,
+        confirmedAt: r.confirmedAt,
+        paidAt: r.paidAt,
+        paidAmount: Number(r.paidAmount || 0),
+        payments: Array.isArray(r.paymentRows?.payments) ? r.paymentRows.payments : [],
+        shippingFeeSettlement: r.paymentRows?.shippingFeeSettlement || null,
+      }));
+    } catch (error) {
+      // Database chưa tạo bảng đối soát nội thành vẫn xem đơn hàng bình thường.
+    }
     return {
       ...this.mapOrderResponse({
         ...orderWithAssignedStaff,
@@ -3773,6 +3795,7 @@ export class OrderService implements OnModuleInit {
       }),
       settlementPreview,
       exchangeContext,
+      localReconciliationHistory,
     };
   }
 

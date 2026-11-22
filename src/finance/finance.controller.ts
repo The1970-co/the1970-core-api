@@ -332,6 +332,18 @@ export class FinanceController {
     }, req.user);
   }
 
+  @Get("local-delivery-reconciliation/reconciliations/list")
+  @RequirePermissions("finance.local_delivery.view")
+  listLocalVouchers(@Req() req: any, @Query() query: any) {
+    return this.financeService.listLocalDeliveryReconciliationVouchers(query, req.user);
+  }
+
+  @Get("local-delivery-reconciliation/reconciliations/:id/detail")
+  @RequirePermissions("finance.local_delivery.view")
+  localVoucherDetail(@Req() req: any, @Param("id") id: string) {
+    return this.financeService.getLocalDeliveryReconciliationVoucher(id, req.user);
+  }
+
   @Patch("local-delivery-reconciliation/:orderId/delivered")
   @RequirePermissions("finance.local_delivery.confirm")
   markLocalDeliveryDelivered(

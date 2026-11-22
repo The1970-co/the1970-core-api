@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Patch,
   Param,
   Post,
   Query,
@@ -28,6 +29,11 @@ export class GhnCodReconciliationController {
   @Post("manual")
   manual(@Body() body: any, @Req() req: any) {
     return this.service.parseManual(this.withActor(body, req));
+  }
+
+  @Patch("rows/:rowId/partner-cod")
+  updatePartnerCod(@Param("rowId") rowId: string, @Body() body: any) {
+    return this.service.updatePartnerCod(rowId, body);
   }
 
   @Post("rows/delete")

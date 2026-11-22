@@ -337,6 +337,15 @@ export class FinanceService {
       ),
     );
 
+    // Khoản thu nội thành tồn tại ở cả Payment (chi tiết đơn gốc) và CashVoucher (sổ quỹ).
+    // Chỉ dùng Payment để cộng tổng; phiếu thu giữ nguyên để truy vết.
+    const localPaymentKeys = new Set(
+      moneyPayments.flatMap((payment) => {
+        const code = String(payment.note || "").match(/DSNT\d+-\d+/i)?.[0];
+        return code ? [`${code}|${payment.paymentSourceId || ""}|${this.toNumber(payment.amount)}`] : [];
+      }),
+    );
+
     const bySource = new Map<string, any>();
 
     let totalPaid = 0;
@@ -422,6 +431,14 @@ export class FinanceService {
         String(voucher.paymentSourceId || ""),
         amount,
       ].join("|");
+
+      const localVoucherCode = String(voucher.note || "").match(/DSNT\d+-\d+/i)?.[0];
+      if (
+        voucherType === "RECEIPT" &&
+        String(voucher.category || "").toLowerCase() === "thu đối soát nội thành" &&
+        localVoucherCode &&
+        localPaymentKeys.has(`${localVoucherCode}|${voucher.paymentSourceId || ""}|${amount}`)
+      ) continue;
 
       // POS/ORDER tạo cả Payment và CashVoucher để lưu phiếu thu.
       // Tổng quan dòng tiền chỉ tính 1 lần: nếu đã có Payment cùng đơn/nguồn/số tiền thì bỏ voucher thu khỏi tổng.
@@ -1204,8 +1221,10 @@ export class FinanceService {
     const totalPaid = paymentRows.reduce((sum, row) => sum + row.amount, 0);
     const targetAmount = this.toNumber(current.codAmount || order.finalAmount || 0);
 
-    if (targetAmount > 0 && totalPaid > targetAmount) {
-      throw new BadRequestException("Tổng tiền thanh toán không được lớn hơn COD cần thu.");
+    if (Math.abs(totalPaid - targetAmount) > 0.01) {
+      throw new BadRequestException(
+        `Phiếu yêu cầu thu ${targetAmount}đ nhưng tổng các nguồn tiền là ${totalPaid}đ. Không thể xác nhận đã thanh toán khi còn thiếu hoặc thừa tiền.`,
+      );
     }
 
     const shippingFeePayer =
@@ -1272,6 +1291,20 @@ export class FinanceService {
 
         const source = sourceMap.get(row.paymentSourceId)!;
 
+        // Ghi Payment trên đơn gốc giống POS; CashVoucher bên dưới là bút toán quỹ.
+        // Cùng transaction: không được có phiếu thu mà thiếu nguồn tiền trên đơn.
+        await tx.payment.create({
+          data: {
+            orderId: order.id,
+            paymentSourceId: source.id,
+            method: source.name,
+            amount: new Prisma.Decimal(row.amount),
+            status: PaymentStatus.PAID,
+            paidAt: now,
+            note: `Thu COD đối soát nội thành ${current.code || current.id}`,
+          },
+        });
+
         // Dòng tiền đối soát nội thành lấy CashVoucher làm nguồn ghi nhận chính.
         // Không gắn refId = order.id vì một số DB đang có FK CashVoucher_refId_fkey
         // không trỏ sang Order, sẽ gây lỗi 23503 khi insert phiếu.
@@ -1323,7 +1356,9 @@ export class FinanceService {
         .reduce((sum, payment) => sum + this.toNumber(payment.amount), 0);
       const nextPaid = paidAlready + totalPaid;
       const finalAmount = this.toNumber(order.finalAmount);
-      const nextPaymentStatus = nextPaid >= finalAmount ? PaymentStatus.PAID : PaymentStatus.PARTIAL;
+      const nextPaymentStatus = nextPaid >= finalAmount
+        ? PaymentStatus.PAID
+        : nextPaid > 0 ? PaymentStatus.PARTIAL : PaymentStatus.UNPAID;
 
       await tx.shipment.update({
         where: { id: order.shipment!.id },
@@ -1341,7 +1376,8 @@ export class FinanceService {
       const updatedOrder = await tx.order.update({
         where: { id: order.id },
         data: {
-          status: OrderStatus.COMPLETED,
+          // Giao thành công không có nghĩa đã thanh toán đầy đủ.
+          status: nextPaymentStatus === PaymentStatus.PAID ? OrderStatus.COMPLETED : order.status,
           fulfillmentStatus: FulfillmentStatus.FULFILLED,
           paymentStatus: nextPaymentStatus,
         },
@@ -1394,6 +1430,66 @@ export class FinanceService {
         paymentStatus: updatedOrder.paymentStatus,
       };
     });
+  }
+
+  async listLocalDeliveryReconciliationVouchers(
+    params: { page?: string; pageSize?: string; branchId?: string; q?: string },
+    user?: any,
+  ) {
+    await this.ensureLocalDeliveryReconciliationTable();
+    const page = Math.max(1, Math.floor(Number(params.page || 1) || 1));
+    const pageSize = [50, 100].includes(Number(params.pageSize)) ? Number(params.pageSize) : 50;
+    const branchId = this.scopedBranchId(user, params.branchId);
+    const q = String(params.q || "").trim();
+    const filters = ['1=1'];
+    const values: any[] = [];
+    if (branchId) {
+      values.push(branchId);
+      filters.push(`r."branchId" = $${values.length}`);
+    }
+    if (q) {
+      values.push(`%${q}%`);
+      filters.push(`(r."code" ILIKE $${values.length} OR o."orderCode" ILIKE $${values.length} OR r."trackingCode" ILIKE $${values.length})`);
+    }
+    const base = `FROM "LocalDeliveryReconciliation" r LEFT JOIN "Order" o ON o."id" = r."orderId" WHERE ${filters.join(' AND ')}`;
+    const counts = await this.prisma.$queryRawUnsafe<Array<{ total: bigint }>>(
+      `SELECT COUNT(*)::bigint AS total ${base}`, ...values,
+    );
+    const total = Number(counts[0]?.total || 0);
+    const pageCount = Math.max(1, Math.ceil(total / pageSize));
+    const effectivePage = Math.min(page, pageCount);
+    const rows = await this.prisma.$queryRawUnsafe<any[]>(
+      `SELECT r.*, o."orderCode", o."customerName", o."finalAmount" ${base} ORDER BY r."createdAt" DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+      ...values, pageSize, (effectivePage - 1) * pageSize,
+    );
+    return { items: rows.map((r) => ({ ...r, codAmount: Number(r.codAmount || 0), shippingFee: Number(r.shippingFee || 0), paidAmount: Number(r.paidAmount || 0) })), total, page: effectivePage, pageSize, totalPages: pageCount };
+  }
+
+  async getLocalDeliveryReconciliationVoucher(id: string, user?: any) {
+    await this.ensureLocalDeliveryReconciliationTable();
+    const rows = await this.prisma.$queryRawUnsafe<any[]>(
+      `SELECT r.*, o."orderCode", o."customerName", o."customerPhone", o."finalAmount"
+       FROM "LocalDeliveryReconciliation" r LEFT JOIN "Order" o ON o."id" = r."orderId"
+       WHERE r."id" = $1 LIMIT 1`, id,
+    );
+    const voucher = rows[0];
+    if (!voucher) throw new NotFoundException("Không tìm thấy phiếu đối soát nội thành.");
+    this.ensureBranchScope(user, voucher.branchId);
+    const payments = await this.prisma.payment.findMany({
+      where: { orderId: voucher.orderId, status: { in: [PaymentStatus.PAID, PaymentStatus.PARTIAL] } },
+      include: { paymentSource: true },
+      orderBy: { createdAt: "asc" },
+    });
+    return {
+      ...voucher,
+      codAmount: Number(voucher.codAmount || 0),
+      shippingFee: Number(voucher.shippingFee || 0),
+      paidAmount: Number(voucher.paidAmount || 0),
+      orderPayments: payments.map((p) => ({
+        id: p.id, name: p.paymentSource?.name || p.method || "Chưa rõ nguồn",
+        amount: Number(p.amount || 0), paidAt: p.paidAt, status: p.status,
+      })),
+    };
   }
 
   async getLocalDeliveryReconciliation(params: {
@@ -1542,6 +1638,27 @@ export class FinanceService {
           reconciliationShippingFee: this.toNumber(reconciliation?.shippingFee || 0),
           reconciliationPaidAmount: this.toNumber(reconciliation?.paidAmount || 0),
           reconciliationPaymentRows: reconciliation?.paymentRows || null,
+          // Dùng Payment của đơn gốc làm nguồn chính. Nếu bản ghi lịch sử chỉ có
+          // paymentRows của phiếu đối soát, dùng chúng làm dự phòng, KHÔNG cộng cả hai.
+          paymentSourcesBreakdown: (() => {
+            const orderPayments = payments
+              .filter((payment) => payment.status === PaymentStatus.PAID || payment.status === PaymentStatus.PARTIAL)
+              .map((payment) => ({
+                id: payment.id,
+                name: payment.paymentSource?.name || payment.method || "Chưa rõ nguồn",
+                amount: this.toNumber(payment.amount),
+                paidAt: payment.paidAt,
+              }));
+            if (orderPayments.length) return orderPayments;
+            const reconciled = reconciliation?.paymentRows;
+            const historicalPayments = Array.isArray(reconciled?.payments) ? reconciled.payments : [];
+            return historicalPayments.map((payment: any, index: number) => ({
+              id: `historical-${index}`,
+              name: payment.paymentSourceName || "Nguồn tiền đối soát",
+              amount: this.toNumber(payment.amount),
+              paidAt: reconciliation?.paidAt || null,
+            }));
+          })(),
           reconciliationNote: reconciliation?.note || "",
           reconciliationCreatedAt: reconciliation?.createdAt || null,
           reconciliationUpdatedAt: reconciliation?.updatedAt || null,
@@ -2950,6 +3067,22 @@ export class FinanceService {
             ${this.cashVoucherTypeSql("v")} = 'RECEIPT'
             AND UPPER(COALESCE(v."refType", '')) = 'ORDER'
             AND COALESCE(ref_order."status"::text, '') = 'CANCELLED'
+          )
+          AND NOT (
+            ${this.cashVoucherTypeSql("v")} = 'RECEIPT'
+            AND v."category" = 'Thu đối soát nội thành'
+            AND EXISTS (
+              SELECT 1 FROM "LocalDeliveryReconciliation" r
+              JOIN "Payment" p3 ON p3."orderId" = r."orderId"
+              JOIN "PaymentSource" ps3 ON ps3."id" = p3."paymentSourceId"
+              WHERE r."code" IS NOT NULL
+                AND COALESCE(v."note", '') LIKE '%' || r."code" || '%'
+                AND p3."note" = 'Thu COD đối soát nội thành ' || r."code"
+                AND p3."paymentSourceId" = v."paymentSourceId"
+                AND ROUND(p3."amount"::numeric, 0) = ROUND(v."amount"::numeric, 0)
+                AND p3."status" IN ('PAID', 'PARTIAL')
+                AND COALESCE(ps3."type", '') != 'COD'
+            )
           )
           AND NOT (
             ${this.cashVoucherTypeSql("v")} = 'RECEIPT'

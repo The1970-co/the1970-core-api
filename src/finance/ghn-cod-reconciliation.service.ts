@@ -458,12 +458,11 @@ export class GhnCodReconciliationService {
           adjustedCod > 0 &&
           row.codAmount === adjustedCod;
 
+        if (!row.partnerCodPresent) {
+          issueTypes.push("MISSING_PARTNER_COD");
+        }
         if (shipment?.order) {
-          if (
-            row.codAmount &&
-            systemCodAmount &&
-            row.codAmount !== systemCodAmount
-          ) {
+          if (row.partnerCodPresent && row.codAmount !== systemCodAmount) {
             if (hasPrInFile || isPartialReturn) {
               if (!partialRecord) {
                 issueTypes.push("MISSING_PARTIAL_DELIVERY_RECORD");
@@ -639,7 +638,7 @@ export class GhnCodReconciliationService {
         return /^-?\d+$/.test(normalized) ? Number(normalized) : null;
       };
       const cod = parseAmount(parts[1]);
-      if (cod === null || cod < 0) throw new BadRequestException(`COD GHN không hợp lệ tại mã ${parts[0]}`);
+      if (cod === null || cod < 0) throw new BadRequestException(`COD đối tác HVC không hợp lệ tại mã ${parts[0]}`);
       const fee = parts[2] ? parseAmount(parts[2]) : null;
       if (parts[2] && (fee === null || fee < 0)) throw new BadRequestException(`Phí GHN không hợp lệ tại mã ${parts[0]}`);
       manualAmountByCode.set(parts[0].toUpperCase(), { cod, fee });
@@ -932,6 +931,54 @@ export class GhnCodReconciliationService {
         noMoney: 0,
       },
     };
+  }
+
+  async updatePartnerCod(rowId: string, body: any = {}) {
+    const raw = body?.codAmount;
+    if (raw === null || raw === undefined || String(raw).trim() === "") {
+      throw new BadRequestException("Nhập số tiền COD đối tác HVC, kể cả 0đ.");
+    }
+    const codAmount = Number(String(raw).replace(/[,\s]/g, ""));
+    if (!Number.isSafeInteger(codAmount) || codAmount < 0) {
+      throw new BadRequestException("COD đối tác HVC phải là số nguyên không âm.");
+    }
+    const row = await this.prisma.ghnCodReconciliationRow.findUnique({ where: { id: rowId } });
+    if (!row) throw new BadRequestException("Không tìm thấy dòng đối soát.");
+    if (["CONFIRMED", "PAID"].includes(String(row.actionStatus || "").toUpperCase()) || row.confirmedAt || row.paidAt) {
+      throw new BadRequestException("Dòng đã xác nhận/thanh toán không được sửa COD.");
+    }
+    const shipment = row.shipmentId
+      ? await this.prisma.shipment.findUnique({ where: { id: row.shipmentId } })
+      : null;
+    const systemCodAmount = shipment ? Number(shipment.codAmount || 0) : null;
+    const issues = this.rowIssues(row).filter((issue) =>
+      !["MISSING_PARTNER_COD", "COD_MISMATCH", "MATCHED_BY_PARTIAL_DELIVERY", "PARTIAL_DELIVERY_AMOUNT_MISMATCH"].includes(issue),
+    );
+    if (systemCodAmount !== null && codAmount !== systemCodAmount) {
+      if (row.partialDeliveryAdjustedCod != null && Number(row.partialDeliveryAdjustedCod) === codAmount) {
+        issues.push("MATCHED_BY_PARTIAL_DELIVERY");
+      } else {
+        issues.push("COD_MISMATCH");
+      }
+    }
+    const reconciliationStatus = this.getReconciliationStatus(issues);
+    const serviceFee = Number(row.serviceFee || 0);
+    const totalReconcileAmount = codAmount - serviceFee;
+    const updated = await this.prisma.ghnCodReconciliationRow.update({
+      where: { id: rowId },
+      data: { codAmount, totalReconcileAmount, reconciliationStatus, issues,
+        actionNote: `COD đối tác HVC nhập tay: ${codAmount}đ${body?.note ? ` - ${String(body.note).slice(0, 300)}` : ""}` },
+    });
+    if (row.shipmentId) {
+      await this.prisma.shipment.update({ where: { id: row.shipmentId }, data: {
+        codReconciliationStatus: reconciliationStatus,
+        codReconciliationIssue: issues.join(", "),
+        codReconciliationAmount: totalReconcileAmount,
+      } as any });
+    }
+    await this.recalculateBatchTotals(row.batchId);
+    return { ok: true, rowId, codAmount, serviceFee, totalReconcileAmount,
+      reconciliationStatus, issueTypes: issues, systemCodAmount };
   }
 
   async saveBatch(batchId: string, body: any = {}) {
@@ -1619,7 +1666,7 @@ export class GhnCodReconciliationService {
         redeliveryFee: findParent(["phi giao lai"]),
         insuranceFee: findParent(["phi khai gia"]),
         returnFee: findParent(["phi hoan hang"]),
-        serviceFee: findParent(["phi dich vu"]),
+        serviceFee: normalizedParent.reduce((last, cell, i) => cell.includes("phi dich vu") ? i : last, -1),
         totalReconcileAmount: findParent(["tong doi soat"]),
       };
 
@@ -1654,16 +1701,16 @@ export class GhnCodReconciliationService {
         createdDate: 6,
         deliveredDate: 7,
         ghnStatus: 8,
-        codAmount: 9,
-        failedDeliveryAmount: 10,
-        prepaidAmount: 11,
-        promotionAmount: 12,
-        shippingFee: 13,
-        redeliveryFee: 14,
-        insuranceFee: 15,
-        returnFee: 16,
-        serviceFee: 17,
-        totalReconcileAmount: 18,
+        codAmount: 10,
+        failedDeliveryAmount: 11,
+        prepaidAmount: 12,
+        promotionAmount: 13,
+        shippingFee: 14,
+        redeliveryFee: 15,
+        insuranceFee: 16,
+        returnFee: 17,
+        serviceFee: 20,
+        totalReconcileAmount: 21,
       },
     };
   }
@@ -1689,6 +1736,7 @@ export class GhnCodReconciliationService {
       deliveredDate: cleanText(value("deliveredDate")),
       ghnStatus: cleanText(value("ghnStatus")),
       codAmount: toMoneyNumber(value("codAmount")),
+      partnerCodPresent: value("codAmount") !== "" && value("codAmount") !== null && value("codAmount") !== undefined,
       failedDeliveryAmount: toMoneyNumber(value("failedDeliveryAmount")),
       prepaidAmount: toMoneyNumber(value("prepaidAmount")),
       promotionAmount: toMoneyNumber(value("promotionAmount")),
