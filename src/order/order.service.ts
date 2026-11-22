@@ -3021,6 +3021,62 @@ export class OrderService implements OnModuleInit {
     };
   }
 
+  // Phiếu RTN được liên kết theo ID đơn gốc, không phụ thuộc mã _PR có nằm cùng trang hay không.
+  // Chỉ enrich dữ liệu hiển thị, không tác động sổ tiền hoặc trạng thái đơn.
+  private async attachReturnAndPartialBadgesToList<T extends any>(orders: T[]): Promise<T[]> {
+    if (!orders.length) return orders;
+    const ids = orders.map((order: any) => String(order.id)).filter(Boolean);
+    try {
+      const [tickets, partialRecords] = await Promise.all([
+        this.prisma.returnExchange.findMany({
+          where: { originalOrderId: { in: ids }, status: { not: "CANCELLED" } },
+          select: {
+            id: true, code: true, originalOrderId: true, status: true,
+            note: true, createdAt: true,
+            items: { select: { itemType: true, productName: true, sku: true, qty: true } },
+          },
+          orderBy: { createdAt: "desc" },
+        }),
+        this.prisma.partialDeliveryRecord.findMany({
+          where: { orderId: { in: ids } },
+          select: { orderId: true, code: true, reason: true, note: true, createdAt: true },
+          orderBy: { createdAt: "desc" },
+        }),
+      ]);
+      const rtnByOrder = new Map<string, any[]>();
+      for (const ticket of tickets) {
+        const key = String(ticket.originalOrderId);
+        const existing = rtnByOrder.get(key) || [];
+        existing.push({
+          code: ticket.code,
+          status: ticket.status,
+          note: ticket.note,
+          items: ticket.items.map((item) => ({
+            type: item.itemType,
+            name: item.productName || item.sku || "Sản phẩm",
+            qty: Number(item.qty || 0),
+          })),
+        });
+        rtnByOrder.set(key, existing);
+      }
+      const pdlByOrder = new Map<string, any[]>();
+      for (const record of partialRecords) {
+        const key = String(record.orderId);
+        const existing = pdlByOrder.get(key) || [];
+        existing.push({ code: record.code, note: record.note || record.reason || null });
+        pdlByOrder.set(key, existing);
+      }
+      return orders.map((order: any) => ({
+        ...order,
+        returnTicketSummaries: rtnByOrder.get(String(order.id)) || [],
+        partialDeliverySummaries: pdlByOrder.get(String(order.id)) || [],
+      }));
+    } catch (error) {
+      console.warn("[ORDER_RETURN_BADGES_SKIP]", error instanceof Error ? error.message : error);
+      return orders;
+    }
+  }
+
   private mapOrderListResponse(order: any) {
     return {
       ...order,
@@ -3559,7 +3615,8 @@ export class OrderService implements OnModuleInit {
     const ordersWithPartialCod = await this.attachPartialDeliveryCodToList(ordersWithAssignedStaff);
     const ordersWithCodReconciliation = await this.attachCodReconciliationFields(ordersWithPartialCod);
     const ordersWithSettlement = await this.attachReturnSettlementToList(ordersWithCodReconciliation);
-    const data = ordersWithSettlement.map((order) => this.mapOrderListResponse(order));
+    const ordersWithBadges = await this.attachReturnAndPartialBadgesToList(ordersWithSettlement);
+    const data = ordersWithBadges.map((order) => this.mapOrderListResponse(order));
 
     return {
       data,

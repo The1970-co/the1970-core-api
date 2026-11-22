@@ -1629,11 +1629,50 @@ export class ReturnsService {
       select: { id: true, orderCode: true, customerName: true, customerPhone: true },
     }) : [];
     const orderById = new Map(originals.map((o) => [o.id, o]));
+
+    // Lấy nguồn tiền thực tế theo từng phiếu và nguồn thanh toán đơn gốc.
+    // Không coi COD chờ thu / khoản chưa thanh toán là tiền đã nhận.
+    const sourceIds = [...new Set(rows.flatMap((row) => [
+      row.refundPaymentSourceId,
+      row.extraChargePaymentSourceId,
+      ...(row.cashVouchers || []).map((voucher) => voucher.paymentSourceId),
+    ]).filter((id): id is string => Boolean(id)))];
+    const [sources, originalPayments] = await Promise.all([
+      sourceIds.length ? this.prisma.paymentSource.findMany({
+        where: { id: { in: sourceIds } },
+        select: { id: true, name: true, code: true },
+      }) : Promise.resolve([]),
+      ids.length ? this.prisma.payment.findMany({
+        where: { orderId: { in: ids }, status: { in: [PaymentStatus.PAID, PaymentStatus.PARTIAL] } },
+        include: { paymentSource: { select: { id: true, name: true, code: true } } },
+      }) : Promise.resolve([]),
+    ]);
+    const sourceById = new Map<string, string>(sources.map((source): [string, string] => [String(source.id), String(source.name || source.code || "Không rõ nguồn")]));
+    const originalPaymentsByOrder = new Map<string, Array<{ sourceName: string; amount: number }>>();
+    for (const payment of originalPayments) {
+      const key = String(payment.orderId);
+      const list = originalPaymentsByOrder.get(key) || [];
+      list.push({
+        sourceName: payment.paymentSource?.name || payment.paymentSource?.code || payment.method || "Không rõ nguồn",
+        amount: this.n(payment.amount),
+      });
+      originalPaymentsByOrder.set(key, list);
+    }
     return {
       data: rows.map((row) => ({
         ...this.map(row),
         createdAtIso: row.createdAt?.toISOString() || null,
         originalOrder: orderById.get(row.originalOrderId) || null,
+        originalPaymentSources: originalPaymentsByOrder.get(row.originalOrderId) || [],
+        returnPaymentSources: (row.cashVouchers || [])
+          .filter((voucher) => String(voucher.status || "").toUpperCase() === "CONFIRMED")
+          .map((voucher) => ({
+            direction: String(voucher.direction || "").toUpperCase(),
+            sourceName: (voucher.paymentSourceId && sourceById.get(voucher.paymentSourceId)) || "Chưa xác định nguồn",
+            amount: this.n(voucher.amount),
+          })),
+        refundPaymentSourceName: row.refundPaymentSourceId ? sourceById.get(row.refundPaymentSourceId) || "Chưa xác định nguồn" : null,
+        extraChargePaymentSourceName: row.extraChargePaymentSourceId ? sourceById.get(row.extraChargePaymentSourceId) || "Chưa xác định nguồn" : null,
       })),
       limit: 500,
     };
