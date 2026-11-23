@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Injectable } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import * as speakeasy from "speakeasy";
 import * as QRCode from "qrcode";
@@ -48,8 +48,71 @@ export class AuthTotpService {
     );
   }
 
+  // Chỉ tài khoản đăng nhập có quyền owner/admin được xem QR đã kích hoạt.
+  private requireAdminRole(jwtUser: any) {
+    const roles = [jwtUser?.role, ...(Array.isArray(jwtUser?.roles) ? jwtUser.roles : [])]
+      .map((role) => String(role || "").trim().toLowerCase());
+    if (!roles.includes("owner") && !roles.includes("admin")) {
+      throw new ForbiddenException("Chỉ Admin/Owner được quản lý Google Authenticator.");
+    }
+  }
+
+  // Lấy đúng bản ghi đang được dùng trong verifyOwnerCode (duyệt COD).
+  // Không tạo hoặc cập nhật secret, do đó điện thoại cũ không bị ảnh hưởng.
+  async getExistingQr(jwtUser: any, code: string) {
+    this.requireAdminRole(jwtUser);
+
+    const token = String(code || "").trim();
+    if (!/^\d{6}$/.test(token)) {
+      throw new BadRequestException("Nhập mã Authenticator 6 số hiện tại để xem QR.");
+    }
+
+    const owner = await this.prisma.adminUser.findFirst({
+      where: {
+        role: { in: ["OWNER", "ADMIN"] },
+        totpEnabled: true,
+        totpSecret: { not: null },
+      },
+      orderBy: { createdAt: "asc" },
+      select: { email: true, totpSecret: true },
+    });
+
+    if (!owner?.totpSecret) {
+      throw new BadRequestException("Không tìm thấy mã Authenticator đang hoạt động để duyệt COD.");
+    }
+
+    const verified = speakeasy.totp.verify({
+      secret: owner.totpSecret,
+      encoding: "base32",
+      token,
+      window: 1,
+    });
+    if (!verified) {
+      throw new BadRequestException("Mã Authenticator không đúng hoặc đã hết hạn. Nhập mã mới nhất.");
+    }
+
+    const label = `The 1970 (${owner.email})`;
+    const otpauthUrl = speakeasy.otpauthURL({
+      secret: owner.totpSecret,
+      label,
+      issuer: "The 1970",
+      encoding: "base32",
+    });
+    const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl);
+    return {
+      ok: true,
+      qrCodeDataUrl,
+      message: "QR hiện tại: quét trên điện thoại mới. Mã trên điện thoại cũ giữ nguyên.",
+    };
+  }
+
   async setup(jwtUser: any) {
+    this.requireAdminRole(jwtUser);
     const admin = await this.resolveAdminFromJwtUser(jwtUser);
+
+    if (admin.totpEnabled || admin.totpSecret) {
+      throw new BadRequestException("Đã có Authenticator. Không thể tạo QR mới vì sẽ làm mất mã cũ.");
+    }
 
     const secret = speakeasy.generateSecret({
       name: `The 1970 (${admin.email})`,
@@ -77,6 +140,7 @@ export class AuthTotpService {
   }
 
   async verifySetup(jwtUser: any, code: string) {
+    this.requireAdminRole(jwtUser);
     const admin = await this.resolveAdminFromJwtUser(jwtUser);
 
     if (!admin.totpSecret) {

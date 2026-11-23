@@ -22,6 +22,11 @@ export class AuthTotpController {
     };
   }
 
+  @Post("existing-qr")
+  async existingQr(@Req() req: any, @Body() body: { code: string }) {
+    return this.authTotpService.getExistingQr(req.user, body?.code);
+  }
+
   @Post("setup")
   async setup(@Req() req: any) {
     return this.authTotpService.setup(req.user);
