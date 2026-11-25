@@ -3021,43 +3021,106 @@ export class OrderService implements OnModuleInit {
     };
   }
 
-  // Phiếu RTN được liên kết theo ID đơn gốc, không phụ thuộc mã _PR có nằm cùng trang hay không.
-  // Chỉ enrich dữ liệu hiển thị, không tác động sổ tiền hoặc trạng thái đơn.
+  // Dòng lịch sử đổi/trả trên danh sách đơn: lần theo exchangeOrderId để thấy cả các lần đổi tiếp.
+  // Chỉ đọc dữ liệu đã lưu, không thay đổi thanh toán, COD hoặc tồn kho.
   private async attachReturnAndPartialBadgesToList<T extends any>(orders: T[]): Promise<T[]> {
     if (!orders.length) return orders;
-    const ids = orders.map((order: any) => String(order.id)).filter(Boolean);
+    const rootIds = orders.map((order: any) => String(order.id)).filter(Boolean);
     try {
-      const [tickets, partialRecords] = await Promise.all([
-        this.prisma.returnExchange.findMany({
-          where: { originalOrderId: { in: ids }, status: { not: "CANCELLED" } },
-          select: {
-            id: true, code: true, originalOrderId: true, status: true,
-            note: true, createdAt: true,
-            items: { select: { itemType: true, productName: true, sku: true, qty: true } },
-          },
-          orderBy: { createdAt: "desc" },
-        }),
+      const [partialRecords, firstTickets] = await Promise.all([
         this.prisma.partialDeliveryRecord.findMany({
-          where: { orderId: { in: ids } },
+          where: { orderId: { in: rootIds } },
           select: { orderId: true, code: true, reason: true, note: true, createdAt: true },
           orderBy: { createdAt: "desc" },
         }),
+        this.prisma.returnExchange.findMany({
+          where: { originalOrderId: { in: rootIds }, status: { not: "CANCELLED" } },
+          select: {
+            id: true, code: true, originalOrderId: true, exchangeOrderId: true,
+            exchangeOrderCode: true, exchangeTrackingCode: true,
+            status: true, note: true, createdAt: true,
+            items: { select: { itemType: true, productName: true, sku: true, qty: true } },
+          },
+          orderBy: { createdAt: "asc" },
+        }),
       ]);
-      const rtnByOrder = new Map<string, any[]>();
-      for (const ticket of tickets) {
-        const key = String(ticket.originalOrderId);
-        const existing = rtnByOrder.get(key) || [];
-        existing.push({
-          code: ticket.code,
-          status: ticket.status,
-          note: ticket.note,
-          items: ticket.items.map((item) => ({
-            type: item.itemType,
-            name: item.productName || item.sku || "Sản phẩm",
-            qty: Number(item.qty || 0),
-          })),
+      const allTickets: any[] = [...firstTickets];
+      const seenTicketIds = new Set(allTickets.map((t) => String(t.id)));
+      const seenOrderIds = new Set(rootIds);
+      let frontier = [...new Set(firstTickets.map(t => String(t.exchangeOrderId || "")).filter(Boolean))];
+      // Giới hạn số cấp/phần tử, tránh lặp vòng hoặc truy vấn lịch sử không giới hạn.
+      for (let depth = 0; depth < 8 && frontier.length && seenOrderIds.size < 1000; depth++) {
+        frontier = frontier.filter(id => !seenOrderIds.has(id)).slice(0, 1000 - seenOrderIds.size);
+        if (!frontier.length) break;
+        frontier.forEach(id => seenOrderIds.add(id));
+        const next = await this.prisma.returnExchange.findMany({
+          where: { originalOrderId: { in: frontier }, status: { not: "CANCELLED" } },
+          select: {
+            id: true, code: true, originalOrderId: true, exchangeOrderId: true,
+            exchangeOrderCode: true, exchangeTrackingCode: true,
+            status: true, note: true, createdAt: true,
+            items: { select: { itemType: true, productName: true, sku: true, qty: true } },
+          },
+          orderBy: { createdAt: "asc" },
         });
-        rtnByOrder.set(key, existing);
+        for (const ticket of next) {
+          if (seenTicketIds.has(String(ticket.id))) continue;
+          seenTicketIds.add(String(ticket.id));
+          allTickets.push(ticket);
+        }
+        frontier = next.map(t => String(t.exchangeOrderId || "")).filter(Boolean);
+      }
+      const exchangeIds = [...new Set(allTickets.map(t => String(t.exchangeOrderId || "")).filter(Boolean))];
+      const exchangeOrders = exchangeIds.length ? await this.prisma.order.findMany({
+        where: { id: { in: exchangeIds } },
+        select: {
+          id: true, orderCode: true, status: true, paymentStatus: true,
+          fulfillmentStatus: true, createdAt: true,
+          shipment: { select: { shippingStatus: true, carrier: true, trackingCode: true } },
+        },
+      }) : [];
+      const orderById = new Map(exchangeOrders.map(o => [String(o.id), o] as const));
+      const ticketsBySource = new Map<string, any[]>();
+      for (const ticket of allTickets) {
+        const sourceId = String(ticket.originalOrderId);
+        const list = ticketsBySource.get(sourceId) || [];
+        list.push(ticket);
+        ticketsBySource.set(sourceId, list);
+      }
+      const rtnByOrder = new Map<string, any[]>();
+      for (const rootId of rootIds) {
+        const history: any[] = [];
+        const visited = new Set<string>();
+        const walk = (sourceId: string, depth: number) => {
+          if (depth > 8 || visited.has(sourceId)) return;
+          visited.add(sourceId);
+          const tickets = (ticketsBySource.get(sourceId) || []).slice().sort(
+            (a, b) => +new Date(a.createdAt) - +new Date(b.createdAt),
+          );
+          for (const ticket of tickets) {
+            const exchange = ticket.exchangeOrderId ? orderById.get(String(ticket.exchangeOrderId)) : null;
+            history.push({
+              id: ticket.id, code: ticket.code, originalOrderId: sourceId,
+              status: ticket.status, note: ticket.note,
+              createdAt: ticket.createdAt, depth,
+              exchangeOrderId: ticket.exchangeOrderId || null,
+              exchangeOrderCode: exchange?.orderCode || ticket.exchangeOrderCode || null,
+              exchangeStatus: exchange?.status || null,
+              exchangePaymentStatus: exchange?.paymentStatus || null,
+              exchangeFulfillmentStatus: exchange?.fulfillmentStatus || null,
+              exchangeShippingStatus: exchange?.shipment?.shippingStatus || null,
+              exchangeCarrier: exchange?.shipment?.carrier || null,
+              exchangeTrackingCode: exchange?.shipment?.trackingCode || ticket.exchangeTrackingCode || null,
+              items: ticket.items.map((item) => ({
+                type: item.itemType, name: item.productName || item.sku || "Sản phẩm",
+                sku: item.sku, qty: Number(item.qty || 0),
+              })),
+            });
+            if (ticket.exchangeOrderId) walk(String(ticket.exchangeOrderId), depth + 1);
+          }
+        };
+        walk(rootId, 0);
+        rtnByOrder.set(rootId, history);
       }
       const pdlByOrder = new Map<string, any[]>();
       for (const record of partialRecords) {
@@ -3072,7 +3135,7 @@ export class OrderService implements OnModuleInit {
         partialDeliverySummaries: pdlByOrder.get(String(order.id)) || [],
       }));
     } catch (error) {
-      console.warn("[ORDER_RETURN_BADGES_SKIP]", error instanceof Error ? error.message : error);
+      console.warn("[ORDER_RETURN_TIMELINE_SKIP]", error instanceof Error ? error.message : error);
       return orders;
     }
   }

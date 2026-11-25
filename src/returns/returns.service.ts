@@ -169,6 +169,67 @@ export class ReturnsService {
     };
   }
 
+  /** Resolve saved return/exchange SKUs to their actual color and size.
+   * ReturnExchangeItem stores variantId/SKU, not color/size columns.
+   * Resolve in batches, without changing orders, money, or inventory.
+   */
+  private async withItemAttributes<T extends { items?: any[] }>(records: T[]): Promise<T[]> {
+    const allItems = records.flatMap((record) => record.items || []);
+    if (!allItems.length) return records;
+
+    const variantIds = [...new Set(allItems.map((item) => String(item.variantId || '').trim()).filter(Boolean))];
+    const skus = [...new Set(allItems.map((item) => String(item.sku || '').trim()).filter(Boolean))];
+    const orderItemIds = [...new Set(allItems.map((item) => String(item.orderItemId || '').trim()).filter(Boolean))];
+
+    // Return rows from old exchanges sometimes lack variantId. The original
+    // order item is a trustworthy fallback, never guess a size from product name.
+    const [variants, orderItems] = await Promise.all([
+      variantIds.length || skus.length
+        ? this.prisma.productVariant.findMany({
+            where: { OR: [
+              ...(variantIds.length ? [{ id: { in: variantIds } }] : []),
+              ...(skus.length ? [{ sku: { in: skus } }] : []),
+            ] },
+            select: { id: true, sku: true, color: true, size: true },
+          })
+        : Promise.resolve([]),
+      orderItemIds.length
+        ? this.prisma.orderItem.findMany({
+            where: { id: { in: orderItemIds } },
+            select: { id: true, variantId: true, sku: true, color: true, size: true },
+          })
+        : Promise.resolve([]),
+    ]);
+
+    // Specify tuple entries: without this, TypeScript infers any[][] rather than [key, value][].
+    type VariantRow = (typeof variants)[number];
+    type OrderItemRow = (typeof orderItems)[number];
+    const variantById = new Map<string, VariantRow>(
+      variants.map((item): [string, VariantRow] => [String(item.id), item]),
+    );
+    const variantBySku = new Map<string, VariantRow>(
+      variants.map((item): [string, VariantRow] => [String(item.sku || '').trim().toUpperCase(), item]),
+    );
+    const orderItemById = new Map<string, OrderItemRow>(
+      orderItems.map((item): [string, OrderItemRow] => [String(item.id), item]),
+    );
+
+    return records.map((record) => ({
+      ...record,
+      items: (record.items || []).map((item: any) => {
+        const original = orderItemById.get(String(item.orderItemId || ''));
+        const matched = variantById.get(String(item.variantId || '')) ||
+          variantById.get(String(original?.variantId || '')) ||
+          variantBySku.get(String(item.sku || original?.sku || '').trim().toUpperCase());
+        return {
+          ...item,
+          color: String(matched?.color || original?.color || '').trim() || null,
+          size: String(matched?.size || original?.size || '').trim() || null,
+        };
+      }),
+    }));
+  }
+
   private async validateReturnQuantity(
     originalOrderId: string,
     returnItems: any[],
@@ -1623,6 +1684,7 @@ export class ReturnsService {
       take: 500,
       include: { items: true, cashVouchers: true },
     });
+    const enrichedRows = await this.withItemAttributes(rows);
     const ids = [...new Set(rows.map((r) => r.originalOrderId))];
     const originals = ids.length ? await this.prisma.order.findMany({
       where: { id: { in: ids } },
@@ -1659,7 +1721,7 @@ export class ReturnsService {
       originalPaymentsByOrder.set(key, list);
     }
     return {
-      data: rows.map((row) => ({
+      data: enrichedRows.map((row) => ({
         ...this.map(row),
         createdAtIso: row.createdAt?.toISOString() || null,
         originalOrder: orderById.get(row.originalOrderId) || null,
@@ -1708,17 +1770,18 @@ export class ReturnsService {
 
     const rows = await this.prisma.returnExchange.findMany({
       where: {
-        originalOrderId: { in: candidateOriginalOrderIds },
-        ...(this.isOwner(user) || !userBranchId
-          ? {}
-          : {
-            OR: [
-              { originalBranchId: userBranchId },
-              { handledAtBranchId: userBranchId },
-              { returnReceiveBranchId: userBranchId },
-              { exchangeIssueBranchId: userBranchId },
-            ],
-          }),
+        AND: [
+          { OR: [
+            { originalOrderId: { in: candidateOriginalOrderIds } },
+            ...(order?.id ? [{ exchangeOrderId: order.id }] : []),
+          ] },
+          ...(this.isOwner(user) || !userBranchId ? [] : [{ OR: [
+            { originalBranchId: userBranchId },
+            { handledAtBranchId: userBranchId },
+            { returnReceiveBranchId: userBranchId },
+            { exchangeIssueBranchId: userBranchId },
+          ] }]),
+        ],
       },
       orderBy: { createdAt: "desc" },
       take: 50,
@@ -1728,16 +1791,28 @@ export class ReturnsService {
       },
     });
 
+    const enrichedRows = await this.withItemAttributes(rows);
+    const sourceKeys = [...new Set(rows.map(row => String(row.originalOrderId || "")).filter(Boolean))];
+    const sourceOrders = sourceKeys.length ? await this.prisma.order.findMany({
+      where: { OR: [{ id: { in: sourceKeys } }, { orderCode: { in: sourceKeys } }] },
+      select: { id: true, orderCode: true, customerName: true, customerPhone: true },
+    }) : [];
+    const sourceByKey = new Map<string, (typeof sourceOrders)[number]>();
+    for (const source of sourceOrders) {
+      sourceByKey.set(source.id, source);
+      sourceByKey.set(source.orderCode, source);
+    }
     return {
-      data: rows.map((row) => ({
-        ...this.map(row),
-        originalOrderCode:
-          (row as any).originalOrder?.orderCode || order?.orderCode || null,
-        originalOrderCustomerName:
-          (row as any).originalOrder?.customerName || null,
-        originalOrderCustomerPhone:
-          (row as any).originalOrder?.customerPhone || null,
-      })),
+      data: enrichedRows.map((row) => {
+        const source = sourceByKey.get(String(row.originalOrderId || ""));
+        return {
+          ...this.map(row),
+          originalOrderId: source?.id || row.originalOrderId,
+          originalOrderCode: source?.orderCode || null,
+          originalOrderCustomerName: source?.customerName || null,
+          originalOrderCustomerPhone: source?.customerPhone || null,
+        };
+      }),
     };
   }
 
@@ -1769,7 +1844,8 @@ export class ReturnsService {
       }
     }
 
-    return this.map(row);
+    const [enriched] = await this.withItemAttributes([row]);
+    return this.map(enriched);
   }
 
   async getReturnDetail(idOrCode: string, user?: any) {
@@ -1825,7 +1901,8 @@ export class ReturnsService {
       },
     });
 
-    const mapped = this.map(row);
+    const [enriched] = await this.withItemAttributes([row]);
+    const mapped = this.map(enriched);
 
     return {
       ...mapped,
