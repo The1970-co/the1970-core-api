@@ -1031,6 +1031,33 @@ export class PurchaseReceiptsService {
     return this.hydrateReceiptCosts(updated);
   }
 
+  async deleteDraft(id: string, user?: any) {
+    if (!this.isOwner(user)) {
+      throw new ForbiddenException("Chỉ Admin/Owner được xóa vĩnh viễn phiếu nhập.");
+    }
+    return this.prisma.$transaction(async (tx) => {
+      const receipt = await tx.purchaseReceipt.findUnique({
+        where: { id }, include: { purchaseReceiptPayments: true },
+      });
+      if (!receipt) throw new NotFoundException("Không tìm thấy phiếu nhập");
+      this.ensureBranchAccess(user, receipt.branchId);
+      if (receipt.status !== PurchaseReceiptStatus.DRAFT && receipt.status !== PurchaseReceiptStatus.CANCELLED) {
+        throw new BadRequestException("Chỉ xóa được phiếu nháp hoặc phiếu đã hủy.");
+      }
+      if (receipt.confirmedAt) throw new BadRequestException("Phiếu đã nhập kho không được xóa.");
+      if (receipt.purchaseReceiptPayments.length > 0) {
+        throw new BadRequestException("Phiếu đã có giao dịch thanh toán, không được xóa.");
+      }
+      const movementCount = await tx.inventoryMovement.count({
+        where: { refType: "PURCHASE_RECEIPT", refId: id },
+      });
+      if (movementCount) throw new BadRequestException("Phiếu đã phát sinh biến động kho, không được xóa.");
+      await tx.purchaseReceiptItem.deleteMany({ where: { receiptId: id } });
+      await tx.purchaseReceipt.delete({ where: { id } });
+      return { deleted: true, id };
+    });
+  }
+
   async cancel(id: string, user?: any) {
     const receipt = await this.prisma.purchaseReceipt.findUnique({
       where: { id },
@@ -1045,9 +1072,11 @@ export class PurchaseReceiptsService {
 
     this.ensureBranchAccess(user, receipt.branchId);
 
-    if (receipt.status !== PurchaseReceiptStatus.DRAFT) {
-      throw new BadRequestException("Chỉ hủy được phiếu đang nháp/chưa nhập kho");
+    if (receipt.status !== PurchaseReceiptStatus.DRAFT && receipt.status !== PurchaseReceiptStatus.PAYMENT_REQUESTED) {
+      throw new BadRequestException("Chỉ hủy được phiếu nháp hoặc phiếu chờ thanh toán chưa nhập kho");
     }
+
+    if (receipt.confirmedAt) throw new BadRequestException("Phiếu đã nhập kho, không thể hủy trực tiếp.");
 
     if (this.getPaidTotal(receipt) > 0) {
       throw new BadRequestException("Phiếu đã thanh toán, cần xử lý hoàn tiền trước khi hủy");

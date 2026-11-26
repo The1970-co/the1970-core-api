@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from "@nestjs/common";
 import { JwtGuard } from "../auth/jwt.guard";
 import { PermissionGuard } from "../auth/guards/permission.guard";
 import { RequirePermissions } from "../auth/decorators/require-permissions.decorator";
@@ -19,6 +19,12 @@ export class PurchaseReceiptsController {
   @RequirePermissions("purchase_receipt.view")
   getById(@Param("id") id: string, @Req() req: any) {
     return this.purchaseReceiptsService.getById(id, req.user);
+  }
+
+  @Delete(":id")
+  @RequirePermissions("purchase_receipt.cancel")
+  deleteDraft(@Param("id") id: string, @Req() req: any) {
+    return this.purchaseReceiptsService.deleteDraft(id, req.user);
   }
 
   @Post()

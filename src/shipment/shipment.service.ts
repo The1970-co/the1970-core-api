@@ -2177,9 +2177,12 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
             where: { id: lockedShipment.id },
             data: { metadata: lockedNextMetadata as any },
           }),
+          // Không ghi "RETURNED" vào FulfillmentStatus: trạng thái nhận hoàn là
+          // nghiệp vụ kho, được lưu trong shipment.metadata.returnReceiveStatus.
+          // Cập nhật updatedAt để refresh báo cáo nhưng không thay enum fulfillment.
           tx.order.update({
             where: { id: orderWithItems.id },
-            data: { fulfillmentStatus: "RETURNED" as any },
+            data: { updatedAt: receivedAt },
           }),
         ]);
 

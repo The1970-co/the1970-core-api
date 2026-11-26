@@ -3045,6 +3045,8 @@ export class OrderService implements OnModuleInit {
           carrier: true,
           trackingCode: true,
           shippingStatus: true,
+          partnerStatus: true,
+          metadata: true,
           codAmount: true,
           shippingFee: true,
         },
@@ -3497,7 +3499,34 @@ export class OrderService implements OnModuleInit {
     const branchIds = split(params.branchIds);
     if (branchIds.length) parts.push({ branchId: { in: branchIds } });
     const orderStatuses = split(params.orderStatuses);
-    if (orderStatuses.length) parts.push({ status: { in: orderStatuses as OrderStatus[] } });
+    if (orderStatuses.length) {
+      // Trạng thái hoàn là trạng thái vận hành của shipment, không thuộc enum OrderStatus.
+      // Lọc ngay trong database trước skip/take để phân trang chính xác.
+      const received: Prisma.OrderWhereInput = {
+        shipment: { is: { metadata: { path: ["returnReceiveStatus"], equals: "RECEIVED" } } },
+      };
+      const returningCodes = ["WAITING_TO_RETURN", "RETURN_TRANSPORTING", "RETURN_SORTING", "RETURNING", "RETURN"];
+      const returnedCodes = ["RETURNED", "RETURNED_TO_CLIENT"];
+      const returned: Prisma.OrderWhereInput = {
+        AND: [
+          { shipment: { is: { shippingStatus: { in: returnedCodes } } } },
+          { NOT: received },
+        ],
+      };
+      const returning: Prisma.OrderWhereInput = {
+        AND: [
+          { shipment: { is: { shippingStatus: { in: returningCodes } } } },
+          { NOT: received },
+        ],
+      };
+      const choices: Prisma.OrderWhereInput[] = [];
+      const normal = orderStatuses.filter(s => !["RETURNING_ORDER", "RETURNED_ORDER", "RETURN_RECEIVED_ORDER"].includes(s));
+      if (normal.length) choices.push({ status: { in: normal as OrderStatus[] } });
+      if (orderStatuses.includes("RETURNING_ORDER")) choices.push(returning);
+      if (orderStatuses.includes("RETURNED_ORDER")) choices.push(returned);
+      if (orderStatuses.includes("RETURN_RECEIVED_ORDER")) choices.push(received);
+      if (choices.length) parts.push({ OR: choices });
+    }
     const paymentSourceIds = split(params.paymentSourceIds);
     if (paymentSourceIds.length) parts.push({ payments: { some: { paymentSourceId: { in: paymentSourceIds } } } });
     const paymentStatuses = split(params.paymentStatuses);
@@ -3578,8 +3607,9 @@ export class OrderService implements OnModuleInit {
           case "Đang hoàn hàng": choices.push(matchShipment(["RETURN_TRANSPORTING", "RETURN_SORTING", "RETURNING", "RETURN"])); break;
           case "Hoàn hàng thất bại": choices.push(matchShipment(["RETURN_FAILED", "RETURN_FAIL"])); break;
           case "GHN đã hoàn về shop":
-          case "Đã hoàn hàng": choices.push(matchShipment(["RETURNED", "RETURNED_TO_CLIENT"])); break;
-          case "Đã nhận hàng hoàn": choices.push({ shipment: { is: { metadata: { path: ["returnReceiveStatus"], string_contains: "RECEIVED" } } } }); break;
+          case "Đã hoàn hàng": choices.push({ AND: [matchShipment(["RETURNED", "RETURNED_TO_CLIENT"]),
+            { NOT: { shipment: { is: { metadata: { path: ["returnReceiveStatus"], equals: "RECEIVED" } } } } }] }); break;
+          case "Đã nhận hàng hoàn": choices.push({ shipment: { is: { metadata: { path: ["returnReceiveStatus"], equals: "RECEIVED" } } } }); break;
           case "Đã huỷ vận đơn": choices.push(matchShipment(["CANCEL", "CANCELLED"])); break;
           case "Có sự cố": choices.push(matchShipment(["FAILED", "DELIVERY_FAILED", "RETURN_FAILED", "EXCEPTION", "LOST", "DAMAGE"])); break;
           default: choices.push({ shipment: { is: { shippingStatus: { equals: label, mode: "insensitive" } } } });
@@ -4546,6 +4576,22 @@ export class OrderService implements OnModuleInit {
 
         const currentStatus = order.status;
         const nextStatus = status;
+
+        if (nextStatus === OrderStatus.CANCELLED && currentStatus !== OrderStatus.CANCELLED) {
+          // Không cho phép hủy nội bộ sau xuất kho: giữ nguyên sổ kho, COD và vận đơn.
+          const hasStockOut = await tx.inventoryMovement.findFirst({
+            where: { refType: "ORDER", refId: order.id, type: InventoryMovementType.SALE },
+            select: { id: true },
+          });
+          const hasCarrierShipment = Boolean(order.shipment?.trackingCode) ||
+            Boolean(order.shipment && !["CANCELLED", "CANCEL"].includes(String(order.shipment.shippingStatus || "").toUpperCase()));
+          if (
+            !(currentStatus === OrderStatus.NEW || currentStatus === OrderStatus.APPROVED || currentStatus === OrderStatus.PACKING) ||
+            hasStockOut || hasCarrierShipment
+          ) {
+            throw new BadRequestException("Chỉ hủy được đơn nháp hoặc chưa xuất kho. Đơn đã xuất kho/gửi hãng vận chuyển không được hủy nội bộ; hãy xử lý theo quy trình hoàn hàng.");
+          }
+        }
 
         if (
           currentStatus !== OrderStatus.CANCELLED &&
