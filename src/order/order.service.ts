@@ -2714,18 +2714,24 @@ export class OrderService implements OnModuleInit {
     if (!selected.length) return null;
 
     const trueSql = this.trueCodReconciliationStatusSql("s");
+    // Một phiên GHN nhập tay đã xác nhận có thể không ghi được trạng thái lên Shipment.
+    const confirmedInHistorySql = `EXISTS (
+      SELECT 1 FROM "GhnCodReconciliationRow" g
+      WHERE UPPER(COALESCE(g."actionStatus", '')) IN ('CONFIRMED', 'PAID')
+        AND (g."orderId" = o."id" OR g."orderCode" = o."orderCode" OR g."customerOrderCode" = o."orderCode")
+    )`;
     const conditions: string[] = [];
 
     for (const item of selected) {
       if (item === "RECONCILED") {
-        conditions.push(`(${trueSql})`);
+        conditions.push(`((${trueSql}) OR ${confirmedInHistorySql})`);
         continue;
       }
 
       if (item === "NOT_RECONCILED") {
         // MATCHED/MATCHED_BY_PARTIAL_DELIVERY chỉ là trạng thái khớp nháp khi chạy đối soát,
         // chưa phải trạng thái đã chốt. Vì vậy chỉ loại các trạng thái thật sự đã xác nhận/thanh toán.
-        conditions.push(`NOT (${trueSql})`);
+        conditions.push(`(NOT (${trueSql}) AND NOT ${confirmedInHistorySql})`);
         continue;
       }
 
@@ -2831,6 +2837,36 @@ export class OrderService implements OnModuleInit {
     if (!ids.length) return orders;
 
     try {
+      // Phiên nhập tay có thể lưu mã đơn nhưng thiếu shipmentId/orderId.
+      // Đọc các dòng đã xác nhận theo lô, chỉ để hiển thị; không ghi Payment/Shipment.
+      const orderIds = orders.map((order: any) => String(order?.id || "")).filter(Boolean);
+      const orderCodes = orders.map((order: any) => String(order?.orderCode || "")).filter(Boolean);
+      const confirmedRows: any[] = await (this.prisma as any).ghnCodReconciliationRow.findMany({
+        where: {
+          actionStatus: { in: ["CONFIRMED", "PAID"] },
+          OR: [
+            { orderId: { in: orderIds } },
+            { orderCode: { in: orderCodes } },
+            { customerOrderCode: { in: orderCodes } },
+          ],
+        },
+        select: {
+          id: true, orderId: true, orderCode: true, customerOrderCode: true,
+          actionStatus: true, confirmedAt: true, paidAt: true,
+          batchId: true, codAmount: true, issues: true, createdAt: true,
+        },
+        orderBy: { createdAt: "desc" },
+      }).catch((error: any) => {
+        console.warn("[ORDERS_GHN_CONFIRMED_ROWS_SKIP]", error instanceof Error ? error.message : error);
+        return [];
+      });
+      const confirmedByOrder = new Map<string, any>();
+      for (const row of confirmedRows) {
+        for (const key of [row.orderId, row.orderCode, row.customerOrderCode]) {
+          if (key && !confirmedByOrder.has(String(key))) confirmedByOrder.set(String(key), row);
+        }
+      }
+
       const rows = await this.prisma.$queryRawUnsafe<
         Array<{
           orderId: string;
@@ -2855,37 +2891,51 @@ export class OrderService implements OnModuleInit {
           WHERE "orderId" IN (${ids.map((id) => `'${id}'`).join(",")})
         `,
       );
-
-      const map = new Map(rows.map((row) => [String(row.orderId), row]));
+      const byShipment = new Map(rows.map((row) => [String(row.orderId), row]));
 
       return orders.map((order: any) => {
-        const row = map.get(String(order.id));
-        if (!row) return order;
+        const stored = byShipment.get(String(order.id));
+        const confirmed = confirmedByOrder.get(String(order.id)) || confirmedByOrder.get(String(order.orderCode));
+        const storedStatus = String(stored?.codReconciliationStatus || "").toUpperCase();
+        const alreadyFinal = ["PAID", "CONFIRMED", "RECONCILED", "COD_RECONCILED", "COD_RECONCILIATION_PAID", "USER_CONFIRMED"].includes(storedStatus);
+        const useConfirmedFallback = Boolean(confirmed) && !alreadyFinal;
+        if (!stored && !useConfirmedFallback) return order;
 
+        const status = useConfirmedFallback ? String(confirmed.actionStatus) : stored?.codReconciliationStatus || null;
+        const recordedAmount = useConfirmedFallback
+          ? Number(confirmed.codAmount || 0)
+          : this.toNumber(stored?.codReconciliationAmount);
         const carrier = String(order?.shipment?.carrier || "").toUpperCase();
-        const storedReconciliationAmount = this.toNumber(row.codReconciliationAmount);
-        const reconciliationAmount = carrier.includes("AHAMOVE")
+        const amount = !useConfirmedFallback && carrier.includes("AHAMOVE")
           ? this.getShopActualReceived(order)
-          : storedReconciliationAmount;
+          : recordedAmount;
+        const reconciledAt = useConfirmedFallback
+          ? confirmed.confirmedAt || confirmed.paidAt || null
+          : stored?.codReconciledAt || null;
+        const batchId = useConfirmedFallback ? confirmed.batchId : stored?.codReconciliationBatchId || null;
+        const rowId = useConfirmedFallback ? confirmed.id : stored?.codReconciliationRowId || null;
+        const issues = useConfirmedFallback
+          ? (Array.isArray(confirmed.issues) ? confirmed.issues.join(", ") : String(confirmed.issues || ""))
+          : stored?.codReconciliationIssue || null;
 
         return {
           ...order,
           shopActualReceived: this.getShopActualReceived(order),
-          shipmentCodReconciliationStatus: row.codReconciliationStatus || null,
-          shipmentCodReconciledAt: row.codReconciledAt || null,
-          shipmentCodReconciliationBatchId: row.codReconciliationBatchId || null,
-          shipmentCodReconciliationRowId: row.codReconciliationRowId || null,
-          shipmentCodReconciliationIssue: row.codReconciliationIssue || null,
-          shipmentCodReconciliationAmount: reconciliationAmount,
+          shipmentCodReconciliationStatus: status,
+          shipmentCodReconciledAt: reconciledAt,
+          shipmentCodReconciliationBatchId: batchId,
+          shipmentCodReconciliationRowId: rowId,
+          shipmentCodReconciliationIssue: issues,
+          shipmentCodReconciliationAmount: amount,
           shipment: order.shipment
             ? {
                 ...order.shipment,
-                codReconciliationStatus: row.codReconciliationStatus || null,
-                codReconciledAt: row.codReconciledAt || null,
-                codReconciliationBatchId: row.codReconciliationBatchId || null,
-                codReconciliationRowId: row.codReconciliationRowId || null,
-                codReconciliationIssue: row.codReconciliationIssue || null,
-                codReconciliationAmount: reconciliationAmount,
+                codReconciliationStatus: status,
+                codReconciledAt: reconciledAt,
+                codReconciliationBatchId: batchId,
+                codReconciliationRowId: rowId,
+                codReconciliationIssue: issues,
+                codReconciliationAmount: amount,
               }
             : order.shipment,
         };

@@ -165,14 +165,73 @@ export class GhnCodReconciliationService {
       orderBy: { createdAt: "asc" },
     });
 
-    const shipmentIds = Array.from(new Set(rows.map((row: any) => row.shipmentId).filter(Boolean)));
-    const shipments = shipmentIds.length
-      ? await this.prisma.shipment.findMany({ where: { id: { in: shipmentIds as string[] } }, select: { id: true, codAmount: true } })
-      : [];
-    const systemCodByShipment = new Map(shipments.map((shipment) => [shipment.id, Number(shipment.codAmount || 0)]));
+    // Một số phiên nhập tay lưu được orderCode nhưng thiếu orderId/shipmentId.
+    // Tra bằng mã đơn CHÍNH XÁC (Order.orderCode là unique), không dùng contains/endsWith.
+    const shipmentIds: string[] = Array.from(new Set<string>(rows.map((row: any) => String(row.shipmentId || "").trim()).filter(Boolean)));
+    const linkedOrderIds: string[] = Array.from(new Set<string>(rows.map((row: any) => String(row.orderId || "").trim()).filter(Boolean)));
+    const orderCodes: string[] = Array.from(new Set<string>(rows.flatMap((row: any) =>
+      [row.orderCode, row.customerOrderCode]
+        .map((value) => String(value || "").trim())
+        .filter((value) => /^ORD-[A-Za-z0-9_-]+$/i.test(value)),
+    )));
+
+    const [linkedOrders, codedOrders] = await Promise.all([
+      linkedOrderIds.length ? this.prisma.order.findMany({ where: { id: { in: linkedOrderIds } } }) : Promise.resolve([]),
+      orderCodes.length ? this.prisma.order.findMany({ where: { orderCode: { in: orderCodes } } }) : Promise.resolve([]),
+    ]);
+    const orders = Array.from(new Map([...linkedOrders, ...codedOrders].map((order) => [order.id, order])).values());
+    const resolvedOrderIds = orders.map((order) => order.id);
+    const [shipments, payments] = await Promise.all([
+      resolvedOrderIds.length || shipmentIds.length
+        ? this.prisma.shipment.findMany({ where: { OR: [
+            ...(resolvedOrderIds.length ? [{ orderId: { in: resolvedOrderIds } }] : []),
+            ...(shipmentIds.length ? [{ id: { in: shipmentIds } }] : []),
+          ] } })
+        : Promise.resolve([]),
+      resolvedOrderIds.length ? this.prisma.payment.findMany({
+        where: { orderId: { in: resolvedOrderIds } },
+        include: { paymentSource: true },
+      }) : Promise.resolve([]),
+    ]);
+
+    const orderById = new Map(orders.map((order) => [order.id, order]));
+    const orderByCode = new Map(orders.map((order) => [order.orderCode, order]));
+    const shipmentById = new Map<string, any>(shipments.map((shipment): [string, any] => [String(shipment.id), shipment]));
+    const shipmentByOrderId = new Map<string, any>(shipments.map((shipment): [string, any] => [String(shipment.orderId), shipment]));
+    const systemCodByShipment = new Map<string, number>(shipments.map((shipment): [string, number] => [String(shipment.id), Number(shipment.codAmount || 0)]));
+    const recordedNonCodByOrder = new Map<string, number>();
+    for (const payment of payments) {
+      if (!["PAID", "PARTIAL"].includes(String(payment.status || "").toUpperCase())) continue;
+      const method = [payment.method, payment.paymentSource?.name, payment.paymentSource?.code, payment.paymentSource?.type]
+        .map((v) => String(v || "").toUpperCase()).join(" ");
+      if (method.includes("COD")) continue;
+      const key = String(payment.orderId || "");
+      recordedNonCodByOrder.set(key, (recordedNonCodByOrder.get(key) || 0) + Number(payment.amount || 0));
+    }
+
     return {
       batch: this.buildHistoryBatchSummary(batch, rows),
-      rows: rows.map((row: any) => this.mapHistoryRow(row, systemCodByShipment)),
+      rows: rows.map((row: any) => {
+        const order = orderById.get(String(row.orderId || ""))
+          || orderByCode.get(String(row.orderCode || "").trim())
+          || orderByCode.get(String(row.customerOrderCode || "").trim());
+        const shipment = shipmentById.get(String(row.shipmentId || ""))
+          || (order ? shipmentByOrderId.get(order.id) : undefined);
+        const orderTotal = order ? Number(order.finalAmount || 0) : null;
+        const recordedPrepayment = order ? (recordedNonCodByOrder.get(order.id) || 0) : null;
+        return {
+          ...this.mapHistoryRow(row, systemCodByShipment),
+          orderId: order?.id || row.orderId || null,
+          systemCodAmount: shipment ? Number(shipment.codAmount || 0) : null,
+          systemShippingFee: shipment ? Number(shipment.shippingFee || 0) : null,
+          customerShippingFee: order ? Number(order.shippingFee || 0) : null,
+          orderTotal,
+          orderPaymentStatus: order?.paymentStatus || null,
+          recordedPrepayment,
+          outstandingAmount: orderTotal !== null && recordedPrepayment !== null
+            ? Math.max(0, orderTotal - recordedPrepayment) : null,
+        };
+      }),
     };
   }
 
@@ -776,9 +835,12 @@ export class GhnCodReconciliationService {
         const codAmount = entered?.cod ?? 0;
         const serviceFee = entered?.fee ?? systemShippingFee;
         const totalReconcileAmount = codAmount - serviceFee;
-        if (!entered) {
+        // Đơn không thu hộ (COD hệ thống = 0): 0 là giá trị hợp lệ,
+        // không cần nhập lại COD đối tác chỉ để xác nhận giao dịch trả trước.
+        // Riêng COD hệ thống > 0 vẫn bắt buộc có số đối tác thực tế.
+        if (!entered && systemCodAmount > 0) {
           issueTypes.push("MISSING_PARTNER_COD");
-        } else if (finalOrder && codAmount !== systemCodAmount) {
+        } else if (entered && finalOrder && codAmount !== systemCodAmount) {
           if (partialRecord && Number(partialRecord.adjustedCod || 0) === codAmount) {
             issueTypes.push("MATCHED_BY_PARTIAL_DELIVERY");
           } else {
@@ -1057,9 +1119,44 @@ export class GhnCodReconciliationService {
       throw new BadRequestException("Không có dòng đối soát để xác nhận.");
     }
 
-    if (rows.some((row: any) => this.rowIssues(row).includes("MISSING_PARTNER_COD"))) {
-      throw new BadRequestException("Có đơn chưa nhập COD GHN thực tế. Không thể xác nhận thanh toán bằng COD mặc định của hệ thống.");
+    // Phiên cũ có thể còn gắn cờ thiếu COD dù vận đơn thực tế không thu hộ.
+    const unresolvedCodRows = rows.filter((row: any) => this.rowIssues(row).includes("MISSING_PARTNER_COD"));
+    if (unresolvedCodRows.length) {
+      const shipmentIds: string[] = Array.from(new Set<string>(unresolvedCodRows.map((row: any) => String(row.shipmentId || "")).filter(Boolean)));
+      const shipments = shipmentIds.length
+        ? await this.prisma.shipment.findMany({ where: { id: { in: shipmentIds } }, select: { id: true, codAmount: true } })
+        : [];
+      const amounts = new Map(shipments.map((item) => [item.id, Number(item.codAmount || 0)]));
+      if (unresolvedCodRows.some((row: any) => !row.shipmentId || !amounts.has(row.shipmentId) || Number(amounts.get(row.shipmentId)) !== 0)) {
+        throw new BadRequestException("Có đơn chưa nhập COD GHN thực tế. Không thể xác nhận bằng số COD mặc định.");
+      }
     }
+
+    // Phiên nhập tay có thể lưu mã đơn mà thiếu orderId/shipmentId.
+    // Định danh lại theo mã đơn CHÍNH XÁC trước khi chốt, không tạo vận đơn giả.
+    const pendingCodes: string[] = Array.from(new Set<string>(rows.flatMap((row: any) => [row.orderCode, row.customerOrderCode]
+      .map((v: unknown) => String(v || "").trim()).filter((v: string) => /^ORD-[a-z0-9_-]+$/i.test(v)))));
+    const resolvedOrders = pendingCodes.length ? await this.prisma.order.findMany({
+      where: { orderCode: { in: pendingCodes } }, select: { id: true, orderCode: true },
+    }) : [];
+    const orderByCode = new Map(resolvedOrders.map((o) => [o.orderCode, o.id]));
+    const effectiveOrderIds: string[] = Array.from(new Set<string>(rows.map((row: any) => String(row.orderId || orderByCode.get(String(row.orderCode || "")) || orderByCode.get(String(row.customerOrderCode || "")) || "")).filter((value: string) => Boolean(value))));
+    const resolvedShipments = effectiveOrderIds.length ? await this.prisma.shipment.findMany({
+      where: { orderId: { in: effectiveOrderIds } }, select: { id: true, orderId: true, carrier: true },
+    }) : [];
+    const shipmentByOrderId = new Map(resolvedShipments.map((s) => [s.orderId, s]));
+    const effectiveRows = rows.map((row: any) => {
+      const orderId = String(row.orderId || orderByCode.get(String(row.orderCode || "")) || orderByCode.get(String(row.customerOrderCode || "")) || "");
+      const shipment = shipmentByOrderId.get(orderId);
+      // Chỉ liên kết vận đơn GHN; đơn không có vận đơn vẫn được lưu trạng thái phiên.
+      return { ...row, orderId: orderId || null,
+        shipmentId: row.shipmentId || (shipment && String(shipment.carrier || "").toUpperCase().includes("GHN") ? shipment.id : null) };
+    });
+    // Gắn lại khóa để sau này quản lý từ trang đơn hàng không bị mất trạng thái.
+    await Promise.all(effectiveRows.filter((row: any) => row.orderId && (!rows.find((r: any) => r.id === row.id)?.orderId || (!rows.find((r: any) => r.id === row.id)?.shipmentId && row.shipmentId)))
+      .map((row: any) => (this.prisma as any).ghnCodReconciliationRow.update({
+        where: { id: row.id }, data: { orderId: row.orderId, ...(row.shipmentId ? { shipmentId: row.shipmentId } : {}) },
+      })));
 
     const now = new Date();
     const actorId = this.getActorId(body);
@@ -1078,7 +1175,7 @@ export class GhnCodReconciliationService {
     });
 
     await Promise.all(
-      rows
+      effectiveRows
         .filter((row: any) => row.shipmentId)
         .map((row: any) =>
           this.prisma.shipment.update({
@@ -1099,7 +1196,7 @@ export class GhnCodReconciliationService {
     // không còn là "Chờ đối soát COD" trên danh sách đơn. Vì vậy cập nhật
     // trạng thái thanh toán đơn + ghi nhận payment COD_GHN ngay ở bước xác nhận.
     await Promise.all(
-      rows
+      effectiveRows
         .filter((row: any) => row.orderId)
         .map((row: any) =>
           this.syncOrderCodPaymentAfterReconciliation(
@@ -1250,8 +1347,15 @@ export class GhnCodReconciliationService {
         id: true,
         batchId: true,
         shipmentId: true,
+        actionStatus: true,
+        confirmedAt: true,
+        paidAt: true,
       },
     });
+
+    if (rows.some((row: any) => row.confirmedAt || row.paidAt || ["CONFIRMED", "PAID"].includes(String(row.actionStatus || "").toUpperCase()))) {
+      throw new BadRequestException("Không được xóa dòng đối soát đã xác nhận hoặc đã thanh toán.");
+    }
 
     if (!rows.length) {
       throw new BadRequestException("Không tìm thấy dòng đối soát cần xóa.");
@@ -1366,20 +1470,17 @@ export class GhnCodReconciliationService {
 
     if (!orderId) return;
 
-    const paymentAmount = Number(row?.codAmount || row?.systemCodAmount || 0);
+    const paymentAmount = Number(row?.codAmount ?? 0);
     const transactionRef = `COD_GHN_RECONCILIATION:${row.id}`;
     const legacyTransactionRef = `GHN_COD_RECONCILIATION:${row.id}`;
 
-    await (this.prisma as any).order
-      .update({
-        where: { id: orderId },
-        data: {
-          paymentStatus: "PAID",
-        },
-      })
-      .catch(() => null);
-
+    // COD = 0 không phải bằng chứng đã nhận tiền chuyển khoản.
+    // Xác nhận đối soát COD không tự đánh dấu PAID cho đơn đã trả trước.
     if (paymentAmount <= 0) return;
+
+    // COD > 0: ghi nhận thanh toán COD; trạng thái thanh toán cuối cùng
+    // cần được đối chiếu với tổng nghĩa vụ thanh toán của đơn.
+
 
     const existedPayment = await (this.prisma as any).payment
       .findFirst({

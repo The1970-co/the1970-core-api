@@ -1,5 +1,6 @@
 import {
   Body,
+  ForbiddenException,
   Controller,
   Get,
   Param,
@@ -20,54 +21,74 @@ import { GhnCodReconciliationService } from "./ghn-cod-reconciliation.service";
 export class GhnCodReconciliationController {
   constructor(private readonly service: GhnCodReconciliationService) {}
 
+  private requireAdmin(user: any) {
+    const roles = [user?.role, user?.userRole, user?.primaryRole,
+      ...(Array.isArray(user?.roles) ? user.roles : [])]
+      .map((role) => String(role || "").toLowerCase());
+    if (!roles.some((role) => role === "owner" || role === "admin")) {
+      throw new ForbiddenException("Chỉ Admin/Owner được truy cập đối soát COD GHN.");
+    }
+  }
+
+
   @Post("upload")
   @UseInterceptors(FileInterceptor("file"))
   upload(@UploadedFile() file: Express.Multer.File, @Body() body: any, @Req() req: any) {
+    this.requireAdmin(req.user);
     return this.service.parseExcel(file, this.withActor(body, req));
   }
 
   @Post("manual")
   manual(@Body() body: any, @Req() req: any) {
+    this.requireAdmin(req.user);
     return this.service.parseManual(this.withActor(body, req));
   }
 
   @Patch("rows/:rowId/partner-cod")
-  updatePartnerCod(@Param("rowId") rowId: string, @Body() body: any) {
+  updatePartnerCod(@Param("rowId") rowId: string, @Body() body: any, @Req() req: any) {
+    this.requireAdmin(req.user);
     return this.service.updatePartnerCod(rowId, body);
   }
 
   @Post("rows/delete")
-  deleteRows(@Body() body: any) {
+  deleteRows(@Body() body: any, @Req() req: any) {
+    this.requireAdmin(req.user);
     return this.service.deleteRows(body?.rowIds || [], body?.batchId);
   }
 
   @Get("history")
-  history(@Query() query: any) {
+  history(@Query() query: any, @Req() req: any) {
+    this.requireAdmin(req.user);
     return this.service.listHistory(query);
   }
 
   @Get("history/:batchId")
-  historyDetail(@Param("batchId") batchId: string) {
+  historyDetail(@Param("batchId") batchId: string, @Req() req: any) {
+    this.requireAdmin(req.user);
     return this.service.getHistoryBatch(batchId);
   }
 
   @Post(":batchId/save")
   save(@Param("batchId") batchId: string, @Body() body: any, @Req() req: any) {
+    this.requireAdmin(req.user);
     return this.service.saveBatch(batchId, this.withActor(body, req));
   }
 
   @Post(":batchId/confirm")
   confirm(@Param("batchId") batchId: string, @Body() body: any, @Req() req: any) {
+    this.requireAdmin(req.user);
     return this.service.confirmBatch(batchId, this.withActor(body, req));
   }
 
   @Post(":batchId/payment")
   payment(@Param("batchId") batchId: string, @Body() body: any, @Req() req: any) {
+    this.requireAdmin(req.user);
     return this.service.markBatchPaid(batchId, this.withActor(body, req));
   }
 
   @Post(":batchId/delete")
-  deleteBatch(@Param("batchId") batchId: string) {
+  deleteBatch(@Param("batchId") batchId: string, @Req() req: any) {
+    this.requireAdmin(req.user);
     return this.service.deleteBatch(batchId);
   }
 

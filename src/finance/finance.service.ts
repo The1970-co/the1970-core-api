@@ -1117,8 +1117,8 @@ export class FinanceService {
 
     this.ensureBranchScope(user, current.branchId);
 
-    if (String(current.status || "").toUpperCase() === "PAID") {
-      throw new BadRequestException("Phiếu đã thanh toán thì không huỷ được.");
+    if (String(current.status || "").toUpperCase() !== "DRAFT") {
+      throw new BadRequestException("Chỉ bỏ đơn khỏi phiếu nháp. Phiếu đã xác nhận/thanh toán phải xử lý bằng nghiệp vụ điều chỉnh.");
     }
 
     const rows = await this.prisma.$queryRawUnsafe<any[]>(
@@ -1155,6 +1155,7 @@ export class FinanceService {
       note?: string;
       paidById?: string;
       paidByName?: string;
+      verifiedPrepaid?: boolean;
     },
     user?: any
   ) {
@@ -1219,7 +1220,20 @@ export class FinanceService {
     }
 
     const totalPaid = paymentRows.reduce((sum, row) => sum + row.amount, 0);
-    const targetAmount = this.toNumber(current.codAmount || order.finalAmount || 0);
+    const targetAmount = this.toNumber(current.codAmount ?? 0);
+    const alreadyPaid = (order.payments || [])
+      .filter((payment) => payment.status === PaymentStatus.PAID || payment.status === PaymentStatus.PARTIAL)
+      .reduce((sum, payment) => sum + this.toNumber(payment.amount), 0);
+    // COD = 0 does NOT mean the bank transfer was verified by admin.
+    if (targetAmount === 0 && this.toNumber(order.finalAmount) > 0) {
+      if (alreadyPaid + 0.01 < this.toNumber(order.finalAmount)) {
+        throw new BadRequestException("COD bằng 0 nhưng hệ thống chưa ghi nhận đủ tiền hàng. Kiểm tra khoản thanh toán gốc.");
+      }
+      if (body.verifiedPrepaid !== true) {
+        throw new BadRequestException("Admin phải đối chiếu giao dịch thực nhận và đánh dấu Đã kiểm tra khoản thanh toán trước.");
+      }
+    }
+
 
     if (Math.abs(totalPaid - targetAmount) > 0.01) {
       throw new BadRequestException(
@@ -1406,6 +1420,13 @@ export class FinanceService {
             ...row,
             paymentSourceName: sourceMap.get(row.paymentSourceId)?.name || "",
           })),
+          prepaidVerification: targetAmount === 0 ? {
+            verified: body.verifiedPrepaid === true,
+            verifiedAmount: alreadyPaid,
+            verifiedById: actorId,
+            verifiedByName: actorName,
+            verifiedAt: now.toISOString(),
+          } : null,
           shippingFeeSettlement: {
             payer: shippingFeePayer,
             amount: shippingFeeAmount,
@@ -1592,8 +1613,8 @@ export class FinanceService {
         const pendingCodAmount = payments
           .filter((payment) => payment.status === PaymentStatus.PENDING_COD)
           .reduce((sum, payment) => sum + this.toNumber(payment.amount), 0);
-        const codAmount = this.toNumber(shipment.codAmount || order?.finalAmount || 0);
-        const shippingFee = this.toNumber(shipment.shippingFee || order?.shippingFee || 0);
+        const codAmount = this.toNumber(shipment.codAmount ?? 0);
+        const shippingFee = this.toNumber(shipment.shippingFee ?? order?.shippingFee ?? 0);
 
         return {
           orderId: order.id,
@@ -1618,6 +1639,10 @@ export class FinanceService {
           codAmount,
           shippingFee,
           finalAmount: this.toNumber(order.finalAmount),
+          goodsAmount: this.toNumber((order as any).totalAmount ?? order.finalAmount),
+          discountAmount: this.toNumber((order as any).discountAmount),
+          shippingFeeCustomer: this.toNumber(order.shippingFee ?? 0),
+          shopReceiveAfterShipping: this.toNumber(order.finalAmount) - shippingFee,
           paidAmount,
           pendingCodAmount,
           needCollectAmount: Math.max(0, this.toNumber(order.finalAmount) - paidAmount),
