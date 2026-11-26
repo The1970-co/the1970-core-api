@@ -3812,7 +3812,16 @@ export class OrderService implements OnModuleInit {
         OR: [{ id: idOrCode }, { orderCode: idOrCode }],
       },
       include: {
-        items: true,
+        items: {
+          include: {
+            variant: {
+              select: {
+                imageUrl: true,
+                product: { select: { imageUrl: true } },
+              },
+            },
+          },
+        },
         shipment: true,
         partialDeliveries: {
           orderBy: { createdAt: "desc" },
@@ -3875,6 +3884,31 @@ export class OrderService implements OnModuleInit {
     }
 
     const [orderWithAssignedStaff] = await this.attachAssignedStaffFields([order]);
+
+    // Đơn cũ có thể thiếu variantId nhưng vẫn lưu SKU chính xác.
+    // Tìm bằng SKU chỉ khi thiếu ảnh, không đoán theo tên/màu.
+    const missingImageSkus = [...new Set(
+      (orderWithAssignedStaff.items || [])
+        .filter((item: any) => !item.variant?.imageUrl && !item.variant?.product?.imageUrl)
+        .map((item: any) => String(item.sku || "").trim())
+        .filter(Boolean),
+    )];
+    const skuImageMap = new Map<string, string>();
+    if (missingImageSkus.length) {
+      const catalogVariants = await this.prisma.productVariant.findMany({
+        where: { sku: { in: missingImageSkus } },
+        select: {
+          sku: true,
+          imageUrl: true,
+          product: { select: { imageUrl: true } },
+        },
+      });
+      for (const variant of catalogVariants) {
+        const imageUrl = variant.imageUrl || variant.product?.imageUrl;
+        if (imageUrl) skuImageMap.set(variant.sku, imageUrl);
+      }
+    }
+
     const partialDeliveries = await this.attachPartialReturnContext(
       Array.isArray(orderWithAssignedStaff.partialDeliveries)
         ? orderWithAssignedStaff.partialDeliveries
@@ -3911,6 +3945,11 @@ export class OrderService implements OnModuleInit {
     return {
       ...this.mapOrderResponse({
         ...orderWithAssignedStaff,
+        items: (orderWithAssignedStaff.items || []).map((item: any) => ({
+          ...item,
+          imageUrl: item.variant?.imageUrl || item.variant?.product?.imageUrl ||
+            skuImageMap.get(String(item.sku || "").trim()) || null,
+        })),
         partialDeliveries,
       }),
       settlementPreview,
