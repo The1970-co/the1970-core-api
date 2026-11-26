@@ -516,132 +516,25 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
 
   private mapShippingStatus(input?: string | null) {
     const value = this.normalizeCarrierStatusText(input);
-
     if (!value) return "NOT_CREATED";
 
-    // Các trạng thái lỗi phải đứng trước "thanh cong" để tránh
-    // "giao khong thanh cong" bị nhận nhầm là DELIVERED.
-    if (
-      value.includes("khong thanh cong") ||
-      value.includes("that bai") ||
-      value.includes("giao that bai") ||
-      value.includes("delivery fail") ||
-      value.includes("delivery failed") ||
-      value.includes("khong lien lac duoc") ||
-      value.includes("khong nghe may") ||
-      value.includes("chan so") ||
-      value.includes("tu choi nhan") ||
-      value.includes("doi y khong mua") ||
-      value.includes("fail") ||
-      value.includes("exception") ||
-      value.includes("lost") ||
-      value.includes("damage")
-    ) {
-      return "FAILED";
-    }
+    // GHN return codes MUST precede generic fail, cancel, transit and delivery.
+    // Preserve each return stage to allow daily operational filters.
+    if (/\breturn fail\b|\breturn failed\b|hoan (hang )?that bai|hoan khong thanh cong/.test(value)) return "RETURN_FAILED";
+    if (/\breturned\b|return completed|return success|da hoan (hang)?|hoan (hang )?thanh cong|hoan tat chuyen hoan/.test(value)) return "RETURNED";
+    if (/waiting to return|waiting return|waiting_to_return|cho (chuyen )?hoan|cho tra hang/.test(value)) return "WAITING_TO_RETURN";
+    if (/return transporting|return_transporting|dang trung chuyen hoan|van chuyen hoan|trung chuyen hang hoan/.test(value)) return "RETURN_TRANSPORTING";
+    if (/return sorting|return_sorting|phan loai hang hoan|phan loai hoan/.test(value)) return "RETURN_SORTING";
+    if (/\breturning\b|dang hoan|dang chuyen hoan|hoan ve|\breturn\b|tra hang|chuyen hoan|hoan hang/.test(value)) return "RETURNING";
 
-    // GHN trả "returned"/"đã hoàn hàng" nghĩa là hãng đã kết thúc chiều hoàn.
-    // Không được map nhầm sang DELIVERED chỉ vì có chữ "thành công".
-    if (
-      value.includes("da hoan hang") ||
-      value.includes("don hang da hoan") ||
-      value.includes("da hoan") ||
-      value.includes("hoan hang thanh cong") ||
-      value.includes("hoan thanh cong") ||
-      value.includes("return success") ||
-      value.includes("return successful") ||
-      value.includes("return completed") ||
-      value === "returned" ||
-      value.includes(" returned")
-    ) {
-      return "RETURNED";
-    }
-
-    // Final states must be checked before generic words like "deliver".
-    // GHN may return Vietnamese labels such as "Giao hàng thành công".
-    if (
-      value.includes("giao hang thanh cong") ||
-      value.includes("phat thanh cong") ||
-      value.includes("da giao hang") ||
-      value.includes("da giao") ||
-      value.includes("thanh cong") ||
-      value.includes("delivered") ||
-      value.includes("delivery success") ||
-      value.includes("delivery successful") ||
-      value.includes("completed") ||
-      value.includes("complete") ||
-      value.includes("success")
-    ) {
-      return "DELIVERED";
-    }
-
-    if (
-      value.includes("huy") ||
-      value.includes("cancel")
-    ) {
-      return "CANCELLED";
-    }
-
-    if (
-      value.includes("chuyen hoan") ||
-      value.includes("cho hoan") ||
-      value.includes("dang hoan") ||
-      value.includes("hoan hang") ||
-      value.includes("hang hoan") ||
-      value.includes("tra hang") ||
-      value.includes("waiting to return") ||
-      value.includes("waiting return") ||
-      value.includes("return")
-    ) {
-      return "RETURNING";
-    }
-
-    if (
-      value.includes("dang giao") ||
-      value.includes("dang phat") ||
-      value.includes("ready to deliver") ||
-      value.includes("waiting to deliver") ||
-      value.includes("delivering") ||
-      value.includes("delivery") ||
-      value.includes("in process")
-    ) {
-      return "DELIVERING";
-    }
-
-    if (
-      value.includes("lay hang") ||
-      value.includes("picking") ||
-      value.includes("picked") ||
-      value.includes("accepted")
-    ) {
-      return "PICKING";
-    }
-
-    if (
-      value.includes("trung chuyen") ||
-      value.includes("phan loai") ||
-      value.includes("transporting") ||
-      value === "transport" ||
-      value.includes(" transport ") ||
-      value.includes("transit") ||
-      value.includes("sorting") ||
-      value.includes("storing")
-    ) {
-      return "IN_TRANSIT";
-    }
-
-    if (
-      value.includes("tao don") ||
-      value.includes("cho lay") ||
-      value.includes("san sang") ||
-      value.includes("create") ||
-      value.includes("created") ||
-      value.includes("ready") ||
-      value.includes("pending")
-    ) {
-      return "CREATED";
-    }
-
+    if (/delivery fail|delivery failed|delivery_fail|giao (hang )?(that bai|khong thanh cong)|khong lien lac|khong nghe may|tu choi nhan|doi y khong mua/.test(value)) return "DELIVERY_FAILED";
+    if (/lost|damage|exception|that bai|\bfail\b|\bfailed\b/.test(value)) return "FAILED";
+    if (/giao hang thanh cong|phat thanh cong|da giao hang|da giao|\bdelivered\b|delivery success|\bcompleted\b|\bsuccess\b/.test(value)) return "DELIVERED";
+    if (/\bcancel\b|\bcancelled\b|huy van don|da huy don|^huy$/.test(value)) return "CANCELLED";
+    if (/ready to deliver|waiting to deliver|dang giao|dang phat|\bdelivering\b|\bdelivery\b|in process/.test(value)) return "DELIVERING";
+    if (/lay hang|\bpicking\b|\bpicked\b|\baccepted\b/.test(value)) return "PICKING";
+    if (/trung chuyen|phan loai|transporting|\btransport\b|\btransit\b|sorting|storing/.test(value)) return "IN_TRANSIT";
+    if (/tao don|cho lay|san sang|\bcreate\b|\bcreated\b|\bready\b|\bpending\b/.test(value)) return "CREATED";
     return value.toUpperCase().replace(/\s+/g, "_");
   }
 
@@ -767,7 +660,13 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     if (s === "CREATED") return c.includes("AHAMOVE") ? "Đã tạo đơn / đang tìm tài xế" : "Đã tạo vận đơn";
     if (s === "CANCELLED") return "Đã huỷ vận đơn";
     if (s === "FAILED") return "Giao hàng thất bại";
-    if (s === "RETURNING") return "Đang hoàn hàng";
+    if (s === "WAITING_TO_RETURN") return "Chờ xử lý chuyển hoàn";
+    if (s === "RETURN_TRANSPORTING") return "Đang trung chuyển hoàn";
+    if (s === "RETURN_SORTING") return "Đang phân loại hàng hoàn";
+    if (s === "RETURNING") return "Đang hoàn về shop";
+    if (s === "RETURN_FAILED") return "Hoàn hàng thất bại";
+    if (s === "RETURNED") return "GHN đã hoàn về shop";
+    if (s === "DELIVERY_FAILED") return "Giao khách thất bại";
     if (s === "IN_TRANSIT") return "Đang trung chuyển";
 
     return status || "Cập nhật vận chuyển";
@@ -947,7 +846,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       completed: "Giao hàng thành công",
       delivery_fail: "Giao thất bại",
       deliver_fail: "Giao thất bại",
-      waiting_to_return: "Chờ hoàn hàng",
+      waiting_to_return: "Chờ xử lý chuyển hoàn",
       return: "Đang hoàn hàng",
       returning: "Đang hoàn hàng",
       returned: "Đã hoàn hàng",
@@ -1161,7 +1060,9 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       detail = `Đơn hàng chờ lấy${location ? ` tại ${location}` : ""}.`;
     } else if (["delivery_fail", "deliver_fail"].includes(key)) {
       detail = `Đơn hàng giao thất bại${location ? ` tại ${location}` : ""}.`;
-    } else if (["return", "returning", "waiting_to_return", "cho_hoan", "dang_hoan_hang"].includes(key)) {
+    } else if (["waiting_to_return", "cho_hoan"].includes(key)) {
+      detail = "Đơn hàng đang chờ người gửi xác nhận giao lại hoặc quyết định chuyển hoàn.";
+    } else if (["return", "returning", "dang_hoan_hang"].includes(key)) {
       detail = `Đơn hàng đang hoàn${location ? ` tại ${location}` : ""}.`;
     } else if (key === "returned") {
       detail = `Đơn hàng đã hoàn${location ? ` về ${location}` : ""}.`;
@@ -1231,9 +1132,9 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       item,
     });
 
-    const mappedStatus = this.mapShippingStatus(
-      [title, rawTitle, rawStatus, description].filter(Boolean).join(" | ")
-    );
+    // Only a carrier status/code can determine state. Descriptions may mention
+    // old delivery/return attempts and must never override the event status.
+    const mappedStatus = this.mapShippingStatus(rawStatus || rawTitle || "");
 
     return {
       id: `${index}-${eventCode || rawStatus || "log"}-${time || "time"}`,
@@ -1296,64 +1197,35 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
   private normalizeTracking(raw: any, shipment: any) {
     const timeline = this.normalizeTimeline(raw, shipment);
 
-    const rawStatusText = [
-      raw?.status_name,
-      raw?.current_status,
-      raw?.status,
-      raw?.status_code,
-      raw?.order_status,
-      raw?.data?.status_name,
-      raw?.data?.current_status,
-      raw?.data?.status,
-    ]
-      .filter(Boolean)
-      .join(" | ");
+    // GHN detail's current machine-readable status is authoritative. Never
+    // concatenate several fields or scan a timeline description to determine
+    // the current status: those fields can contain previous return attempts.
+    const currentCode = this.pickFirstText(raw, [
+      "status", "current_status", "order_status", "status_code", "status_name",
+    ]) || this.pickFirstText(raw?.data, [
+      "status", "current_status", "order_status", "status_code", "status_name",
+    ]);
+    const currentStatus = currentCode ? this.mapShippingStatus(currentCode) : "NOT_CREATED";
 
-    // Chỉ tin timeline mới nhất. Không scan toàn bộ timeline để tìm DELIVERED,
-    // vì log cũ/metadata public GHN có thể chứa chữ "giao thành công" hoặc "huỷ"
-    // trong khi trạng thái hiện tại đang là picking/transporting/delivering.
-    // Giữ nguyên flow cũ, chỉ chặn nhận nhầm trạng thái final từ log cũ.
-    const latestTimelineStatus = [
-      timeline[0]?.title,
-      timeline[0]?.description,
-      timeline[0]?.status,
-      timeline[0]?.rawStatus,
-    ]
-      .filter(Boolean)
-      .join(" | ");
+    // Timeline is a fallback ONLY if detail contains no current status.
+    // Use event status, never description/title assembled from free-form text.
+    const mostRecentEvent = timeline.find((event: any) =>
+      event?.rawStatus && Number.isFinite(Date.parse(String(event.time || event.eventTime || "")))
+    );
+    const timelineStatus = mostRecentEvent
+      ? this.mapShippingStatus(String(mostRecentEvent.rawStatus))
+      : "NOT_CREATED";
+    const storedStatus = this.mapShippingStatus(shipment?.shippingStatus || "");
+    const shippingStatus = currentStatus !== "NOT_CREATED"
+      ? currentStatus
+      : timelineStatus !== "NOT_CREATED"
+        ? timelineStatus
+        : storedStatus;
 
-    const rawShippingStatus = this.mapShippingStatus(rawStatusText);
-    const timelineShippingStatus = this.mapShippingStatus(latestTimelineStatus);
-    const storedShippingStatus = this.mapShippingStatus(shipment?.shippingStatus || "UNKNOWN");
-    const activeStatuses = ["CREATED", "PICKING", "DELIVERING", "IN_TRANSIT"];
-    const finalStatuses = ["DELIVERED", "RETURNING", "RETURNED", "FAILED", "CANCELLED"];
-
-    // Cực quan trọng: GHN public đôi khi có text/metadata cũ chứa chữ huỷ/hoàn thành,
-    // trong khi timeline mới nhất lại đang lấy hàng/trung chuyển/đang giao.
-    // Ưu tiên trạng thái active mới nhất để đơn chỉ là ĐÃ XUẤT KHO, không tự nhảy HOÀN THÀNH.
-    const shippingStatus = activeStatuses.includes(rawShippingStatus)
-      ? rawShippingStatus
-      : activeStatuses.includes(timelineShippingStatus)
-        ? timelineShippingStatus
-        : finalStatuses.includes(rawShippingStatus)
-          ? rawShippingStatus
-          : finalStatuses.includes(timelineShippingStatus)
-            ? timelineShippingStatus
-            : rawShippingStatus !== "NOT_CREATED"
-              ? rawShippingStatus
-              : timelineShippingStatus !== "NOT_CREATED"
-                ? timelineShippingStatus
-                : storedShippingStatus;
-
-    const partnerStatus =
-      raw?.status_name ||
-      raw?.current_status ||
-      raw?.status ||
-      timeline[0]?.title ||
-      timeline[0]?.rawStatus ||
-      timeline[0]?.status ||
+    // Keep the raw GHN status for audit and for future status changes.
+    const partnerStatus = currentCode ||
+      mostRecentEvent?.rawStatus ||
       shipment?.partnerStatus ||
-      shipment?.shippingStatus ||
       "UNKNOWN";
 
     return {
@@ -1784,9 +1656,11 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
 
       const orderForSync = await tx.order.findUnique({
         where: { id: shipment.orderId },
-        select: { paymentStatus: true },
+        select: { paymentStatus: true, status: true },
       });
-      const orderSyncData = this.buildCarrierOrderSyncData(normalized.shippingStatus, {
+      const orderSyncData = orderForSync?.status === "CANCELLED"
+        ? {} // GHN tracking is updated; internal cancellation is not reversed.
+        : this.buildCarrierOrderSyncData(normalized.shippingStatus, {
         codAmount: normalized.codAmount ?? shipment.codAmount,
         paymentStatus: orderForSync?.paymentStatus,
         codReconciliationStatus: (shipment as any).codReconciliationStatus,
@@ -1893,6 +1767,16 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
 
     const status = String(shippingStatus || "").toUpperCase();
 
+    if (status === "WAITING_TO_RETURN") {
+      return {
+        ...rawMeta,
+        returnReceiveStatus: previousReturnReceiveStatus === "RECEIVED" ? "RECEIVED" : "PENDING_DECISION",
+        returnReceivedAt: previousReceivedAt,
+        returnReceivedById: previousReceivedById,
+        returnReceivedByName: previousReceivedByName,
+      };
+    }
+
     if (status === "RETURNED") {
       return {
         ...rawMeta,
@@ -1903,7 +1787,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    if (status === "RETURNING") {
+    if (["RETURN_TRANSPORTING", "RETURN_SORTING", "RETURNING", "RETURN_FAILED"].includes(status)) {
       return {
         ...rawMeta,
         returnReceiveStatus: previousReturnReceiveStatus === "RECEIVED" ? "RECEIVED" : "RETURNING",
@@ -1929,11 +1813,14 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         "",
     ).toUpperCase();
 
+    const shippingStatus = String(shipment?.shippingStatus || "").toUpperCase();
+    // Canonical carrier state overrides stale metadata written by an older mapper.
+    if (shippingStatus === "WAITING_TO_RETURN" && status !== "RECEIVED") return "PENDING_DECISION";
     if (status) return status;
 
-    const shippingStatus = String(shipment?.shippingStatus || "").toUpperCase();
     if (shippingStatus === "RETURNED") return "WAITING_CONFIRM";
-    if (shippingStatus === "RETURNING") return "RETURNING";
+    if (shippingStatus === "WAITING_TO_RETURN") return "PENDING_DECISION";
+    if (["RETURN_TRANSPORTING", "RETURN_SORTING", "RETURNING", "RETURN_FAILED"].includes(shippingStatus)) return "RETURNING";
     return "";
   }
 
@@ -1942,6 +1829,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     if (value === "RECEIVED") return "Đã nhận hàng hoàn";
     if (value === "WAITING_CONFIRM") return "Chờ xác nhận hàng hoàn";
     if (value === "RETURNING") return "Đang hoàn hàng";
+    if (value === "PENDING_DECISION") return "Chờ xử lý chuyển hoàn";
     return "";
   }
 
@@ -2382,7 +2270,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     const preferOldest = options?.preferOldest === true;
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-    const shipments = await this.prisma.shipment.findMany({
+    const baseArgs = {
       where: {
         carrier: { contains: "GHN", mode: "insensitive" },
         trackingCode: { not: "" },
@@ -2392,15 +2280,11 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
           : {
               NOT: [
                 { shippingStatus: "DELIVERED" },
-                { shippingStatus: "CANCELLED" },
+                { shippingStatus: "RETURNED" },
               ],
-              order: {
-                createdAt: { gte: since },
-                NOT: [
-                  { status: "COMPLETED" },
-                  { status: "CANCELLED" },
-                ],
-              },
+              // A cancelled internal order can still have a GHN return in transit.
+              // Do not exclude it until the carrier has actually returned the parcel.
+              order: { createdAt: { gte: since } },
             }),
       } as any,
       select: {
@@ -2433,7 +2317,23 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       },
       orderBy: preferOldest ? { updatedAt: "asc" } : { updatedAt: "desc" },
       take: limit,
-    });
+    } as const;
+
+    const priorityStatuses = ["DELIVERY_FAILED", "WAITING_TO_RETURN", "RETURN_TRANSPORTING", "RETURN_SORTING", "RETURNING", "RETURN_FAILED"];
+    // Do not constrain existing return parcels by their original sale date.
+    const { order: _priorityDateWindow, ...priorityWhere } = baseArgs.where;
+    const priorityShipments = await this.prisma.shipment.findMany({
+      ...baseArgs,
+      where: { ...priorityWhere, shippingStatus: { in: priorityStatuses } },
+    } as any);
+    const priorityIds = priorityShipments.map((item: any) => String(item.id));
+    const remaining = Math.max(0, limit - priorityShipments.length);
+    const otherShipments = remaining ? await this.prisma.shipment.findMany({
+      ...baseArgs,
+      where: { ...baseArgs.where, ...(priorityIds.length ? { id: { notIn: priorityIds } } : {}) },
+      take: remaining,
+    } as any) : [];
+    const shipments = [...priorityShipments, ...otherShipments] as any[];
 
     const skippedIgnored = shipments.filter(
       (shipment) => String(shipment.trackingCode || "").trim() && this.isGhnSyncIgnoredShipment(shipment),
@@ -2488,8 +2388,10 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
         const predictedPaymentStatus = String(orderSyncData.paymentStatus || beforePaymentStatus);
         const predictedReturnReceiveStatus = predictedShipmentStatus === "RETURNED"
           ? this.getReturnReceiveStatusFromShipment({ ...shipment, shippingStatus: predictedShipmentStatus }) || "WAITING_CONFIRM"
-          : predictedShipmentStatus === "RETURNING"
+          : ["RETURN_TRANSPORTING", "RETURN_SORTING", "RETURNING", "RETURN_FAILED"].includes(predictedShipmentStatus)
             ? "RETURNING"
+            : predictedShipmentStatus === "WAITING_TO_RETURN"
+              ? "PENDING_DECISION"
             : this.getReturnReceiveStatusFromShipment(shipment);
 
         const canApply = !onlyDelivered || predictedShipmentStatus === "DELIVERED";
@@ -3525,7 +3427,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    if (status === "RETURNING") {
+    if (["WAITING_TO_RETURN", "RETURN_TRANSPORTING", "RETURN_SORTING", "RETURNING", "RETURN_FAILED", "DELIVERY_FAILED"].includes(status)) {
       return this.withPendingCodPayment(
         {
           status: "SHIPPED",

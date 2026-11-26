@@ -3555,24 +3555,33 @@ export class OrderService implements OnModuleInit {
     if (skus.length) parts.push({ items: { some: { OR: skus.map(sku => ({ sku: { equals: sku, mode: "insensitive" } })) } } });
     const statuses = split(params.deliveryStatuses);
     if (statuses.length) {
-      const contains = (values: string[]): Prisma.OrderWhereInput => this.shipmentStatusTextWhere(values);
+      // Match the persisted canonical status first. Partner's free-text or a stale
+      // note must not turn an already returned parcel into "in transit".
+      const matchShipment = (codes: string[]): Prisma.OrderWhereInput => ({
+        shipment: { is: { shippingStatus: { in: codes } } },
+      });
       const choices: Prisma.OrderWhereInput[] = [];
       for (const label of statuses) {
         switch (label) {
-          case "Giao thành công":
-            choices.push({ OR: [
-              { shipment: { is: { shippingStatus: { in: ["DELIVERED", "DELIVERY_SUCCESS", "COMPLETED", "SUCCESS", "delivered", "delivery_success"] } } } },
-              contains(["GIAO THANH CONG", "DELIVERY_SUCCESS", "DELIVERED", "GIAO THÀNH CÔNG"]),
-            ] }); break;
-          case "Chờ lấy hàng": choices.push({ OR: [contains(["READY_TO_PICK", "WAITING_PICK", "CREATED", "PENDING"]), { shipment: { is: { trackingCode: { not: "" }, shippingStatus: "" } } }] }); break;
-          case "Đang lấy hàng": choices.push(contains(["PICKING", "PICKED", "ACCEPTED"])); break;
-          case "Đang giao hàng": choices.push(contains(["IN_TRANSIT", "TRANSPORT", "STORING", "SORTING", "DELIVERING", "IN_PROCESS", "DANG GIAO"])); break;
-          case "Đang tìm tài xế": choices.push(contains(["ASSIGNING", "IDLE"])); break;
-          case "Đang hoàn hàng": choices.push({ AND: [contains(["RETURN", "HOAN HANG", "CHUYEN HOAN"]), { NOT: contains(["RETURNED", "RETURNED_TO_CLIENT"]) }] }); break;
-          case "Đã hoàn hàng": choices.push(contains(["RETURNED", "RETURNED_TO_CLIENT", "DA HOAN"])); break;
-          case "Đã nhận hàng hoàn": choices.push(contains(["RETURNED_TO_CLIENT", "RETURNED"])); break;
-          case "Đã huỷ vận đơn": choices.push(contains(["CANCEL", "HUY VAN DON"])); break;
-          case "Có sự cố": choices.push(contains(["FAILED", "FAIL", "EXCEPTION", "LOST", "DAMAGE", "THAT BAI", "TU CHOI"])); break;
+          case "Giao thành công": choices.push(matchShipment(["DELIVERED", "DELIVERY_SUCCESS", "COMPLETED"])); break;
+          case "Chờ lấy hàng": choices.push(matchShipment(["CREATED", "READY_TO_PICK", "WAITING_PICK", "WAITING_TO_PICK", "PENDING"])); break;
+          case "Đang lấy hàng": choices.push(matchShipment(["PICKING", "PICKED", "ACCEPTED"])); break;
+          case "Đang trung chuyển": choices.push(matchShipment(["IN_TRANSIT", "STORING", "SORTING", "TRANSPORTING"])); break;
+          case "Đang giao hàng": choices.push(matchShipment(["IN_TRANSIT", "STORING", "SORTING", "TRANSPORTING", "DELIVERING", "IN_PROCESS"])); break;
+          case "Đang tìm tài xế": choices.push(matchShipment(["ASSIGNING", "IDLE"])); break;
+          case "Giao khách thất bại": choices.push(matchShipment(["DELIVERY_FAILED", "DELIVERY_FAIL"])); break;
+          case "Chờ chuyển hoàn":
+          case "Chờ xử lý chuyển hoàn": choices.push(matchShipment(["WAITING_TO_RETURN"])); break;
+          case "Đang trung chuyển hoàn": choices.push(matchShipment(["RETURN_TRANSPORTING"])); break;
+          case "Đang phân loại hàng hoàn": choices.push(matchShipment(["RETURN_SORTING"])); break;
+          case "Đang hoàn về shop": choices.push(matchShipment(["RETURNING", "RETURN"])); break;
+          case "Đang hoàn hàng": choices.push(matchShipment(["RETURN_TRANSPORTING", "RETURN_SORTING", "RETURNING", "RETURN"])); break;
+          case "Hoàn hàng thất bại": choices.push(matchShipment(["RETURN_FAILED", "RETURN_FAIL"])); break;
+          case "GHN đã hoàn về shop":
+          case "Đã hoàn hàng": choices.push(matchShipment(["RETURNED", "RETURNED_TO_CLIENT"])); break;
+          case "Đã nhận hàng hoàn": choices.push({ shipment: { is: { metadata: { path: ["returnReceiveStatus"], string_contains: "RECEIVED" } } } }); break;
+          case "Đã huỷ vận đơn": choices.push(matchShipment(["CANCEL", "CANCELLED"])); break;
+          case "Có sự cố": choices.push(matchShipment(["FAILED", "DELIVERY_FAILED", "RETURN_FAILED", "EXCEPTION", "LOST", "DAMAGE"])); break;
           default: choices.push({ shipment: { is: { shippingStatus: { equals: label, mode: "insensitive" } } } });
         }
       }
