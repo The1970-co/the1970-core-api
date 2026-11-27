@@ -220,6 +220,11 @@ export class ShipmentController {
   }
 
 
+  @Post(":orderId/delivery/confirm-manual")
+  confirmManualDelivery(@Param("orderId") orderId: string, @Req() req: any) {
+    return this.shipmentService.confirmManualDeliveryByOrderId(orderId, req.user);
+  }
+
   @Post(":orderId/return/confirm-received")
   confirmGhnReturnReceived(
     @Param("orderId") orderId: string,

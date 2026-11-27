@@ -5326,6 +5326,70 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  // Manual delivery confirmation records only carrier delivery, NEVER COD settlement.
+  async confirmManualDeliveryByOrderId(orderId: string, user: any) {
+    const roles = [user?.role, ...(Array.isArray(user?.roles) ? user.roles : [])]
+      .map((value) => String(value || "").toLowerCase());
+    if (!roles.some((role) => role === "admin" || role === "owner")) {
+      throw new BadRequestException("Chỉ Admin/Owner được xác nhận giao thành công thủ công.");
+    }
+    const actorName = this.getShipmentActorName(user);
+    return this.prisma.$transaction(async (tx) => {
+      const order = await tx.order.findFirst({
+        where: { OR: [{ id: orderId }, { orderCode: orderId }] },
+        include: { shipment: true },
+      });
+      if (!order) throw new BadRequestException("Không tìm thấy đơn hàng.");
+      if (String(order.status) === "CANCELLED") throw new BadRequestException("Đơn đã hủy không thể xác nhận giao thành công.");
+      const shipment = order.shipment;
+      if (!shipment?.trackingCode) throw new BadRequestException("Đơn chưa có mã vận đơn để xác nhận giao thành công.");
+      const carrier = String(shipment.carrier || "").toUpperCase();
+      if (!carrier.includes("VIETTEL") && carrier !== "VTP") {
+        throw new BadRequestException("Chức năng xác nhận thủ công hiện chỉ áp dụng cho Viettel Post.");
+      }
+      const current = String(shipment.shippingStatus || "").toUpperCase();
+      if (current === "DELIVERED") return { alreadyConfirmed: true, orderId: order.id, shipmentId: shipment.id };
+      if (["RETURNED", "RETURNING", "RETURN_TRANSPORTING", "RETURN_SORTING", "CANCELLED", "FAILED", "WAITING_TO_RETURN"].includes(current)) {
+        throw new BadRequestException("Vận đơn đang hoàn/hủy/thất bại; không thể xác nhận giao thành công.");
+      }
+      const now = new Date();
+      const metadata = shipment.metadata && typeof shipment.metadata === "object" && !Array.isArray(shipment.metadata)
+        ? shipment.metadata as Record<string, any> : {};
+      await tx.shipment.update({
+        where: { id: shipment.id },
+        data: {
+          shippingStatus: "DELIVERED",
+          metadata: {
+            ...metadata,
+            manualDeliveryConfirmation: {
+              confirmed: true, actorId: String(user?.id || user?.userId || user?.sub || ""),
+              actorName, confirmedAt: now.toISOString(), previousStatus: current,
+            },
+          },
+        },
+      });
+      // Fulfillment phản ánh hàng đã giao, không đồng nghĩa COD đã thu hay đơn đã quyết toán.
+      await tx.order.update({
+        where: { id: order.id },
+        data: { fulfillmentStatus: "FULFILLED" },
+      });
+      await this.appendShipmentTimelineEvent(tx, {
+        shipmentId: shipment.id,
+        orderId: order.id,
+        carrier: shipment.carrier,
+        trackingCode: shipment.trackingCode,
+        status: "DELIVERED",
+        partnerStatus: "MANUAL_CONFIRMED",
+        title: "Giao thành công (xác nhận thủ công)",
+        description: `Người xác nhận: ${actorName}. Chưa xác nhận thu COD hoặc thanh toán.`,
+        source: "manual_delivery_confirmation",
+        eventTime: now,
+      });
+      // Intentionally do not set Order.status=COMPLETED, PaymentStatus=PAID or reconcile COD.
+      return { confirmed: true, orderId: order.id, shipmentId: shipment.id, confirmedAt: now.toISOString() };
+    });
+  }
+
   async trackViettelPostByShipmentId(id: string, source = "manual_refresh") {
     const shipment = await this.prisma.shipment.findUnique({
       where: { id },
@@ -5341,6 +5405,11 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException("Phiếu chưa có mã vận đơn ViettelPost");
     }
 
+    const metadata = shipment.metadata && typeof shipment.metadata === "object" && !Array.isArray(shipment.metadata)
+      ? shipment.metadata as Record<string, any> : {};
+    if (metadata?.manualDeliveryConfirmation?.confirmed === true) {
+      return { source: "manual_delivery_confirmation", shipment, manualConfirmed: true };
+    }
     const raw = await this.viettelPostClient.trackOrder(trackingCode);
     const partnerStatus = this.getViettelPostStatus(raw);
     const reportedStatus = this.mapViettelPostShippingStatus(partnerStatus);
@@ -6630,7 +6699,9 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
 
       // Loại event tổng hợp do refresh/backfill/cron tạo tại thời điểm đồng bộ.
       // Timeline chỉ dùng làm fallback khi đơn không có finish_date từ GHN.
-      return !isSynthetic && (source.includes("carrier") || source.includes("ghn_") || source.includes("webhook"));
+      // Xác nhận thủ công là sự kiện giao hàng thực có người chịu trách nhiệm,
+      // không phải sự kiện đồng bộ lại trạng thái do cron/backfill sinh ra.
+      return !isSynthetic && (source === "manual_delivery_confirmation" || source.includes("carrier") || source.includes("ghn_") || source.includes("webhook"));
     });
 
     const deliveredOrderIds = Array.from(
@@ -6755,6 +6826,15 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
     };
 
     const getDeliveryDebugInfo = (order: any) => {
+      // Nếu đã xác nhận giao hàng bằng tay, ngày doanh thu chính là lúc bấm nút.
+      // Ưu tiên hơn ngày đồng bộ cũ của hãng để không đưa doanh thu về nhầm ngày.
+      const manual = order?.shipment?.metadata?.manualDeliveryConfirmation;
+      if (manual?.confirmed === true && manual?.confirmedAt) {
+        const date = new Date(manual.confirmedAt);
+        if (!Number.isNaN(date.getTime())) {
+          return { deliveryDate: manual.confirmedAt, deliveryDateSource: "manual_delivery_confirmation" };
+        }
+      }
       return (
         getExplicitDeliveryInfo(order) ||
         getTimelineDeliveryInfo(order) ||
@@ -6776,6 +6856,18 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
       orderBy: { createdAt: "desc" },
       take: 8000,
     });
+    // Đơn Viettel Post cũ hơn 90 ngày vẫn phải vào doanh thu hôm nay khi bấm
+    // xác nhận giao thành công. Nạp thêm đúng các đơn có event giao trong kỳ.
+    const loadedIds = new Set(recentOrders.map((item: any) => String(item.id)));
+    const missingIds = deliveredOrderIds.filter((id) => !loadedIds.has(String(id)));
+    if (missingIds.length) {
+      const olderDeliveredOrders = await orderClient.findMany({
+        where: { id: { in: missingIds } },
+        include: orderSelectInclude,
+        take: 10000,
+      });
+      recentOrders.push(...olderDeliveredOrders);
+    }
 
     const successOrders = recentOrders.filter((order: any) => {
       if (isCancelled(order)) return false;
