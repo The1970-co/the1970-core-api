@@ -52,6 +52,7 @@ export const PERMISSIONS = {
   ORDERS_APPROVE: "orders.approve",
   ORDERS_CANCEL: "orders.cancel",
   ORDERS_PACK_SHIP: "orders.pack_ship",
+  ORDERS_MANUAL_DELIVER: "orders.manual_deliver",
   ORDERS_PAY: "orders.pay",
   ORDERS_DELETE: "orders.delete",
   ORDERS_COPY: "orders.copy",

@@ -11,6 +11,8 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import { JwtGuard } from "../auth/jwt.guard";
+import { PermissionGuard } from "../auth/guards/permission.guard";
+import { RequirePermissions } from "../auth/decorators/require-permissions.decorator";
 import { ShipmentService } from "./shipment.service";
 import { QuoteShipmentDto } from "./dto/quote-shipment.dto";
 import { CreateGhnShipmentDto } from "./dto/create-ghn-shipment.dto";
@@ -221,6 +223,8 @@ export class ShipmentController {
 
 
   @Post(":orderId/delivery/confirm-manual")
+  @UseGuards(PermissionGuard)
+  @RequirePermissions("orders.manual_deliver")
   confirmManualDelivery(@Param("orderId") orderId: string, @Req() req: any) {
     return this.shipmentService.confirmManualDeliveryByOrderId(orderId, req.user);
   }

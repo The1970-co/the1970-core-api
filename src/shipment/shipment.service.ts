@@ -5328,11 +5328,7 @@ export class ShipmentService implements OnModuleInit, OnModuleDestroy {
 
   // Manual delivery confirmation records only carrier delivery, NEVER COD settlement.
   async confirmManualDeliveryByOrderId(orderId: string, user: any) {
-    const roles = [user?.role, ...(Array.isArray(user?.roles) ? user.roles : [])]
-      .map((value) => String(value || "").toLowerCase());
-    if (!roles.some((role) => role === "admin" || role === "owner")) {
-      throw new BadRequestException("Chỉ Admin/Owner được xác nhận giao thành công thủ công.");
-    }
+    // Quyền orders.manual_deliver được kiểm tra tại controller bằng PermissionGuard.
     const actorName = this.getShipmentActorName(user);
     return this.prisma.$transaction(async (tx) => {
       const order = await tx.order.findFirst({
