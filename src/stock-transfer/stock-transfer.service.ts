@@ -81,6 +81,22 @@ export class StockTransferService {
     ).trim();
   }
 
+  private getTransferCreatorName(user?: any, requestedName?: string | null) {
+    const actorNames = [
+      user?.staff?.fullName, user?.staff?.name, user?.staffName,
+      user?.employee?.fullName, user?.employee?.name,
+      user?.fullName, user?.displayName, user?.name,
+    ];
+    const isGeneric = (value: string) => /^(admin|admin web|administrator|owner|system|admin system)$/i.test(value.trim());
+    const identified = actorNames.map((value) => String(value || "").trim()).find((value) => value && !isGeneric(value));
+    if (identified) return identified;
+    // Some legacy JWTs contain only a generic role label; use the current-user
+    // display supplied by the authenticated FE only as a clearly marked fallback.
+    const fallback = String(requestedName || "").trim();
+    if (fallback && !isGeneric(fallback)) return fallback;
+    return String(user?.email || "").trim();
+  }
+
   private assertStatusActorScope(
     transfer: { fromBranchId: string; toBranchId: string },
     status: TransferStatus,
@@ -226,8 +242,12 @@ private async nextCode(direction: StockTransferDirection) {
         toBranchId: dto.toBranchId,
         note: dto.note,
         status: TransferStatus.DRAFT,
-        createdById: dto.createdById,
-        createdByName: dto.createdByName,
+        // Manual transfers: persist the authenticated creator, not a generic Admin Web label.
+        // System-generated transfers retain their explicit automated creator.
+        createdById: user ? (this.getActorId(user) || dto.createdById || null) : (dto.createdById || null),
+        createdByName: user
+          ? (this.getTransferCreatorName(user, dto.createdByName) || "Chưa xác định người lập")
+          : (dto.createdByName || "Hệ thống tự động"),
         items: {
           create: dto.items.map((item) => {
             const variant = variantMap.get(item.variantId);
