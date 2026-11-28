@@ -14,6 +14,7 @@ const DEFAULT_SETTINGS = {
   announcementEnabled: true,
   announcementTextVi: "THE 1970 — EST. 2015",
   announcementLink: "",
+  siteBackgroundColor: "#F4EFE7",
   headerLogoUrl: "",
   headerLogoWidth: 118,
   headerLogoAlign: "LEFT",
@@ -59,7 +60,11 @@ export class WebsiteNavigationService {
         ? source.settings
         : {};
 
+    const rawBackground = this.text(settingsSource.siteBackgroundColor);
     const settings = {
+      siteBackgroundColor: /^#[0-9a-f]{6}$/i.test(rawBackground)
+        ? rawBackground.toUpperCase()
+        : DEFAULT_SETTINGS.siteBackgroundColor,
       menuFontFamily:
         settingsSource.menuFontFamily === "SANS" ? "SANS" : "SERIF",
       menuFontSize: this.number(
