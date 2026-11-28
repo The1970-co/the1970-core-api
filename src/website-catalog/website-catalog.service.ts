@@ -27,10 +27,64 @@ export class WebsiteCatalogService {
       .replace(/đ/g, "d")
       .replace(/Đ/g, "D")
       .toLowerCase()
-      .replace(/[^a-z0-9\s-]/g, "")
-      .trim()
-      .replace(/\s+/g, "-")
-      .replace(/-+/g, "-");
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+  }
+
+  private colorKey(color: unknown) {
+    return `color:${this.text(color).normalize("NFC").toLowerCase()}`;
+  }
+
+  private async resolveColor(productId: string, requested: unknown) {
+    const variants = await this.prisma.productVariant.findMany({
+      where: { productId, status: VariantStatus.ACTIVE },
+      select: { color: true },
+    });
+    const colors = new Map(variants.map(v => [this.colorKey(v.color), this.text(v.color)]));
+    const key = typeof requested === "string" && requested.startsWith("color:")
+      ? this.colorKey(requested.slice(6)) : "";
+    if (!key && colors.size === 1 && (requested === undefined || requested === "")) {
+      const only = [...colors.entries()][0];
+      return { key: only[0], label: only[1] };
+    }
+    if (!key || !colors.has(key)) {
+      throw new BadRequestException("Chọn một màu có biến thể đang hoạt động của sản phẩm nội bộ.");
+    }
+    return { key, label: colors.get(key) || "" };
+  }
+
+  private automaticSlug(title: string, label: string, fallback: string) {
+    const base = this.slugify(title) || this.slugify(fallback) || "san-pham";
+    const color = this.slugify(label);
+    return color && base !== color && !base.endsWith(`-${color}`) ? `${base}-${color}` : base;
+  }
+
+  // The unique indexes are the final authority, including concurrent requests.
+  private async withUniqueSlug<T>(base: string, productId: string, colorKey: string,
+    currentId: string | undefined, write: (slug: string) => Promise<T>, locked = false): Promise<T> {
+    for (let n = 1; n <= 100; n++) {
+      const candidate = n === 1 ? base : `${base}-${n}`;
+      try {
+        return await write(candidate);
+      } catch (error) {
+        if ((error as { code?: string })?.code !== "P2002") throw error;
+        const sameColor = await this.prisma.websiteProduct.findUnique({
+          where: { productId_colorKey: { productId, colorKey } }, select: { id: true },
+        });
+        if (sameColor && sameColor.id !== currentId) {
+          throw new BadRequestException("Màu này đã có bài đăng website. Hãy sửa bài hiện có hoặc chọn màu khác.");
+        }
+        const sameSlug = await this.prisma.websiteProduct.findUnique({
+          where: { slug: candidate }, select: { id: true },
+        });
+        if (!sameSlug || sameSlug.id === currentId) {
+          // A concurrent delete may have removed the conflicting row. Do not hide unknown constraints.
+          throw error;
+        }
+        if (locked) throw new BadRequestException("Đường dẫn đã xuất bản không thể thay đổi.");
+      }
+    }
+    throw new BadRequestException("Không tạo được đường dẫn duy nhất. Hãy thử tên đường dẫn khác.");
   }
 
   private status(value: unknown): WebsitePublishStatus {
@@ -46,7 +100,10 @@ export class WebsiteCatalogService {
     return Array.from(
       new Set(
         value
-          .map((item) => this.slugify(item))
+          .map((item) => this.text(item).normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "").replace(/[đĐ]/g, "d")
+            .toLowerCase().replace(/[^a-z0-9\s-]/g, "").trim()
+            .replace(/\s+/g, "-").replace(/-+/g, "-"))
           .filter(Boolean),
       ),
     );
@@ -127,19 +184,18 @@ export class WebsiteCatalogService {
     });
     if (!product) throw new BadRequestException("Sản phẩm master không tồn tại.");
 
-    const existed = await this.prisma.websiteProduct.findUnique({ where: { productId } });
-    if (existed) throw new BadRequestException("Sản phẩm này đã có bài đăng website.");
-
+    const color = await this.resolveColor(productId, body?.colorKey);
+    const colorKey = color.key;
     const titleVi = this.text(body?.titleVi) || product.name;
-    const slug = this.slugify(body?.slug || titleVi || product.slug);
-    if (!slug) throw new BadRequestException("Slug không hợp lệ.");
+    const baseSlug = this.slugify(body?.slug) || this.automaticSlug(titleVi, color.label, product.slug);
 
     const nextStatus = this.status(body?.status);
     const images = this.normalizeImages(body?.images);
 
-    return this.prisma.websiteProduct.create({
+    return this.withUniqueSlug(baseSlug, productId, colorKey, undefined, slug => this.prisma.websiteProduct.create({
       data: {
         productId,
+        colorKey,
         slug,
         status: nextStatus,
         marketVn: body?.marketVn !== false,
@@ -155,7 +211,7 @@ export class WebsiteCatalogService {
         shortDescriptionEn: this.nullable(body?.shortDescriptionEn),
         descriptionVi: this.nullable(body?.descriptionVi),
         descriptionEn: this.nullable(body?.descriptionEn),
-        coverImageUrl: this.nullable(body?.coverImageUrl) || product.imageUrl || images[0]?.url || null,
+        coverImageUrl: this.nullable(body?.coverImageUrl) || images[0]?.url || null,
         seoTitleVi: this.nullable(body?.seoTitleVi),
         seoTitleEn: this.nullable(body?.seoTitleEn),
         seoDescriptionVi: this.nullable(body?.seoDescriptionVi),
@@ -164,7 +220,7 @@ export class WebsiteCatalogService {
         images: images.length ? { create: images } : undefined,
       },
       include: this.include(),
-    });
+    }));
   }
 
   async update(id: string, body: any) {
@@ -175,9 +231,20 @@ export class WebsiteCatalogService {
     const images = this.normalizeImages(body?.images);
     const replaceImages = Array.isArray(body?.images);
     const titleVi = this.text(body?.titleVi) || current.titleVi;
-    const slug = this.slugify(body?.slug || current.slug || titleVi);
+    if (body?.productId !== undefined && this.text(body.productId) !== current.productId) {
+      throw new BadRequestException("Không thể đổi sản phẩm nội bộ của bài đăng đã tạo.");
+    }
+    // Existing listings without a color remain all-color until explicitly assigned.
+    // Do not allow converting a color-specific listing back to all colors.
+    const requestedColor = body?.colorKey;
+    const color = requestedColor === undefined || requestedColor === current.colorKey
+      ? { key: current.colorKey, label: current.colorKey.startsWith("color:") ? current.colorKey.slice(6) : "" }
+      : await this.resolveColor(current.productId, requestedColor);
+    const colorKey = color.key;
+    const locked = !!current.publishedAt || current.status === WebsitePublishStatus.PUBLISHED;
+    const baseSlug = locked && current.slug ? current.slug : this.slugify(body?.slug ?? current.slug) || this.automaticSlug(titleVi, color.label, current.slug);
 
-    return this.prisma.$transaction(async (tx) => {
+    return this.withUniqueSlug(baseSlug, current.productId, colorKey, id, slug => this.prisma.$transaction(async (tx) => {
       if (replaceImages) {
         await tx.websiteProductImage.deleteMany({ where: { websiteProductId: id } });
       }
@@ -186,6 +253,7 @@ export class WebsiteCatalogService {
         where: { id },
         data: {
           slug,
+          colorKey,
           status: nextStatus,
           marketVn: body?.marketVn === undefined ? current.marketVn : body.marketVn === true,
           marketInternational:
@@ -238,7 +306,7 @@ export class WebsiteCatalogService {
           publishedAt:
             nextStatus === WebsitePublishStatus.PUBLISHED
               ? current.publishedAt || new Date()
-              : null,
+              : current.publishedAt,
           ...(replaceImages && images.length
             ? { images: { create: images } }
             : {}),
@@ -249,7 +317,7 @@ export class WebsiteCatalogService {
         where: { id },
         include: this.include(),
       });
-    });
+    }), locked && !!current.slug);
   }
 
   async remove(id: string) {
@@ -287,43 +355,48 @@ export class WebsiteCatalogService {
       },
     });
 
-    return rows.map((row) => ({
-      id: row.id,
-      productId: row.productId,
-      slug: row.slug,
-      name: market === "INTERNATIONAL" ? row.titleEn || row.titleVi : row.titleVi,
-      titleVi: row.titleVi,
-      titleEn: row.titleEn,
-      description:
-        market === "INTERNATIONAL"
-          ? row.descriptionEn || row.descriptionVi
-          : row.descriptionVi,
-      shortDescription:
-        market === "INTERNATIONAL"
-          ? row.shortDescriptionEn || row.shortDescriptionVi
-          : row.shortDescriptionVi,
-      imageUrl: row.coverImageUrl || row.images[0]?.url || row.product.imageUrl,
-      images: row.images.map((x) => ({ url: x.url, altVi: x.altVi, altEn: x.altEn })),
-      category: row.product.categoryRel?.name || row.product.category || null,
-      websiteCategorySlugs: Array.isArray(row.websiteCategorySlugs)
-        ? row.websiteCategorySlugs
-        : [],
-      featured: row.featured,
-      variants: row.product.variants.map((v) => ({
-        id: v.id,
-        sku: v.sku,
-        color: v.color || "",
-        size: v.size || "",
-        price: Number(v.price || 0),
-        compareAtPrice: Number(v.compareAtPrice || 0),
-        imageUrl: v.imageUrl,
-        stock: v.inventoryItems.reduce(
-          (sum, x) =>
-            sum + Math.max(0, Number(x.availableQty || 0) - Number(x.reservedQty || 0)),
-          0,
-        ),
-      })),
-    }));
+    return rows.map((row) => {
+      const variants = row.product.variants.filter(v => !row.colorKey || this.colorKey(v.color) === row.colorKey);
+      const displayColor = this.text(variants[0]?.color);
+      return {
+        id: row.id,
+        productId: row.productId,
+        colorKey: row.colorKey,
+        slug: row.slug,
+        name: market === "INTERNATIONAL" ? row.titleEn || row.titleVi : row.titleVi,
+        titleVi: row.titleVi,
+        titleEn: row.titleEn,
+        description:
+          market === "INTERNATIONAL"
+            ? row.descriptionEn || row.descriptionVi
+            : row.descriptionVi,
+        shortDescription:
+          market === "INTERNATIONAL"
+            ? row.shortDescriptionEn || row.shortDescriptionVi
+            : row.shortDescriptionVi,
+        imageUrl: row.coverImageUrl || row.images[0]?.url || row.product.imageUrl,
+        images: row.images.map((x) => ({ url: x.url, altVi: x.altVi, altEn: x.altEn })),
+        category: row.product.categoryRel?.name || row.product.category || null,
+        websiteCategorySlugs: Array.isArray(row.websiteCategorySlugs)
+          ? row.websiteCategorySlugs
+          : [],
+        featured: row.featured,
+        variants: variants.map((v) => ({
+          id: v.id,
+          sku: v.sku,
+          color: row.colorKey ? displayColor : v.color || "",
+          size: v.size || "",
+          price: Number(v.price || 0),
+          compareAtPrice: Number(v.compareAtPrice || 0),
+          imageUrl: v.imageUrl,
+          stock: v.inventoryItems.reduce(
+            (sum, x) =>
+              sum + Math.max(0, Number(x.availableQty || 0) - Number(x.reservedQty || 0)),
+            0,
+          ),
+        })),
+      };
+    });
   }
 
   async publicGet(slug: string, market: "VN" | "INTERNATIONAL" = "VN") {

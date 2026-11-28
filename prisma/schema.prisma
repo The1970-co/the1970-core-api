@@ -43,7 +43,7 @@ model Product {
   designSamples        DesignSample[]
   fabricReceipts       FabricReceipt[]
   fabricReceiptConfigs FabricReceiptFabricConfig[] @relation("FabricReceiptConfigProduct")
-  websiteListing       WebsiteProduct?
+  websiteListing       WebsiteProduct[]
 
   @@index([categoryId])
 }
@@ -4092,7 +4092,9 @@ enum WebsitePublishStatus {
 
 model WebsiteProduct {
   id                  String               @id @default(cuid())
-  productId           String               @unique
+  productId           String
+  // Empty key = legacy listing (all colors); color:<normalized color> = one color.
+  colorKey            String               @default("")
   slug                String               @unique
   websiteCategorySlugs String[] @default([])
   status              WebsitePublishStatus @default(DRAFT)
@@ -4126,6 +4128,7 @@ model WebsiteProduct {
   @@index([marketVn, status])
   @@index([marketInternational, status])
   @@index([featured, sortOrder])
+  @@unique([productId, colorKey])
 }
 
 model WebsiteProductImage {
